@@ -22,7 +22,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         borderRadius: 8,
         background: '#fff',
         minWidth: 160,
-        boxShadow: selected ? '0 0 0 2px #3b82f6' : '0 1px 3px rgba(0,0,0,0.15)',
+        boxShadow: selected ? '0 0 0 2px var(--brand)' : '0 1px 3px rgba(0,0,0,0.15)',
         fontSize: 12,
       }}
     >

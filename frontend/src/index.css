@@ -1,7 +1,24 @@
 :root {
   color-scheme: light;
-  font: 13px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif;
+  font: 13px/1.4 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
   color: #111827;
+
+  /* Quantology brand (see quantology.nl design system) */
+  --font-heading: 'Fraunces', Georgia, serif;
+  --brand-navy: #0b2340;
+  --brand-charcoal: #20262b;
+  --brand-sand: #f6f1e7;
+  --brand-sand-300: #e8dcc3;
+  --brand-seaglass: #7fa69a;
+  --brand-seaglass-dark: #4f7a6f;
+  --brand-dunegrass: #9c8f5c;
+
+  /* aliases used throughout the app */
+  --brand: var(--brand-seaglass-dark);
+  --brand-dark: var(--brand-navy);
+  --brand-ink: var(--brand-navy);
+  --brand-light: var(--brand-sand);
+  --brand-border: var(--brand-sand-300);
 }
 
 * {
@@ -33,6 +50,20 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+button.brand-primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 5px 14px;
+}
+
+button.brand-primary:hover:not(:disabled) {
+  background: var(--brand-dark);
+  border-color: var(--brand-dark);
 }
 
 textarea {

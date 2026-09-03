@@ -27,7 +27,7 @@ export function LaneBand({ data }: NodeProps<LaneBandNode>) {
       style={{
         width: BAND_WIDTH,
         height,
-        background: data.order % 2 === 0 ? 'rgba(59,130,246,0.04)' : 'rgba(107,114,128,0.04)',
+        background: data.order % 2 === 0 ? 'rgba(127,166,154,0.08)' : 'rgba(107,114,128,0.04)',
         borderTop: '1px solid #e5e7eb',
         borderBottom: '1px solid #e5e7eb',
         boxSizing: 'border-box',
