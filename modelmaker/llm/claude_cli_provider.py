@@ -61,7 +61,7 @@ class ClaudeCliProvider(LLMProvider):
             raise RuntimeError("claude CLI not found on PATH; install Claude Code or choose a different LLM provider")
 
     def draft(self, ctx: DraftContext) -> DraftResult:
-        system = contract_for(ctx.mode) + "\n" + JSON_ONLY_INSTRUCTIONS
+        system = contract_for(ctx.mode, ctx.include_reference) + "\n" + JSON_ONLY_INSTRUCTIONS
         try:
             result = subprocess.run(
                 [

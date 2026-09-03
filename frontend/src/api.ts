@@ -1,4 +1,14 @@
-import type { BlockOut, BlockType, BrowseOut, DraftOut, GraphOut, InputSchemaOut, PreviewOut, RegistryEntry } from './types'
+import type {
+  BlockOut,
+  BlockType,
+  BrowseOut,
+  DraftOut,
+  GraphOut,
+  InputSchemaOut,
+  LlmSettings,
+  PreviewOut,
+  RegistryEntry,
+} from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -96,6 +106,9 @@ export const api = {
   },
 
   llmProviders: () => request<{ providers: string[]; active: string }>('/llm/providers'),
+  llmSettings: () => request<LlmSettings>('/llm/settings'),
+  setLlmSettings: (body: LlmSettings) =>
+    request<LlmSettings>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
   draftBlock: (id: string, instruction: string, provider?: string) =>
     request<DraftOut>(`/blocks/${id}/draft`, { method: 'POST', body: JSON.stringify({ instruction, provider }) }),
   suggestFix: (id: string, instruction?: string, provider?: string) =>

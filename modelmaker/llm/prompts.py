@@ -55,8 +55,51 @@ include the dataframe argument(s) themselves.
 why."""
 
 
-def contract_for(mode: str) -> str:
-    return CONTRACT_PARAMS_ONLY if mode == "params_only" else CONTRACT
+POLARS_REFERENCE = """
+Condensed Polars reference -- consult this instead of relying on possibly \
+stale training knowledge of the API, especially for smaller/local models:
+
+All of `.select()`/`.filter()`/`.with_columns()`/`.group_by().agg()` are \
+expression-based -- write `pl.col("name")`, not `df["name"]`. There is no \
+pandas-style label indexing (`.loc`/`.iloc`/`df["col"] = ...`).
+
+- Select/rename: `df.select(pl.col("a"), pl.col("b").alias("b2"))`
+- Add/replace a column: `df.with_columns((pl.col("a") * 2).alias("a_doubled"))`
+- Filter rows: `df.filter(pl.col("score") > 700)`
+- Conditional column: `df.with_columns(pl.when(pl.col("x") > 0).then(pl.lit("pos")).otherwise(pl.lit("neg")).alias("sign"))`
+- Group + aggregate: `df.group_by("segment").agg(pl.col("amount").sum().alias("total"))`
+- Join: `df.join(other, on="id", how="left")`
+- Sort: `df.sort("date", descending=True)`
+- Cast dtype: `pl.col("x").cast(pl.Float64)`
+- String ops: `pl.col("name").str.to_lowercase()`, `.str.contains("x")`, `.str.replace_all(a, b)`
+- Date ops: `pl.col("d").dt.year()`, `.dt.strftime("%Y-%m")`
+- Null handling: `pl.col("x").fill_null(0)`, `.is_null()`, `.drop_nulls()`
+- Row count / unique: `df.height`, `df.select(pl.col("x").n_unique())`
+
+Common mistakes to avoid:
+- `.alias()` is required to name an expression's output column; without it \
+the output keeps the input expression's original column name.
+- `pl.when/then/otherwise` is the ternary/`np.where` equivalent -- there is \
+no `np.where` and no `.apply(lambda ...)` in idiomatic polars code.
+- Boolean masks combine with `&`/`|` (never `and`/`or`), each operand \
+parenthesized: `df.filter((pl.col("a") > 1) & (pl.col("b") < 5))`.
+
+Worked example -- instruction: "flag rows where income > 50000 as high_income"
+```python
+def bucket_income(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(
+        (pl.col("income") > 50000).alias("high_income")
+    )
+```
+This adds one boolean column, so `metadata_transform` would be \
+`{"kind": "declared", "base": "df", "drops": [], "adds": [{"name": "high_income", "dtype": "Boolean", "role": "feature"}]}`.
+"""
+
+
+def contract_for(mode: str, include_reference: bool = False) -> str:
+    if mode == "params_only":
+        return CONTRACT_PARAMS_ONLY
+    return CONTRACT + ("\n" + POLARS_REFERENCE if include_reference else "")
 
 
 def format_columns(columns: list[ColumnInfo]) -> str:

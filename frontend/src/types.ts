@@ -110,3 +110,9 @@ export interface DraftOut {
   params: Record<string, unknown>
   explanation: string
 }
+
+export interface LlmSettings {
+  provider: string | null
+  model: string | null
+  include_reference: boolean
+}

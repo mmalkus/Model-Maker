@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
-from .prompts import CONTRACT, CONTRACT_PARAMS_ONLY, build_user_prompt
+from .prompts import CONTRACT_PARAMS_ONLY, build_user_prompt, contract_for
 
 DEFAULT_MODEL = "claude-opus-5"
 
@@ -66,7 +66,7 @@ class AnthropicProvider(LLMProvider):
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=4096,
-            system=CONTRACT,
+            system=contract_for(ctx.mode, ctx.include_reference),
             messages=[{"role": "user", "content": build_user_prompt(ctx)}],
             output_format=_BlockDraft,
         )

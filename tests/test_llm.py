@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 import modelmaker.api as api_module
 from modelmaker.llm import ColumnInfo, DraftContext, get_provider
+from modelmaker.llm.prompts import POLARS_REFERENCE, contract_for
 from modelmaker.session import ProjectSession
 
 
@@ -10,6 +11,7 @@ from modelmaker.session import ProjectSession
 def client(monkeypatch):
     monkeypatch.setenv("MODELMAKER_LLM_PROVIDER", "stub")
     api_module.SESSION = ProjectSession()
+    api_module.LLM_SETTINGS = {"provider": None, "model": None, "include_reference": False}
     return TestClient(api_module.app)
 
 
@@ -164,3 +166,47 @@ def test_providers_endpoint_lists_registered_providers(client):
     body = resp.json()
     assert {"stub", "claude_cli"} <= set(body["providers"])
     assert body["active"] == "stub"
+
+
+def test_contract_for_omits_reference_by_default():
+    assert POLARS_REFERENCE not in contract_for("author")
+    assert POLARS_REFERENCE not in contract_for("author", include_reference=False)
+
+
+def test_contract_for_includes_reference_when_requested():
+    assert POLARS_REFERENCE in contract_for("author", include_reference=True)
+
+
+def test_contract_for_params_only_ignores_reference_flag():
+    # params_only mode never writes code, so the reference cheat sheet
+    # wouldn't help -- it should never be appended there.
+    assert POLARS_REFERENCE not in contract_for("params_only", include_reference=True)
+
+
+def test_draft_context_include_reference_defaults_off():
+    ctx = DraftContext(instruction="x", function_name="f", input_ports={})
+    assert ctx.include_reference is False
+
+
+def test_llm_settings_default(client):
+    resp = client.get("/api/llm/settings")
+    assert resp.status_code == 200
+    assert resp.json() == {"provider": None, "model": None, "include_reference": False}
+
+
+def test_llm_settings_put_updates_active_provider(client):
+    resp = client.put("/api/llm/settings", json={"provider": "stub", "model": "some-model", "include_reference": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"provider": "stub", "model": "some-model", "include_reference": True}
+
+    assert client.get("/api/llm/settings").json() == {
+        "provider": "stub",
+        "model": "some-model",
+        "include_reference": True,
+    }
+    assert client.get("/api/llm/providers").json()["active"] == "stub"
+
+
+def test_llm_settings_put_rejects_unknown_provider(client):
+    resp = client.put("/api/llm/settings", json={"provider": "not_a_real_provider"})
+    assert resp.status_code == 400

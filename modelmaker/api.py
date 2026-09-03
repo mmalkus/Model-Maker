@@ -31,6 +31,13 @@ app.add_middleware(
 
 SESSION = ProjectSession()
 
+# In-memory LLM preferences set via the settings panel -- not persisted
+# across server restarts (like SESSION itself, unless explicitly saved).
+# `provider`/`model` of None fall back to get_provider()'s own env-var
+# defaults; `include_reference` defaults off since it costs extra tokens on
+# every draft call and is mainly useful for smaller/local models.
+LLM_SETTINGS: dict[str, Any] = {"provider": None, "model": None, "include_reference": False}
+
 
 # ---- schemas -----------------------------------------------------------
 
@@ -93,6 +100,12 @@ class CompileRequest(BaseModel):
 class DraftRequest(BaseModel):
     instruction: str = ""
     provider: str | None = None
+
+
+class LLMSettingsIn(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    include_reference: bool = False
 
 
 # ---- helpers -------------------------------------------------------------
@@ -502,11 +515,28 @@ def compile_ep(req: CompileRequest) -> dict[str, str]:
 def list_llm_providers() -> dict[str, Any]:
     return {
         "providers": sorted(LLM_PROVIDER_REGISTRY),
-        "active": os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
+        "active": LLM_SETTINGS["provider"] or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
     }
 
 
-def _draft_context_for_block(block, block_id: str, instruction: str, error: str | None = None) -> DraftContext:
+@app.get("/api/llm/settings")
+def get_llm_settings() -> dict[str, Any]:
+    return dict(LLM_SETTINGS)
+
+
+@app.put("/api/llm/settings")
+def put_llm_settings(req: LLMSettingsIn) -> dict[str, Any]:
+    if req.provider is not None and req.provider not in LLM_PROVIDER_REGISTRY:
+        raise HTTPException(400, f"unknown LLM provider {req.provider!r}; available: {sorted(LLM_PROVIDER_REGISTRY)}")
+    LLM_SETTINGS["provider"] = req.provider
+    LLM_SETTINGS["model"] = req.model
+    LLM_SETTINGS["include_reference"] = req.include_reference
+    return dict(LLM_SETTINGS)
+
+
+def _draft_context_for_block(
+    block, block_id: str, instruction: str, error: str | None = None, include_reference: bool = False
+) -> DraftContext:
     """Build the DraftContext for either flavor of block: custom (is_custom)
     blocks get the original "author full code" mode; registry blocks have
     fixed code, so the model can only choose values for their existing
@@ -524,6 +554,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
             param_names=param_names,
             existing_code=block.code,
             error=error,
+            include_reference=include_reference,
         )
 
     spec = BLOCK_REGISTRY.get(block.category)
@@ -541,7 +572,16 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
         fixed_source=fixed_source,
         error=error,
         mode="params_only",
+        include_reference=include_reference,
     )
+
+
+def _get_configured_provider(explicit_provider: str | None):
+    """Resolve which provider to call for a draft/suggest_fix request: an
+    explicit per-request `provider` wins, otherwise fall back to whatever
+    the settings panel has configured (provider + model), otherwise
+    get_provider()'s own env-var defaults."""
+    return get_provider(explicit_provider or LLM_SETTINGS["provider"], model=LLM_SETTINGS["model"])
 
 
 @app.post("/api/blocks/{block_id}/draft")
@@ -556,9 +596,9 @@ def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
     if not req.instruction.strip():
         raise HTTPException(400, "instruction is required")
 
-    ctx = _draft_context_for_block(block, block_id, req.instruction)
+    ctx = _draft_context_for_block(block, block_id, req.instruction, include_reference=LLM_SETTINGS["include_reference"])
     try:
-        provider = get_provider(req.provider)
+        provider = _get_configured_provider(req.provider)
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM draft failed: {e}")
@@ -581,9 +621,15 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
     if st is None or not st.last_error:
         raise HTTPException(400, "block has no recorded error to fix")
 
-    ctx = _draft_context_for_block(block, block_id, req.instruction.strip() or "Fix the error.", error=st.last_error)
+    ctx = _draft_context_for_block(
+        block,
+        block_id,
+        req.instruction.strip() or "Fix the error.",
+        error=st.last_error,
+        include_reference=LLM_SETTINGS["include_reference"],
+    )
     try:
-        provider = get_provider(req.provider)
+        provider = _get_configured_provider(req.provider)
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM suggest_fix failed: {e}")

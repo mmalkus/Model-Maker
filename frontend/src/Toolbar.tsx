@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { api } from './api'
+import { LlmSettingsPanel } from './LlmSettingsPanel'
 
 export function Toolbar({ onChanged, projectPath }: { onChanged: () => void; projectPath: string | null }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
+  const [showLlmSettings, setShowLlmSettings] = useState(false)
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -73,7 +75,12 @@ export function Toolbar({ onChanged, projectPath }: { onChanged: () => void; pro
       <button disabled={busy} onClick={doLoad}>
         Load
       </button>
+      <button disabled={busy} onClick={() => setShowLlmSettings(true)} title="LLM provider, model, and prompt settings">
+        LLM settings
+      </button>
       <span style={{ fontSize: 12, color: '#6b7280' }}>{projectPath ?? '(unsaved)'}</span>
+
+      {showLlmSettings && <LlmSettingsPanel onClose={() => setShowLlmSettings(false)} />}
 
       {compiled !== null && (
         <div
