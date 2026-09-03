@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import os
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class ColumnInfo:
+    name: str
+    dtype: str
+    role: str
+
+
+@dataclass
+class DraftContext:
+    """Everything a provider needs to draft or fix a block's code. Column
+    schemas are passed as plain metadata (names/dtypes/roles) -- never row
+    data -- matching the plan's "schema, not necessarily full data" rule for
+    the AI-assisted fix action."""
+
+    instruction: str
+    function_name: str
+    input_ports: dict[str, list[ColumnInfo]]
+    param_names: list[str] = field(default_factory=list)
+    existing_code: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class DraftResult:
+    code: str
+    metadata_transform: dict[str, Any]
+    explanation: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+class LLMProvider(ABC):
+    name: str
+
+    @abstractmethod
+    def draft(self, ctx: DraftContext) -> DraftResult: ...
+
+
+LLM_PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {}
+
+
+def register_provider(name: str):
+    def _reg(cls: type[LLMProvider]) -> type[LLMProvider]:
+        cls.name = name
+        LLM_PROVIDER_REGISTRY[name] = cls
+        return cls
+
+    return _reg
+
+
+def get_provider(name: str | None = None) -> LLMProvider:
+    provider_name = name or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
+    cls = LLM_PROVIDER_REGISTRY.get(provider_name)
+    if cls is None:
+        raise ValueError(
+            f"unknown LLM provider {provider_name!r}; available: {sorted(LLM_PROVIDER_REGISTRY)}"
+        )
+    return cls()

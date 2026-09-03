@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light;
+  font: 13px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif;
+  color: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #ffffff;
+}
+
+button {
+  font: inherit;
+  color: #111827;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+textarea {
+  color: #111827;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+table {
+  color: #111827;
+}
