@@ -60,3 +60,33 @@ def test_compile_scopes_to_requested_output_only(tmp_path):
     source = compile_graph(graph, runner=runner, output_blocks=["b_filter"])
     assert "b_select" not in source
     assert "b_filter" in source
+
+
+def test_output_blocks_only_get_output_dir_kwarg_when_their_signature_wants_it(tmp_path, monkeypatch):
+    # compiled write_csv writes a real file under OUTPUT_DIR when exec'd below
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "compiled_output"))
+    # write_csv takes output_dir; display_table doesn't. Mixing them exercises
+    # the compiler's per-block check rather than a blanket "block_type ==
+    # output" assumption, which would crash display_table with an
+    # unexpected-keyword TypeError at runtime.
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_display"] = make_block("b_display", "display_table", x=3)
+    graph.blocks["b_write"] = make_block("b_write", "write_csv", params={"filename": "out.csv"}, x=4)
+    graph.wires["w3"] = Wire("w3", "b_select", "out", "b_display", "df")
+    graph.wires["w4"] = Wire("w4", "b_select", "out", "b_write", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    report = runner.run_all()
+    assert report["b_display"] == "green"
+    assert report["b_write"] == "green"
+
+    source = compile_graph(graph, runner=runner)
+    assert "display_table_b_display(df=" in source
+    assert "output_dir=OUTPUT_DIR" in source
+    # the display_table call site must not have picked up output_dir too
+    display_call_line = next(line for line in source.splitlines() if "display_table_b_display(" in line and "=" in line)
+    assert "output_dir" not in display_call_line
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)  # would raise TypeError if the bug regressed

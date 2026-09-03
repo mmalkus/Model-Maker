@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -26,13 +26,19 @@ class DraftContext:
     param_names: list[str] = field(default_factory=list)
     existing_code: str | None = None
     error: str | None = None
+    # "author": drafting a full llm_authored function body (the original
+    # flow). "params_only": the block's code is fixed (a standard/input/
+    # output block from the registry) -- the model may only choose values
+    # for its existing parameters, given the fixed source for context.
+    mode: Literal["author", "params_only"] = "author"
+    fixed_source: str | None = None
 
 
 @dataclass
 class DraftResult:
-    code: str
-    metadata_transform: dict[str, Any]
-    explanation: str
+    code: str = ""
+    metadata_transform: dict[str, Any] = field(default_factory=dict)
+    explanation: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 
 

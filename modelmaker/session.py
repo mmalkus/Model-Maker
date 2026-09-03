@@ -24,7 +24,9 @@ def wire_is_valid(graph: Graph, wire: Wire) -> bool:
     to_spec = next((p for p in to_block.inputs if p.name == wire.to_port), None)
     if from_spec is None or to_spec is None:
         return False
-    return from_spec.type == to_spec.type
+    # "any" (the generic View value block's ports) matches every other type,
+    # in either direction.
+    return from_spec.type == to_spec.type or from_spec.type == "any" or to_spec.type == "any"
 
 
 class ProjectSession:
@@ -67,6 +69,7 @@ class ProjectSession:
         metadata_transform: dict[str, Any] | None = None,
     ) -> BlockInstance:
         spec = BLOCK_REGISTRY.get(category)
+        is_custom = spec is None
         if spec is not None:
             resolved_type = block_type or spec.block_type
             resolved_inputs = [PortSpec(**p) for p in inputs] if inputs else list(spec.inputs)
@@ -92,6 +95,7 @@ class ProjectSession:
             outputs=resolved_outputs,
             code=code,
             metadata_transform=metadata_transform,
+            is_custom=is_custom,
         )
         self.graph.blocks[bid] = block
         return block

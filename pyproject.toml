@@ -7,6 +7,9 @@ dependencies = [
     "polars>=1.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
+    "matplotlib>=3.8.0",
+    "scikit-learn>=1.4.0",
+    "scipy>=1.11.0",
 ]
 
 [project.optional-dependencies]

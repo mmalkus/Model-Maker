@@ -1,6 +1,6 @@
 export type Status = 'grey' | 'green' | 'orange' | 'red'
-export type PortType = 'dataframe' | 'model' | 'scalar_metric'
-export type BlockType = 'input' | 'standard' | 'output' | 'llm_authored'
+export type PortType = 'dataframe' | 'model' | 'scalar_metric' | 'image' | 'any'
+export type BlockType = 'input' | 'standard' | 'output'
 
 export interface PortSpec {
   name: string
@@ -11,6 +11,7 @@ export interface PortSpec {
 export interface RegistryEntry {
   category: string
   block_type: BlockType
+  group: string
   display_name: string
   inputs: PortSpec[]
   outputs: PortSpec[]
@@ -19,6 +20,7 @@ export interface RegistryEntry {
 export interface BlockOut {
   id: string
   block_type: BlockType
+  is_custom: boolean
   category: string
   name: string
   lane: string | null
@@ -26,6 +28,7 @@ export interface BlockOut {
   code_version: number
   params: Record<string, unknown>
   code: string | null
+  source: string | null
   metadata_transform: Record<string, unknown> | null
   inputs: PortSpec[]
   outputs: PortSpec[]
@@ -79,6 +82,26 @@ export interface PreviewOut {
   row_count: number
   lineage: string[]
   summary: Record<string, PreviewSummary> | null
+}
+
+export interface SchemaColumn {
+  name: string
+  dtype: string
+  role: string
+}
+
+export type InputSchemaOut = Record<string, SchemaColumn[]>
+
+export interface BrowseEntry {
+  name: string
+  path: string
+  is_dir: boolean
+}
+
+export interface BrowseOut {
+  path: string
+  parent: string | null
+  entries: BrowseEntry[]
 }
 
 export interface DraftOut {

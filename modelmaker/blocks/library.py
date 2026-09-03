@@ -167,3 +167,116 @@ register_block(
         metadata_transform=lambda *_a, **_k: {},
     )
 )
+
+
+def display_table(df: pl.DataFrame) -> pl.DataFrame:
+    """A no-op pass-through: exists to mark a point in the pipeline as a
+    reportable table. The engine/UI can preview it like any dataframe
+    output; the compiled script carries it through unchanged."""
+    return df
+
+
+register_block(
+    BlockSpec(
+        category="display_table",
+        block_type="output",
+        display_name="Display table",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=display_table,
+        metadata_transform=passthrough,
+    )
+)
+
+
+def display_value(value):
+    """A no-op pass-through, like display_table, but for any port type --
+    a dataframe, a model/scalar_metric artifact (a plain dict), or an image.
+    Its ports are typed "any" so it wires up to whatever you point it at;
+    the UI figures out how to render whatever actually comes through."""
+    return value
+
+
+def _display_value_meta(input_metas, outputs, params):
+    # Only reached when the value passed through actually was a DataFrame
+    # (see runner.py: the transform only runs when an output is one) --
+    # reuse the real upstream column metadata, same as display_table.
+    (in_meta,) = input_metas.values()
+    (df,) = outputs.values()
+    return {"value": {name: in_meta[name] if name in in_meta else ColumnMeta(dtype=str(df.schema[name])) for name in df.columns}}
+
+
+register_block(
+    BlockSpec(
+        category="display_value",
+        block_type="output",
+        display_name="View value",
+        inputs=[PortSpec("value", type="any")],
+        outputs=[PortSpec("value", type="any")],
+        fn=display_value,
+        metadata_transform=_display_value_meta,
+    )
+)
+
+
+def generate_image(
+    df: pl.DataFrame,
+    kind: str = "hist",
+    x: str = "",
+    y: str = "",
+    bins: int = 30,
+    title: str = "",
+    output_dir: str = ".",
+) -> bytes:
+    # Self-contained imports (rather than relying on this module's own
+    # top-level imports) so this function stays a valid, independent unit
+    # both when run live by the engine and when inlined verbatim into a
+    # compiled script.
+    import io
+    import os
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    if kind == "hist":
+        ax.hist(df[x].to_list(), bins=bins)
+    elif kind == "bar":
+        ax.bar([str(v) for v in df[x].to_list()], df[y].to_list())
+    elif kind == "scatter":
+        ax.scatter(df[x].to_list(), df[y].to_list(), s=10, alpha=0.6)
+    elif kind == "line":
+        ax.plot(df[x].to_list(), df[y].to_list())
+    else:
+        raise ValueError(f"unknown chart kind: {kind!r}")
+    ax.set_xlabel(x)
+    if y:
+        ax.set_ylabel(y)
+    if title:
+        ax.set_title(title)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110)
+    plt.close(fig)
+
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "generate_image.png"), "wb") as f:
+        f.write(buf.getvalue())
+
+    return buf.getvalue()
+
+
+register_block(
+    BlockSpec(
+        category="generate_image",
+        block_type="output",
+        display_name="Generate image",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("image", type="image")],
+        fn=generate_image,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)

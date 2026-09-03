@@ -1,4 +1,4 @@
-import type { BlockOut, BlockType, DraftOut, GraphOut, PreviewOut, RegistryEntry } from './types'
+import type { BlockOut, BlockType, BrowseOut, DraftOut, GraphOut, InputSchemaOut, PreviewOut, RegistryEntry } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -51,8 +51,11 @@ export const api = {
     }),
   deleteLane: (id: string) => request<Record<string, { name: string; order: number }>>(`/lanes/${id}`, { method: 'DELETE' }),
 
-  preview: (id: string, opts: { rows?: number; summary?: boolean } = {}) => {
+  inputSchema: (id: string) => request<InputSchemaOut>(`/blocks/${id}/input_schema`),
+
+  preview: (id: string, opts: { port?: string; rows?: number; summary?: boolean } = {}) => {
     const q = new URLSearchParams()
+    if (opts.port) q.set('port', opts.port)
     if (opts.rows) q.set('rows', String(opts.rows))
     if (opts.summary) q.set('summary', 'true')
     const qs = q.toString()
@@ -78,6 +81,19 @@ export const api = {
 
   save: (path?: string) => request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }),
   load: (path: string) => request<GraphOut>('/project/load', { method: 'POST', body: JSON.stringify({ path }) }),
+
+  imageUrl: (id: string, port: string, cacheBust?: string | null) =>
+    `/api/blocks/${id}/image?port=${encodeURIComponent(port)}${cacheBust ? `&t=${encodeURIComponent(cacheBust)}` : ''}`,
+
+  value: (id: string, port: string) => request<unknown>(`/blocks/${id}/value?port=${encodeURIComponent(port)}`),
+
+  browse: (path?: string, ext?: string) => {
+    const q = new URLSearchParams()
+    if (path) q.set('path', path)
+    if (ext) q.set('ext', ext)
+    const qs = q.toString()
+    return request<BrowseOut>(`/browse${qs ? `?${qs}` : ''}`)
+  },
 
   llmProviders: () => request<{ providers: string[]; active: string }>('/llm/providers'),
   draftBlock: (id: string, instruction: string, provider?: string) =>

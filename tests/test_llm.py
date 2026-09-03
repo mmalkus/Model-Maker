@@ -32,7 +32,7 @@ def test_draft_endpoint_returns_proposal_without_mutating_block(client, tmp_path
         "/api/blocks",
         json={
             "category": "bucket_income",
-            "block_type": "llm_authored",
+            "block_type": "standard",
             "inputs": [{"name": "df", "type": "dataframe"}],
             "outputs": [{"name": "out", "type": "dataframe"}],
             "code": "def bucket_income(df):\n    return df\n",
@@ -52,11 +52,28 @@ def test_draft_endpoint_returns_proposal_without_mutating_block(client, tmp_path
     assert graph["blocks"][custom["id"]]["code_version"] == 1
 
 
-def test_draft_rejects_non_custom_block(client, tmp_path):
+def test_draft_on_a_standard_block_is_params_only(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a\n1\n")
     read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
-    resp = client.post(f"/api/blocks/{read['id']}/draft", json={"instruction": "do something"})
+    resp = client.post(f"/api/blocks/{read['id']}/draft", json={"instruction": "point it at some other file"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # stub provider never calls an LLM -- it just proves the params_only path
+    # runs end to end without touching the block's fixed code.
+    assert body["code"] == ""
+    assert body["params"] == {}
+    assert "explanation" in body
+
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][read["id"]]["params"] == {"path": str(csv_path)}
+
+
+def test_draft_requires_instruction_for_standard_blocks_too(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n1\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    resp = client.post(f"/api/blocks/{read['id']}/draft", json={"instruction": "  "})
     assert resp.status_code == 400
 
 
@@ -65,7 +82,7 @@ def test_draft_requires_nonempty_instruction(client):
         "/api/blocks",
         json={
             "category": "custom_block",
-            "block_type": "llm_authored",
+            "block_type": "standard",
             "inputs": [{"name": "df", "type": "dataframe"}],
             "outputs": [{"name": "out", "type": "dataframe"}],
             "code": "def custom_block(df):\n    return df\n",
@@ -80,7 +97,7 @@ def test_suggest_fix_requires_recorded_error(client):
         "/api/blocks",
         json={
             "category": "custom_block",
-            "block_type": "llm_authored",
+            "block_type": "standard",
             "inputs": [{"name": "df", "type": "dataframe"}],
             "outputs": [{"name": "out", "type": "dataframe"}],
             "code": "def custom_block(df):\n    return df\n",
@@ -98,7 +115,7 @@ def test_suggest_fix_after_failed_run(client, tmp_path):
         "/api/blocks",
         json={
             "category": "bucket_income",
-            "block_type": "llm_authored",
+            "block_type": "standard",
             "inputs": [{"name": "df", "type": "dataframe"}],
             "outputs": [{"name": "out", "type": "dataframe"}],
             "code": "def bucket_income(df):\n    return df.this_method_does_not_exist()\n",
@@ -115,6 +132,30 @@ def test_suggest_fix_after_failed_run(client, tmp_path):
     resp = client.post(f"/api/blocks/{custom['id']}/suggest_fix", json={})
     assert resp.status_code == 200
     assert "def bucket_income" in resp.json()["code"]
+
+
+def test_suggest_fix_on_a_standard_block_is_params_only(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    filt = client.post("/api/blocks", json={"category": "filter", "params": {"expr": "not_a_real_column > 1"}}).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": read["id"], "from_port": "out", "to_block": filt["id"], "to_port": "df"},
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    run_resp = client.post(f"/api/blocks/{filt['id']}/run")
+    assert run_resp.json()["status"] == "red"
+
+    resp = client.post(f"/api/blocks/{filt['id']}/suggest_fix", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == ""
+
+    # the block's fixed code and category are untouched -- only params could
+    # ever be proposed for a standard block
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][filt["id"]]["category"] == "filter"
 
 
 def test_providers_endpoint_lists_registered_providers(client):

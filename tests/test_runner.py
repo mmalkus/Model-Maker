@@ -131,7 +131,7 @@ def test_custom_block_code_has_polars_available_without_local_import(tmp_path):
     graph.blocks["b_custom"] = make_block(
         "b_custom",
         "bucket_income",
-        block_type="llm_authored",
+        block_type="standard",
         code="def bucket_income(df: pl.DataFrame) -> pl.DataFrame:\n    return df.with_columns((pl.col('a') > 1).alias('high_a'))\n",
         inputs=[graph.blocks["b_filter"].inputs[0]],
         outputs=[graph.blocks["b_filter"].outputs[0]],

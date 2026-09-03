@@ -36,20 +36,51 @@ closely as possible. Do not rewrite unrelated behavior.
 - Keep `explanation` to one or two plain-English sentences describing what \
 the function does or what you changed and why."""
 
+CONTRACT_PARAMS_ONLY = """You are configuring one block in a visual, \
+Polars-based data pipeline tool. This block's Python function is fixed -- \
+you cannot change its code, only choose values for the parameters it \
+already accepts. Follow the contract exactly:
+
+- The fixed function is given below (read-only). Read its signature and \
+docstring to see exactly which parameters exist, their types, and their \
+defaults.
+- Respond with a `params` object containing values for whichever of those \
+parameters the instruction implies should change. Only use keys that are \
+real parameter names of the function -- never invent new ones, and never \
+include the dataframe argument(s) themselves.
+- Only reference columns listed in the provided input schema.
+- Leave `code` as an empty string and `metadata_transform` as \
+`{"kind": "passthrough"}` -- both are ignored for this block.
+- Keep `explanation` to one sentence describing the values you chose and \
+why."""
+
+
+def contract_for(mode: str) -> str:
+    return CONTRACT_PARAMS_ONLY if mode == "params_only" else CONTRACT
+
 
 def format_columns(columns: list[ColumnInfo]) -> str:
     if not columns:
-        return "(unknown -- this input hasn't been run yet, so its columns aren't available)"
-    return "\n".join(f"  - {c.name}: {c.dtype}, role={c.role}" for c in columns)
+        return "    (unknown -- this input hasn't been run yet, so its columns aren't available)"
+    return "\n".join(f"    - {c.name}: {c.dtype}, role={c.role}" for c in columns)
 
 
 def build_user_prompt(ctx: DraftContext) -> str:
-    parts = [
-        f"Function name: {ctx.function_name}",
-        "",
-        "Input schema (port `df`):",
-        format_columns(ctx.input_ports.get("df", [])),
-    ]
+    parts = [f"Function name: {ctx.function_name}"]
+
+    if ctx.fixed_source:
+        parts += [
+            "",
+            "Fixed function source (read-only -- you are only choosing parameter values, not writing code):",
+            "```python",
+            ctx.fixed_source,
+            "```",
+        ]
+
+    parts += ["", "Input schema:"]
+    for port, cols in (ctx.input_ports or {"df": []}).items():
+        parts.append(f"  Port `{port}`:")
+        parts.append(format_columns(cols))
 
     if ctx.param_names:
         parts += ["", "Current parameter names: " + ", ".join(ctx.param_names)]

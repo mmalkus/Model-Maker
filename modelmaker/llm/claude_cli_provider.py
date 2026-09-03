@@ -7,9 +7,10 @@ import shutil
 import subprocess
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
-from .prompts import CONTRACT, build_user_prompt
+from .prompts import build_user_prompt, contract_for
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-sonnet-5"
+CLI_TIMEOUT_SECONDS = 90
 
 JSON_ONLY_INSTRUCTIONS = """
 Respond with ONLY a single JSON object -- no markdown code fences, no prose \
@@ -60,25 +61,38 @@ class ClaudeCliProvider(LLMProvider):
             raise RuntimeError("claude CLI not found on PATH; install Claude Code or choose a different LLM provider")
 
     def draft(self, ctx: DraftContext) -> DraftResult:
-        system = CONTRACT + "\n" + JSON_ONLY_INSTRUCTIONS
-        result = subprocess.run(
-            [
-                self.binary,
-                "-p",
-                build_user_prompt(ctx),
-                "--output-format",
-                "json",
-                "--tools",
-                "",
-                "--model",
-                self.model,
-                "--system-prompt",
-                system,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        system = contract_for(ctx.mode) + "\n" + JSON_ONLY_INSTRUCTIONS
+        try:
+            result = subprocess.run(
+                [
+                    self.binary,
+                    "-p",
+                    build_user_prompt(ctx),
+                    "--output-format",
+                    "json",
+                    "--tools",
+                    "",
+                    "--model",
+                    self.model,
+                    "--system-prompt",
+                    system,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=CLI_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            # Observed cause in practice: the CLI hangs silently (no stdout/
+            # stderr at all) when --model names a model this login isn't
+            # entitled to run non-interactively, rather than failing fast.
+            # Surface that as the likely fix instead of a bare timeout.
+            raise RuntimeError(
+                f"claude CLI did not respond within {e.timeout:.0f}s using model "
+                f"{self.model!r}. If this model isn't available on your plan, the "
+                "CLI can hang instead of erroring -- try setting "
+                "MODELMAKER_LLM_MODEL to a model your `claude` login can run "
+                "(verify with `claude -p \"hi\" --model <model>` directly)."
+            ) from e
         if result.returncode != 0:
             raise RuntimeError(f"claude CLI exited {result.returncode}: {(result.stderr or result.stdout).strip()}")
 

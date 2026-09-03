@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -7,10 +8,13 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from .blocks import library as _library  # noqa: F401
+from .blocks import modelling as _modelling  # noqa: F401
+from .blocks import stat_tests as _stat_tests  # noqa: F401
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
 from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, get_provider
@@ -94,12 +98,29 @@ class DraftRequest(BaseModel):
 # ---- helpers -------------------------------------------------------------
 
 
+def _source_for_block(block) -> str | None:
+    """Read-only source for the block's underlying Python function. For
+    custom (is_custom) blocks the editable source is already exposed via
+    `code`; for registry blocks it lives in BLOCK_REGISTRY as a plain
+    function, so pull it with inspect for display purposes only."""
+    if block.is_custom:
+        return None
+    spec = BLOCK_REGISTRY.get(block.category)
+    if spec is None:
+        return None
+    try:
+        return inspect.getsource(spec.fn)
+    except (OSError, TypeError):
+        return None
+
+
 def _block_out(block_id: str) -> dict[str, Any]:
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
     return {
         "id": block.id,
         "block_type": block.block_type,
+        "is_custom": block.is_custom,
         "category": block.category,
         "name": block.name,
         "lane": block.lane,
@@ -107,6 +128,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "code_version": block.code_version,
         "params": block.params,
         "code": block.code,
+        "source": _source_for_block(block),
         "metadata_transform": block.metadata_transform,
         "inputs": [asdict(p) for p in block.inputs],
         "outputs": [asdict(p) for p in block.outputs],
@@ -207,6 +229,7 @@ def registry() -> list[dict[str, Any]]:
         {
             "category": spec.category,
             "block_type": spec.block_type,
+            "group": spec.group or spec.block_type,
             "display_name": spec.display_name,
             "inputs": [asdict(p) for p in spec.inputs],
             "outputs": [asdict(p) for p in spec.outputs],
@@ -218,6 +241,39 @@ def registry() -> list[dict[str, Any]]:
 @app.get("/api/graph")
 def get_graph() -> dict[str, Any]:
     return _graph_out()
+
+
+@app.get("/api/browse")
+def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
+    """List a server-side directory so the UI can offer a file picker for
+    params like read_csv's `path` -- the frontend runs in a regular browser,
+    which can't hand back an absolute filesystem path from <input type=file>,
+    so this stands in for a native file dialog. Local dev tool, run by the
+    user against their own machine, so no extra path sandboxing beyond
+    resolving `..`/symlinks."""
+    base = Path(path).expanduser().resolve() if path else Path.cwd()
+    if not base.exists():
+        base = Path.cwd()
+    if base.is_file():
+        base = base.parent
+
+    entries = []
+    try:
+        for e in sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            if e.name.startswith("."):
+                continue
+            if not e.is_dir() and ext and not e.name.lower().endswith(ext.lower()):
+                continue
+            entries.append({"name": e.name, "path": str(e), "is_dir": e.is_dir()})
+    except PermissionError:
+        pass
+
+    parent = base.parent
+    return {
+        "path": str(base),
+        "parent": str(parent) if parent != base else None,
+        "entries": entries,
+    }
 
 
 @app.post("/api/project/load")
@@ -267,31 +323,71 @@ def update_block(block_id: str, req: BlockUpdate) -> dict[str, Any]:
     return _block_out(block_id)
 
 
+@app.get("/api/blocks/{block_id}/input_schema")
+def input_schema_ep(block_id: str) -> dict[str, list[dict[str, str]]]:
+    """Column names/dtypes/roles available on each of a block's input ports
+    (empty for a port whose upstream hasn't produced output yet) -- lets the
+    UI offer column dropdowns for params instead of free-text entry."""
+    _require_block(block_id)
+    return {port: [asdict(c) for c in cols] for port, cols in _input_schema_for_block(block_id).items()}
+
+
 @app.delete("/api/blocks/{block_id}")
 def delete_block(block_id: str) -> dict[str, str]:
     SESSION.delete_block(block_id)
     return {"deleted": block_id}
 
 
-@app.get("/api/blocks/{block_id}/preview")
-def preview_block(block_id: str, port: str | None = None, rows: int = 20, summary: bool = False) -> dict[str, Any]:
+def _get_cached_output(block_id: str, port: str | None, want_type: str | None = None) -> Any:
+    """Look up a block's cached output value on the given port (defaulting
+    to its declared port of `want_type`, or its first output port). Raises
+    the appropriate HTTPException if the block isn't runnable, has no
+    matching port, or nothing is cached yet."""
     if block_id not in SESSION.graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
     status = SESSION.runner.status(block_id)
     if status not in ("green", "orange"):
-        raise HTTPException(409, f"block '{block_id}' has no output to preview (status={status})")
+        raise HTTPException(409, f"block '{block_id}' has no output to view (status={status})")
     st = SESSION.runner.state[block_id]
     entry = SESSION.runner.cache.get(st.last_successful_key)  # type: ignore[arg-type]
     if entry is None:
         raise HTTPException(409, "cached output missing")
     block = SESSION.graph.blocks[block_id]
-    out_port = port or (block.outputs[0].name if block.outputs else None)
-    if out_port is None or out_port not in entry.outputs:
-        raise HTTPException(404, f"no such output port: {out_port}")
-    value = entry.outputs[out_port]
+    if port is None and want_type is not None:
+        port = next((p.name for p in block.outputs if p.type == want_type), None)
+    port = port or (block.outputs[0].name if block.outputs else None)
+    if port is None or port not in entry.outputs:
+        raise HTTPException(404, f"no such output port: {port}")
+    return entry.outputs[port]
+
+
+@app.get("/api/blocks/{block_id}/preview")
+def preview_block(block_id: str, port: str | None = None, rows: int = 20, summary: bool = False) -> dict[str, Any]:
+    value = _get_cached_output(block_id, port)
     if not isinstance(value, DataFramePacket):
-        raise HTTPException(400, f"output port '{out_port}' is not a dataframe")
+        raise HTTPException(400, "output port is not a dataframe")
     return _packet_preview(value, rows=rows, with_summary=summary)
+
+
+@app.get("/api/blocks/{block_id}/image")
+def block_image(block_id: str, port: str | None = None) -> Response:
+    value = _get_cached_output(block_id, port, want_type="image")
+    if not isinstance(value, (bytes, bytearray)):
+        raise HTTPException(400, "output port is not an image")
+    return Response(content=bytes(value), media_type="image/png")
+
+
+@app.get("/api/blocks/{block_id}/value")
+def block_value(block_id: str, port: str | None = None) -> Any:
+    """Raw JSON-shaped output (a scalar_metric or model port's dict, or any
+    other plain value) for ports that aren't a dataframe or an image --
+    those have their own endpoints above."""
+    value = _get_cached_output(block_id, port)
+    if isinstance(value, DataFramePacket):
+        raise HTTPException(400, "output port is a dataframe -- use /preview")
+    if isinstance(value, (bytes, bytearray)):
+        raise HTTPException(400, "output port is binary (e.g. an image) -- use /image")
+    return value
 
 
 @app.post("/api/wires")
@@ -410,26 +506,57 @@ def list_llm_providers() -> dict[str, Any]:
     }
 
 
+def _draft_context_for_block(block, block_id: str, instruction: str, error: str | None = None) -> DraftContext:
+    """Build the DraftContext for either flavor of block: custom (is_custom)
+    blocks get the original "author full code" mode; registry blocks have
+    fixed code, so the model can only choose values for their existing
+    parameters ("params_only" mode) -- this is what makes "Draft with AI"
+    available on every block, not just custom ones, without letting the
+    model touch fixed code."""
+    input_ports = _input_schema_for_block(block_id)
+    param_names = list(block.params)
+
+    if block.is_custom:
+        return DraftContext(
+            instruction=instruction,
+            function_name=block.category,
+            input_ports=input_ports,
+            param_names=param_names,
+            existing_code=block.code,
+            error=error,
+        )
+
+    spec = BLOCK_REGISTRY.get(block.category)
+    if spec is None:
+        raise HTTPException(400, f"unknown block category: {block.category}")
+    try:
+        fixed_source = inspect.getsource(spec.fn)
+    except (OSError, TypeError):
+        fixed_source = None
+    return DraftContext(
+        instruction=instruction,
+        function_name=block.category,
+        input_ports=input_ports,
+        param_names=param_names,
+        fixed_source=fixed_source,
+        error=error,
+        mode="params_only",
+    )
+
+
 @app.post("/api/blocks/{block_id}/draft")
 def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
-    """Draft (or redraft) a custom block's code from a natural-language
-    instruction. Never applied automatically -- returns the proposal for the
-    caller to review and save via PATCH /api/blocks/{id}."""
+    """Draft (or redraft) a block from a natural-language instruction.
+    llm_authored blocks get a full function body proposal; every other
+    block type gets suggested values for its existing parameters only,
+    since their code is fixed. Never applied automatically -- returns the
+    proposal for the caller to review and save via PATCH /api/blocks/{id}."""
     _require_block(block_id)
     block = SESSION.graph.blocks[block_id]
-    if block.block_type != "llm_authored":
-        raise HTTPException(400, "draft is only valid for custom (llm_authored) blocks")
     if not req.instruction.strip():
         raise HTTPException(400, "instruction is required")
 
-    fn_name = block.category
-    ctx = DraftContext(
-        instruction=req.instruction,
-        function_name=fn_name,
-        input_ports=_input_schema_for_block(block_id),
-        param_names=list(block.params),
-        existing_code=block.code,
-    )
+    ctx = _draft_context_for_block(block, block_id, req.instruction)
     try:
         provider = get_provider(req.provider)
         result = provider.draft(ctx)
@@ -445,24 +572,16 @@ def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
 
 @app.post("/api/blocks/{block_id}/suggest_fix")
 def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, Any]:
-    """AI-assisted fix for a red block: sends the code, params, actual
-    error, and input schema; returns a proposed diff, never auto-applied."""
+    """AI-assisted fix for a red block: sends the code (or fixed source),
+    params, actual error, and input schema; returns a proposed diff, never
+    auto-applied."""
     _require_block(block_id)
     block = SESSION.graph.blocks[block_id]
-    if block.block_type != "llm_authored":
-        raise HTTPException(400, "suggest_fix is only valid for custom (llm_authored) blocks")
     st = SESSION.runner.state.get(block_id)
     if st is None or not st.last_error:
         raise HTTPException(400, "block has no recorded error to fix")
 
-    ctx = DraftContext(
-        instruction=(req.instruction.strip() or "Fix the error."),
-        function_name=block.category,
-        input_ports=_input_schema_for_block(block_id),
-        param_names=list(block.params),
-        existing_code=block.code,
-        error=st.last_error,
-    )
+    ctx = _draft_context_for_block(block, block_id, req.instruction.strip() or "Fix the error.", error=st.last_error)
     try:
         provider = get_provider(req.provider)
         result = provider.draft(ctx)
