@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="qGradLight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f7a6f"/>
+      <stop offset="55%" stop-color="#4f7a6f"/>
+      <stop offset="85%" stop-color="#9c8f5c"/>
+      <stop offset="100%" stop-color="#9c8f5c"/>
+    </linearGradient>
+  </defs>
+  <polygon points="100,49 123.5,59.30 146.76,73 149,100 145.03,126 123,139.84 100,153 76,141.57 52.37,127.5 50,100 59.29,76.5 74,55.03" fill="none" stroke="#4f7a6f" stroke-width="3.2" stroke-linejoin="round"/>
+  <polygon points="100,48 133.23,66.77 136,100 153.03,153.03 100,136 65.35,134.65 49,100 66.06,66.06" fill="none" stroke="url(#qGradLight)" stroke-width="3" opacity="0.85" stroke-linejoin="round"/>
+  <circle cx="153.03" cy="153.03" r="7" fill="#9c8f5c"/>
+</svg>
