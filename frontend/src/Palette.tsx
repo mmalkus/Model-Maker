@@ -88,7 +88,7 @@ export function Palette({
 
   return (
     <div style={{ width: 200, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto' }}>
-      <h3 style={{ fontSize: 13, margin: '0 0 8px' }}>Blocks</h3>
+      <h3 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--brand-ink)' }}>Blocks</h3>
 
       <div style={{ marginBottom: 12 }}>
         {AI_BLOCK_TYPES.map(({ blockType, label, title }) => (
@@ -100,9 +100,9 @@ export function Palette({
               ...buttonStyle,
               textAlign: 'center',
               fontWeight: 600,
-              background: '#faf5ff',
-              border: '1px solid #d8b4fe',
-              color: '#6b21a8',
+              background: 'var(--brand-light)',
+              border: '1px solid var(--brand-border)',
+              color: 'var(--brand-dark)',
             }}
           >
             {label}

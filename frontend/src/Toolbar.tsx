@@ -33,9 +33,23 @@ export function Toolbar({ onChanged, projectPath }: { onChanged: () => void; pro
   }
 
   return (
-    <div style={{ display: 'flex', gap: 8, padding: 8, borderBottom: '1px solid #e5e7eb', alignItems: 'center' }}>
-      <strong style={{ marginRight: 8 }}>Model-Maker</strong>
-      <button disabled={busy} onClick={() => run(() => api.runAll())}>
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        padding: '8px 12px',
+        alignItems: 'center',
+        background: 'linear-gradient(180deg, var(--brand-light), #ffffff)',
+        borderBottom: '1px solid var(--brand-border)',
+      }}
+    >
+      <img src="/favicon.svg" alt="" width={22} height={21} style={{ display: 'block' }} />
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12 }}>
+        <strong style={{ color: 'var(--brand-ink)', fontSize: 14, letterSpacing: 0.2 }}>Quantology</strong>
+        <span style={{ color: 'var(--brand-border)' }}>|</span>
+        <span style={{ color: '#4b5563', fontWeight: 500 }}>Model Maker</span>
+      </div>
+      <button className="brand-primary" disabled={busy} onClick={() => run(() => api.runAll())}>
         Run all
       </button>
       <button disabled={busy} onClick={() => run(() => api.forceRunAll())}>

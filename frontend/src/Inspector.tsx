@@ -373,7 +373,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
         </div>
       )}
 
-      <div style={{ marginBottom: 12, background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6, padding: 8 }}>
+      <div style={{ marginBottom: 12, background: 'var(--brand-light)', border: '1px solid var(--brand-border)', borderRadius: 6, padding: 8 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
           Draft with AI
           {llmProvider && <span style={{ fontWeight: 400, color: '#9ca3af' }}> (via {llmProvider})</span>}
@@ -401,7 +401,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
           )}
         </div>
         {drafting && (
-          <div style={{ marginTop: 6, color: '#6b21a8' }}>
+          <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftElapsed < 5
               ? `Asking ${llmProvider ?? 'the LLM provider'}...`
               : llmProvider === 'claude_cli'
@@ -415,7 +415,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
           </div>
         )}
         {draftExplanation && (
-          <div style={{ marginTop: 6, color: '#6b21a8' }}>
+          <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftExplanation}
             <div style={{ color: '#9ca3af', marginTop: 2 }}>
               {block.is_custom

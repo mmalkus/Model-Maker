@@ -2,6 +2,15 @@
   color-scheme: light;
   font: 13px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif;
   color: #111827;
+
+  /* Quantology brand */
+  --brand: #7e14ff;
+  --brand-2: #863bff;
+  --brand-dark: #5b0fc4;
+  --brand-ink: #2e1065;
+  --brand-light: #f2ecff;
+  --brand-lighter: #ede6ff;
+  --brand-border: #d8b4fe;
 }
 
 * {
@@ -33,6 +42,18 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+button.brand-primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.brand-primary:hover:not(:disabled) {
+  background: var(--brand-dark);
+  border-color: var(--brand-dark);
 }
 
 textarea {
