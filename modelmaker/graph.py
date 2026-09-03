@@ -44,17 +44,21 @@ class BlockInstance:
     outputs: list[PortSpec]
     code_ref: str | None = None
     code: str | None = None
-    # dict declaration for llm_authored blocks (see metadata_transforms.resolve);
-    # None for standard/input/output blocks, whose transform lives in the registry.
+    # dict declaration for custom blocks (see metadata_transforms.resolve);
+    # None for registry blocks, whose transform lives in the registry.
     metadata_transform: dict[str, Any] | None = None
+    # True for an AI-authored block with its own editable code/metadata_transform;
+    # False for a block backed by a fixed BLOCK_REGISTRY entry. Independent of
+    # block_type -- a custom block can be an input, standard, or output block.
+    is_custom: bool = False
 
     def resolved_fn(self):
-        if self.block_type == "llm_authored":
+        if self.is_custom:
             return _compile_code_to_fn(self.code or "")
         return BLOCK_REGISTRY[self.category].fn
 
     def resolved_metadata_transform(self):
-        if self.block_type == "llm_authored":
+        if self.is_custom:
             return self.metadata_transform
         return BLOCK_REGISTRY[self.category].metadata_transform
 

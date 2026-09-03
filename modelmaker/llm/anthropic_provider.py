@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
-from .prompts import CONTRACT, build_user_prompt
+from .prompts import CONTRACT, CONTRACT_PARAMS_ONLY, build_user_prompt
 
 DEFAULT_MODEL = "claude-opus-5"
 
@@ -33,6 +33,13 @@ class _BlockDraft(BaseModel):
     explanation: str
 
 
+class _ParamsDraft(BaseModel):
+    params: dict[str, str | float | bool | int] = Field(
+        default_factory=dict, description="Chosen values for the block's existing parameters."
+    )
+    explanation: str
+
+
 @register_provider("anthropic")
 class AnthropicProvider(LLMProvider):
     """Calls the Anthropic Messages API directly via the `anthropic` SDK.
@@ -45,6 +52,17 @@ class AnthropicProvider(LLMProvider):
         self.client = anthropic.Anthropic()
 
     def draft(self, ctx: DraftContext) -> DraftResult:
+        if ctx.mode == "params_only":
+            response = self.client.messages.parse(
+                model=self.model,
+                max_tokens=1024,
+                system=CONTRACT_PARAMS_ONLY,
+                messages=[{"role": "user", "content": build_user_prompt(ctx)}],
+                output_format=_ParamsDraft,
+            )
+            draft = response.parsed_output
+            return DraftResult(params=draft.params, explanation=draft.explanation)
+
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=4096,

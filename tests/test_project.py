@@ -12,7 +12,7 @@ def _build_graph():
     custom = make_block(
         "b_002",
         "bucket_income",
-        block_type="llm_authored",
+        block_type="standard",
         params={"bins": [0, 30000, 60000]},
         code="def bucket_income(df, bins):\n    return df\n",
         code_version=2,

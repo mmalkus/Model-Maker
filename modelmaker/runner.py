@@ -13,6 +13,7 @@ from .cache import CacheStore
 from .graph import Graph
 from .metadata_transforms import resolve_metadata_transform
 from .packet import DataFramePacket
+from .util import accepts_param
 
 Status = Literal["grey", "green", "orange", "red"]
 
@@ -68,7 +69,7 @@ class Runner:
             "category": block.category,
             "code_version": block.code_version,
             "params": block.params,
-            "code": block.code if block.block_type == "llm_authored" else None,
+            "code": block.code if block.is_custom else None,
             "upstream": upstream,
         }
         return _hash(basis)
@@ -110,7 +111,7 @@ class Runner:
             }
             fn = block.resolved_fn()
             call_kwargs = dict(plain_inputs, **block.params)
-            if block.block_type == "output":
+            if block.block_type == "output" and accepts_param(fn, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
             raw = fn(**call_kwargs)
 

@@ -11,6 +11,13 @@ class StubProvider(LLMProvider):
     MODELMAKER_LLM_PROVIDER at it."""
 
     def draft(self, ctx: DraftContext) -> DraftResult:
+        if ctx.mode == "params_only":
+            explanation = (
+                "Stub provider: no LLM was called, so no parameter values were suggested -- "
+                f"replace with a real provider to act on: {ctx.instruction!r}"
+            )
+            return DraftResult(explanation=explanation)
+
         code = f"def {ctx.function_name}(df):\n    return df\n"
         explanation = (
             "Stub provider: no LLM was called. Returned the input unchanged -- "

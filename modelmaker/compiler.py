@@ -5,6 +5,7 @@ import textwrap
 from datetime import datetime, timezone
 
 from .graph import Graph
+from .util import accepts_param
 
 
 class CompileError(Exception):
@@ -39,11 +40,13 @@ def compile_graph(
     order = [b for b in graph.topo_order() if b in reachable]
 
     fn_names: dict[str, str] = {}
+    wants_output_dir: dict[str, bool] = {}
     def_lines: list[str] = []
     for bid in order:
         block = graph.blocks[bid]
         fn = block.resolved_fn()
-        src = block.code if block.block_type == "llm_authored" else inspect.getsource(fn)
+        wants_output_dir[bid] = accepts_param(fn, "output_dir")
+        src = block.code if block.is_custom else inspect.getsource(fn)
         src = textwrap.dedent(src).strip("\n")
         fn_name = f"{_sanitize(block.category)}_{bid}"
         fn_names[bid] = fn_name
@@ -65,7 +68,7 @@ def compile_graph(
             kwargs.append(f"{port}={var_names[(wire.from_block, wire.from_port)]}")
         for pname, pval in block.params.items():
             kwargs.append(f"{pname}={pval!r}")
-        if block.block_type == "output":
+        if block.block_type == "output" and wants_output_dir[bid]:
             kwargs.append("output_dir=OUTPUT_DIR")
 
         out_ports = [p.name for p in block.outputs]

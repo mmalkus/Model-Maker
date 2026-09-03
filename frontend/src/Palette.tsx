@@ -40,13 +40,28 @@ function InlineAdd({ placeholder, onSubmit }: { placeholder: string; onSubmit: (
   )
 }
 
+const GROUP_ORDER = ['input', 'standard', 'modelling', 'tests', 'output']
+const GROUP_LABELS: Record<string, string> = {
+  input: 'Input',
+  standard: 'Standard',
+  modelling: 'Modelling',
+  tests: 'Tests',
+  output: 'Output',
+}
+
+const AI_BLOCK_TYPES: { blockType: 'input' | 'standard' | 'output'; label: string; title: string }[] = [
+  { blockType: 'input', label: '+ AI input block', title: 'A pipeline source with no upstream, like Read CSV -- Claude writes the code' },
+  { blockType: 'standard', label: '+ AI standard block', title: 'A mid-pipeline transform (df in, df out) -- Claude writes the code' },
+  { blockType: 'output', label: '+ AI output block', title: 'A terminal block (report, metric, export...) -- Claude writes the code' },
+]
+
 export function Palette({
   onAdd,
   onAddCustom,
   onAddLane,
 }: {
   onAdd: (category: string) => void
-  onAddCustom: (name: string) => void
+  onAddCustom: (blockType: 'input' | 'standard' | 'output') => void
   onAddLane: (name: string) => void
 }) {
   const [entries, setEntries] = useState<RegistryEntry[]>([])
@@ -57,8 +72,9 @@ export function Palette({
 
   const groups: Record<string, RegistryEntry[]> = {}
   for (const e of entries) {
-    ;(groups[e.block_type] ??= []).push(e)
+    ;(groups[e.group] ??= []).push(e)
   }
+  const orderedGroupNames = [...GROUP_ORDER.filter((g) => groups[g]), ...Object.keys(groups).filter((g) => !GROUP_ORDER.includes(g))]
 
   const buttonStyle = {
     display: 'block' as const,
@@ -73,21 +89,39 @@ export function Palette({
   return (
     <div style={{ width: 200, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto' }}>
       <h3 style={{ fontSize: 13, margin: '0 0 8px' }}>Blocks</h3>
-      {Object.entries(groups).map(([type, items]) => (
-        <div key={type} style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>{type}</div>
-          {items.map((e) => (
+
+      <div style={{ marginBottom: 12 }}>
+        {AI_BLOCK_TYPES.map(({ blockType, label, title }) => (
+          <button
+            key={blockType}
+            onClick={() => onAddCustom(blockType)}
+            title={title}
+            style={{
+              ...buttonStyle,
+              textAlign: 'center',
+              fontWeight: 600,
+              background: '#faf5ff',
+              border: '1px solid #d8b4fe',
+              color: '#6b21a8',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {orderedGroupNames.map((group) => (
+        <div key={group} style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>
+            {GROUP_LABELS[group] ?? group}
+          </div>
+          {groups[group].map((e) => (
             <button key={e.category} onClick={() => onAdd(e.category)} style={buttonStyle}>
               {e.display_name}
             </button>
           ))}
         </div>
       ))}
-
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>Custom</div>
-        <InlineAdd placeholder="block name" onSubmit={onAddCustom} />
-      </div>
 
       <div>
         <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>Lanes</div>

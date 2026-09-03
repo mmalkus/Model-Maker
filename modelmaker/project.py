@@ -34,6 +34,7 @@ def load_project(path: Path) -> Graph:
             code_ref=b.get("code_ref"),
             code=code,
             metadata_transform=b.get("metadata_transform"),
+            is_custom=b.get("is_custom", False),
         )
 
     wires = {
@@ -56,13 +57,14 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
     blocks_out = {}
     for bid, b in sorted(graph.blocks.items()):
         code_ref = b.code_ref
-        if b.block_type == "llm_authored" and b.code is not None:
+        if b.is_custom and b.code is not None:
             code_ref = code_ref or f"blocks/{bid}.py"
             sidecar = project_dir / code_ref
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             sidecar.write_text(b.code, encoding="utf-8")
         blocks_out[bid] = {
             "block_type": b.block_type,
+            "is_custom": b.is_custom,
             "category": b.category,
             "name": b.name,
             "lane": b.lane,
@@ -70,7 +72,7 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
             "code_version": b.code_version,
             "params": b.params,
             "code_ref": code_ref,
-            "metadata_transform": b.metadata_transform if b.block_type == "llm_authored" else None,
+            "metadata_transform": b.metadata_transform if b.is_custom else None,
             "ports": {
                 "inputs": [asdict(p) for p in b.inputs],
                 "outputs": [asdict(p) for p in b.outputs],

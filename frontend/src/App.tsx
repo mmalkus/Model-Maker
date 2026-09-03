@@ -220,26 +220,35 @@ function AppInner() {
     [reload],
   )
 
-  const addCustomBlock = useCallback((name: string) => {
-    const fnName = name.replace(/[^a-zA-Z0-9_]/g, '_')
-    api
-      .createBlock({
-        category: fnName,
-        block_type: 'llm_authored',
-        name,
-        x: 80 + Math.random() * 200,
-        y: 80 + Math.random() * 200,
-        inputs: [{ name: 'df', type: 'dataframe' }],
-        outputs: [{ name: 'out', type: 'dataframe' }],
-        code: `def ${fnName}(df):\n    return df\n`,
-        metadata_transform: { kind: 'passthrough' },
-      })
-      .then((b) => {
-        reload()
-        setSelectedId(b.id)
-      })
-      .catch((e) => alert(e.message))
-  }, [reload])
+  const addCustomBlock = useCallback(
+    (blockType: 'input' | 'standard' | 'output') => {
+      // No name prompt -- create a blank block immediately and let the user
+      // describe it via "Draft with AI" right away; rename later by clicking
+      // the block's name in the inspector. An input block gets no `df`
+      // parameter (it's a pipeline source, like read_csv); standard/output
+      // both start as a df -> df passthrough the user redrafts from there.
+      const fnName = `ai_block_${Date.now().toString(36)}`
+      const isSource = blockType === 'input'
+      api
+        .createBlock({
+          category: fnName,
+          block_type: blockType,
+          name: `New AI ${blockType} block`,
+          x: 80 + Math.random() * 200,
+          y: 80 + Math.random() * 200,
+          inputs: isSource ? [] : [{ name: 'df', type: 'dataframe' }],
+          outputs: [{ name: 'out', type: 'dataframe' }],
+          code: isSource ? `def ${fnName}():\n    return pl.DataFrame()\n` : `def ${fnName}(df):\n    return df\n`,
+          metadata_transform: { kind: isSource ? 'infer_dtypes' : 'passthrough' },
+        })
+        .then((b) => {
+          reload()
+          setSelectedId(b.id)
+        })
+        .catch((e) => alert(e.message))
+    },
+    [reload],
+  )
 
   const selectedBlock: BlockOut | null = graph && selectedId ? (graph.blocks[selectedId] ?? null) : null
 

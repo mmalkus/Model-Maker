@@ -21,13 +21,14 @@ def make_block(
     metadata_transform=None,
 ) -> BlockInstance:
     spec = BLOCK_REGISTRY.get(category)
+    is_custom = spec is None
     if spec is not None:
         block_type = block_type or spec.block_type
         inputs = inputs if inputs is not None else list(spec.inputs)
         outputs = outputs if outputs is not None else list(spec.outputs)
     return BlockInstance(
         id=bid,
-        block_type=block_type or "llm_authored",
+        block_type=block_type or "standard",
         category=category,
         name=bid,
         lane=lane,
@@ -38,4 +39,5 @@ def make_block(
         outputs=outputs or [],
         code=code,
         metadata_transform=metadata_transform,
+        is_custom=is_custom,
     )
