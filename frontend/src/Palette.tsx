@@ -65,10 +65,20 @@ export function Palette({
   onAddLane: (name: string) => void
 }) {
   const [entries, setEntries] = useState<RegistryEntry[]>([])
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     api.registry().then(setEntries).catch(console.error)
   }, [])
+
+  const toggleGroup = (group: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(group)) next.delete(group)
+      else next.add(group)
+      return next
+    })
+  }
 
   const groups: Record<string, RegistryEntry[]> = {}
   for (const e of entries) {
@@ -110,18 +120,40 @@ export function Palette({
         ))}
       </div>
 
-      {orderedGroupNames.map((group) => (
-        <div key={group} style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>
-            {GROUP_LABELS[group] ?? group}
-          </div>
-          {groups[group].map((e) => (
-            <button key={e.category} onClick={() => onAdd(e.category)} style={buttonStyle}>
-              {e.display_name}
+      {orderedGroupNames.map((group) => {
+        const collapsed = collapsedGroups.has(group)
+        return (
+          <div key={group} style={{ marginBottom: 12 }}>
+            <button
+              onClick={() => toggleGroup(group)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                width: '100%',
+                textAlign: 'left',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                marginBottom: 4,
+                fontSize: 11,
+                color: '#6b7280',
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+              }}
+            >
+              <span style={{ fontSize: 9 }}>{collapsed ? '▸' : '▾'}</span>
+              {GROUP_LABELS[group] ?? group}
             </button>
-          ))}
-        </div>
-      ))}
+            {!collapsed &&
+              groups[group].map((e) => (
+                <button key={e.category} onClick={() => onAdd(e.category)} style={buttonStyle}>
+                  {e.display_name}
+                </button>
+              ))}
+          </div>
+        )
+      })}
 
       <div>
         <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>Lanes</div>
