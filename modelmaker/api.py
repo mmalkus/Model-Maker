@@ -600,3 +600,18 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
         "params": result.params,
         "explanation": result.explanation,
     }
+
+
+def main() -> None:
+    """Entry point for the `modelmaker-api` console script."""
+    import uvicorn
+
+    uvicorn.run(
+        "modelmaker.api:app",
+        host=os.environ.get("MODELMAKER_HOST", "127.0.0.1"),
+        port=int(os.environ.get("MODELMAKER_PORT", "8001")),
+    )
+
+
+if __name__ == "__main__":
+    main()
