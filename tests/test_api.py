@@ -61,6 +61,25 @@ def test_create_wire_run_and_preview(client, tmp_path):
     assert {r["a"] for r in preview["rows"]} == {2, 3}
 
 
+def test_rename_port_sets_and_clears_a_data_name(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n2,20\n3,30\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    resp = client.patch(f"/api/blocks/{read['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    assert resp.status_code == 200
+    assert resp.json()["port_names"] == {"out": "raw applications"}
+
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][read["id"]]["port_names"] == {"out": "raw applications"}
+
+    cleared = client.patch(f"/api/blocks/{read['id']}/port_name", json={"port": "out", "name": None})
+    assert cleared.json()["port_names"] == {}
+
+    bad_port = client.patch(f"/api/blocks/{read['id']}/port_name", json={"port": "nonexistent", "name": "x"})
+    assert bad_port.status_code == 400
+
+
 def test_invalid_wire_type_mismatch_is_flagged_not_rejected(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")

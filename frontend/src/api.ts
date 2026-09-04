@@ -69,8 +69,8 @@ export const api = {
   createWire: (body: { from_block: string; from_port: string; to_block: string; to_port: string }) =>
     request<{ id: string; valid: boolean }>('/wires', { method: 'POST', body: JSON.stringify(body) }),
   deleteWire: (id: string) => request<void>(`/wires/${id}`, { method: 'DELETE' }),
-  renameWire: (id: string, name: string | null) =>
-    request<{ id: string; name: string | null }>(`/wires/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  renamePort: (blockId: string, port: string, name: string | null) =>
+    request<BlockOut>(`/blocks/${blockId}/port_name`, { method: 'PATCH', body: JSON.stringify({ port, name }) }),
 
   run: (id: string) => request<BlockOut>(`/blocks/${id}/run`, { method: 'POST' }),
   runToHere: (id: string) => request<BlockOut>(`/blocks/${id}/run_to_here`, { method: 'POST' }),
@@ -87,6 +87,7 @@ export const api = {
 
   save: (path?: string) => request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }),
   load: (path: string) => request<GraphOut>('/project/load', { method: 'POST', body: JSON.stringify({ path }) }),
+  projectDefaultDir: () => request<{ path: string }>('/project/default_dir'),
 
   imageUrl: (id: string, port: string, cacheBust?: string | null) =>
     `/api/blocks/${id}/image?port=${encodeURIComponent(port)}${cacheBust ? `&t=${encodeURIComponent(cacheBust)}` : ''}`,

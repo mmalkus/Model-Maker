@@ -33,11 +33,6 @@ class Wire:
     from_port: str
     to_block: str
     to_port: str
-    # A wire carries data from from_block:from_port to to_block:to_port --
-    # this is an optional human label for that data (e.g. "raw applications"),
-    # shown on the canvas at the wire's midpoint. Purely descriptive; compiled
-    # output and execution never read it.
-    name: str | None = None
 
 
 @dataclass
@@ -69,6 +64,14 @@ class BlockInstance:
     # column invalidates this block and everything downstream the same way
     # any other param change does; no separate staleness bookkeeping needed.
     column_role_overrides: dict[str, str] = field(default_factory=dict)
+    # output port name -> user-given name for the data on that port (e.g.
+    # "raw applications"), settable by clicking that port's data in the UI
+    # (see PortInspector.tsx). Purely descriptive except in one place: the
+    # compiler uses it, when set, as the compiled variable name that holds
+    # this port's data instead of the auto-generated block-name/id scheme
+    # (see compiler.compile_graph) -- so naming your data also names it in
+    # the generated script.
+    port_names: dict[str, str] = field(default_factory=dict)
 
     def resolved_fn(self):
         if self.is_custom:

@@ -33,6 +33,13 @@ app.add_middleware(
 
 SESSION = ProjectSession()
 
+# Where Save/Load default to when no project path is already known (see
+# Toolbar.tsx) -- a subdirectory next to wherever the server runs. Not
+# created at import time (nothing should touch the filesystem just from
+# importing this module, e.g. under test) -- see project_default_dir below,
+# which creates it on first request instead.
+DEFAULT_PROJECTS_DIR = Path(os.environ.get("MODELMAKER_PROJECTS_DIR", "./projects")).expanduser().resolve()
+
 
 # ---- schemas -----------------------------------------------------------
 
@@ -78,7 +85,8 @@ class WireCreate(BaseModel):
     to_port: str
 
 
-class WireUpdate(BaseModel):
+class PortNameUpdate(BaseModel):
+    port: str
     name: str | None = None
 
 
@@ -153,6 +161,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "metadata_transform": block.metadata_transform,
         "inputs": [asdict(p) for p in block.inputs],
         "outputs": [asdict(p) for p in block.outputs],
+        "port_names": block.port_names,
         "status": SESSION.runner.status(block_id),
         "last_error": st.last_error if st else None,
         "last_successful_read_at": st.last_successful_read_at if st else None,
@@ -172,7 +181,6 @@ def _graph_out() -> dict[str, Any]:
                 "from_port": w.from_port,
                 "to_block": w.to_block,
                 "to_port": w.to_port,
-                "name": w.name,
                 "valid": wire_is_valid(SESSION.graph, w),
             }
             for wid, w in SESSION.graph.wires.items()
@@ -296,6 +304,12 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
         "parent": str(parent) if parent != base else None,
         "entries": entries,
     }
+
+
+@app.get("/api/project/default_dir")
+def project_default_dir() -> dict[str, str]:
+    DEFAULT_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    return {"path": str(DEFAULT_PROJECTS_DIR)}
 
 
 @app.post("/api/project/load")
@@ -443,7 +457,6 @@ def create_wire(req: WireCreate) -> dict[str, Any]:
         "from_port": wire.from_port,
         "to_block": wire.to_block,
         "to_port": wire.to_port,
-        "name": wire.name,
         "valid": wire_is_valid(SESSION.graph, wire),
     }
 
@@ -454,20 +467,18 @@ def delete_wire(wire_id: str) -> dict[str, str]:
     return {"deleted": wire_id}
 
 
-@app.patch("/api/wires/{wire_id}")
-def update_wire(wire_id: str, req: WireUpdate) -> dict[str, Any]:
-    if wire_id not in SESSION.graph.wires:
-        raise HTTPException(404, f"no such wire: {wire_id}")
-    wire = SESSION.rename_wire(wire_id, req.name)
-    return {
-        "id": wire.id,
-        "from_block": wire.from_block,
-        "from_port": wire.from_port,
-        "to_block": wire.to_block,
-        "to_port": wire.to_port,
-        "name": wire.name,
-        "valid": wire_is_valid(SESSION.graph, wire),
-    }
+@app.patch("/api/blocks/{block_id}/port_name")
+def rename_port(block_id: str, req: PortNameUpdate) -> dict[str, Any]:
+    """Name (or clear the name of) the data on one of this block's output
+    ports -- see BlockInstance.port_names. Set by clicking that port's data
+    in the UI (PortInspector); used, when set, as the compiled script's
+    variable name for it (see compiler.compile_graph)."""
+    _require_block(block_id)
+    try:
+        SESSION.rename_port(block_id, req.port, req.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _block_out(block_id)
 
 
 @app.put("/api/lanes")

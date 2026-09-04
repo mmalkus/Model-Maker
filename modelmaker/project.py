@@ -39,6 +39,7 @@ def load_project(path: Path) -> Graph:
             metadata_transform=b.get("metadata_transform"),
             is_custom=b.get("is_custom", False),
             column_role_overrides=b.get("column_role_overrides", {}),
+            port_names=b.get("port_names", {}),
         )
 
     wires = {
@@ -48,7 +49,6 @@ def load_project(path: Path) -> Graph:
             from_port=w["from"]["port"],
             to_block=w["to"]["block"],
             to_port=w["to"]["port"],
-            name=w.get("name"),
         )
         for wid, w in data.get("wires", {}).items()
     }
@@ -58,6 +58,7 @@ def load_project(path: Path) -> Graph:
 
 def save_project(graph: Graph, path: Path, project_name: str = "project") -> None:
     project_dir = path.parent
+    project_dir.mkdir(parents=True, exist_ok=True)
 
     blocks_out = {}
     for bid, b in sorted(graph.blocks.items()):
@@ -79,6 +80,7 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
             "code_ref": code_ref,
             "metadata_transform": b.metadata_transform if b.is_custom else None,
             "column_role_overrides": b.column_role_overrides,
+            "port_names": b.port_names,
             "ports": {
                 "inputs": [asdict(p) for p in b.inputs],
                 "outputs": [asdict(p) for p in b.outputs],
@@ -89,7 +91,6 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
         wid: {
             "from": {"block": w.from_block, "port": w.from_port},
             "to": {"block": w.to_block, "port": w.to_port},
-            "name": w.name,
         }
         for wid, w in sorted(graph.wires.items())
     }

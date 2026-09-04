@@ -186,10 +186,17 @@ class ProjectSession:
     def delete_wire(self, wire_id: str) -> None:
         self.graph.wires.pop(wire_id, None)
 
-    def rename_wire(self, wire_id: str, name: str | None) -> Wire:
-        wire = self.graph.wires[wire_id]
-        wire.name = name
-        return wire
+    def rename_port(self, block_id: str, port: str, name: str | None) -> BlockInstance:
+        block = self.graph.blocks[block_id]
+        if not any(p.name == port for p in block.outputs):
+            raise ValueError(f"no such output port: {port}")
+        port_names = dict(block.port_names)
+        if name:
+            port_names[port] = name
+        else:
+            port_names.pop(port, None)
+        block.port_names = port_names
+        return block
 
     def set_lane(self, lane_id: str, name: str, order: int, height: float | None = None) -> None:
         existing = self.graph.lanes.get(lane_id)
