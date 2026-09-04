@@ -117,7 +117,7 @@ def test_run_all_and_compile(client, tmp_path):
     assert report[filt["id"]] == "green"
 
     compiled = client.post("/api/compile", json={}).json()
-    assert "def filter_" in compiled["source"]
+    assert "def filter(" in compiled["source"]
 
 
 def test_compile_before_run_returns_409(client, tmp_path):
