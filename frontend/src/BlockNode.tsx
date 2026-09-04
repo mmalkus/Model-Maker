@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import type { BlockOut } from './types'
+import type { BlockOut, PortType } from './types'
 
 const STATUS_COLOR: Record<string, string> = {
   grey: '#9ca3af',
@@ -8,12 +8,32 @@ const STATUS_COLOR: Record<string, string> = {
   red: '#ef4444',
 }
 
+// What kind of object each port type actually is, at a glance -- so a
+// block's card shows the *object* it produces (a table, a fitted model, a
+// single number, a chart) rather than just its plumbing.
+const PORT_BADGE: Record<PortType, { icon: string; label: string; color: string }> = {
+  dataframe: { icon: '▦', label: 'table', color: '#2563eb' },
+  model: { icon: '◆', label: 'model', color: '#7c3aed' },
+  scalar_metric: { icon: '#', label: 'metric', color: '#16a34a' },
+  image: { icon: '▨', label: 'image', color: '#ea580c' },
+  any: { icon: '?', label: 'value', color: '#6b7280' },
+}
+
+function formatParamValue(v: unknown): string {
+  if (v === null || v === undefined) return String(v)
+  if (Array.isArray(v)) return `[${v.length}]`
+  if (typeof v === 'object') return '{…}'
+  const s = String(v)
+  return s.length > 18 ? `${s.slice(0, 16)}…` : s
+}
+
 export type BlockNodeData = { block: BlockOut }
 export type BlockFlowNode = Node<BlockNodeData, 'modelBlock'>
 
 export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
   const { block } = data
   const color = STATUS_COLOR[block.status] ?? STATUS_COLOR.grey
+  const paramEntries = Object.entries(block.params)
 
   return (
     <div
@@ -43,6 +63,55 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
       </div>
       <div style={{ padding: '4px 8px 8px', color: '#6b7280' }}>
         <div>{block.category}</div>
+
+        {paramEntries.length > 0 && (
+          <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+            {paramEntries.map(([k, v]) => (
+              <span
+                key={k}
+                title={`${k} = ${JSON.stringify(v)}`}
+                style={{
+                  background: '#f3f4f6',
+                  borderRadius: 4,
+                  padding: '1px 4px',
+                  fontSize: 10,
+                  color: '#4b5563',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {k}={formatParamValue(v)}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {block.outputs.length > 0 && (
+          <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {block.outputs.map((p) => {
+              const badge = PORT_BADGE[p.type] ?? PORT_BADGE.any
+              return (
+                <span
+                  key={p.name}
+                  title={`${p.name}: produces a ${badge.label}`}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    fontSize: 10,
+                    color: badge.color,
+                    border: `1px solid ${badge.color}55`,
+                    borderRadius: 4,
+                    padding: '0 4px',
+                  }}
+                >
+                  <span>{badge.icon}</span>
+                  {p.name}
+                </span>
+              )
+            })}
+          </div>
+        )}
+
         {block.status === 'red' && block.last_error && (
           <div style={{ color: '#ef4444', marginTop: 4, wordBreak: 'break-word' }}>{block.last_error}</div>
         )}

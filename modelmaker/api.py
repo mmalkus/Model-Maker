@@ -73,10 +73,15 @@ class WireCreate(BaseModel):
     to_port: str
 
 
+class WireUpdate(BaseModel):
+    name: str | None = None
+
+
 class LaneUpsert(BaseModel):
     id: str
     name: str
     order: int
+    height: float | None = None
 
 
 class LoadRequest(BaseModel):
@@ -154,7 +159,7 @@ def _graph_out() -> dict[str, Any]:
     return {
         "project_name": SESSION.project_name,
         "project_path": str(SESSION.project_path) if SESSION.project_path else None,
-        "lanes": {lid: {"name": l.name, "order": l.order} for lid, l in SESSION.graph.lanes.items()},
+        "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in SESSION.graph.lanes.items()},
         "blocks": {bid: _block_out(bid) for bid in SESSION.graph.blocks},
         "wires": {
             wid: {
@@ -162,6 +167,7 @@ def _graph_out() -> dict[str, Any]:
                 "from_port": w.from_port,
                 "to_block": w.to_block,
                 "to_port": w.to_port,
+                "name": w.name,
                 "valid": wire_is_valid(SESSION.graph, w),
             }
             for wid, w in SESSION.graph.wires.items()
@@ -406,13 +412,17 @@ def create_wire(req: WireCreate) -> dict[str, Any]:
     for bid in (req.from_block, req.to_block):
         if bid not in SESSION.graph.blocks:
             raise HTTPException(404, f"no such block: {bid}")
-    wire = SESSION.add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
+    try:
+        wire = SESSION.add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {
         "id": wire.id,
         "from_block": wire.from_block,
         "from_port": wire.from_port,
         "to_block": wire.to_block,
         "to_port": wire.to_port,
+        "name": wire.name,
         "valid": wire_is_valid(SESSION.graph, wire),
     }
 
@@ -423,9 +433,25 @@ def delete_wire(wire_id: str) -> dict[str, str]:
     return {"deleted": wire_id}
 
 
+@app.patch("/api/wires/{wire_id}")
+def update_wire(wire_id: str, req: WireUpdate) -> dict[str, Any]:
+    if wire_id not in SESSION.graph.wires:
+        raise HTTPException(404, f"no such wire: {wire_id}")
+    wire = SESSION.rename_wire(wire_id, req.name)
+    return {
+        "id": wire.id,
+        "from_block": wire.from_block,
+        "from_port": wire.from_port,
+        "to_block": wire.to_block,
+        "to_port": wire.to_port,
+        "name": wire.name,
+        "valid": wire_is_valid(SESSION.graph, wire),
+    }
+
+
 @app.put("/api/lanes")
 def upsert_lane(req: LaneUpsert) -> dict[str, Any]:
-    SESSION.set_lane(req.id, req.name, req.order)
+    SESSION.set_lane(req.id, req.name, req.order, height=req.height)
     return _graph_out()["lanes"]
 
 
@@ -455,7 +481,7 @@ def run_to_here_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
     try:
         SESSION.runner.run_to_here(block_id)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         raise HTTPException(409, str(e))
     return _block_out(block_id)
 
@@ -480,12 +506,18 @@ def check_changes(block_id: str) -> dict[str, Any]:
 
 @app.post("/api/run_all")
 def run_all() -> dict[str, str]:
-    return SESSION.runner.run_all()
+    try:
+        return SESSION.runner.run_all()
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/api/force_run_all")
 def force_run_all() -> dict[str, str]:
-    return SESSION.runner.force_run_all()
+    try:
+        return SESSION.runner.force_run_all()
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/api/refresh_all")
@@ -504,7 +536,7 @@ def compile_ep(req: CompileRequest) -> dict[str, str]:
         source = compile_graph(
             SESSION.graph, runner=SESSION.runner, output_blocks=req.output_blocks, strict=req.strict
         )
-    except CompileError as e:
+    except (CompileError, ValueError) as e:
         raise HTTPException(409, str(e))
     return {"source": source}
 

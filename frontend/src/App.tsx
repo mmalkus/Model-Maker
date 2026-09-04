@@ -6,21 +6,22 @@ import {
   applyNodeChanges,
   useReactFlow,
   type Connection,
-  type Edge,
   type NodeChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { BlockNode, type BlockFlowNode } from './BlockNode'
+import { DataWireEdge, WirePortalContext, type DataWireEdgeType } from './DataWireEdge'
 import { Inspector } from './Inspector'
-import { BAND_HEIGHT, BAND_X, LaneBand, laneY, type LaneBandNode } from './LaneBand'
-import { LaneLabels, type LaneEntry } from './LaneLabels'
+import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
+import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut } from './types'
+import type { BlockOut, GraphOut, LaneOut } from './types'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
+const edgeTypes = { dataWire: DataWireEdge }
 
 type FlowNode = BlockFlowNode | LaneBandNode
 
@@ -35,16 +36,22 @@ function toBlockNodes(graph: GraphOut, collapsedLanes: Set<string>): BlockFlowNo
     }))
 }
 
-function toEdges(graph: GraphOut): Edge[] {
-  return Object.entries(graph.wires).map(([id, w]) => ({
-    id,
-    source: w.from_block,
-    sourceHandle: w.from_port,
-    target: w.to_block,
-    targetHandle: w.to_port,
-    style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
-    animated: !w.valid,
-  }))
+function toEdges(graph: GraphOut): DataWireEdgeType[] {
+  return Object.entries(graph.wires).map(([id, w]) => {
+    const fromBlock = graph.blocks[w.from_block]
+    const portType = fromBlock?.outputs.find((p) => p.name === w.from_port)?.type
+    return {
+      id,
+      type: 'dataWire' as const,
+      source: w.from_block,
+      sourceHandle: w.from_port,
+      target: w.to_block,
+      targetHandle: w.to_port,
+      style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
+      animated: !w.valid,
+      data: { wire: w, portType, fromLabel: fromBlock?.name ?? w.from_block },
+    }
+  })
 }
 
 export default function App() {
@@ -60,7 +67,8 @@ function AppInner() {
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
-  const { fitView } = useReactFlow()
+  const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
+  const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
   const reload = useCallback(() => {
@@ -136,30 +144,48 @@ function AppInner() {
     (name: string) => {
       if (!graph) return
       const nextOrder = Object.values(graph.lanes).reduce((max, l) => Math.max(max, l.order + 1), 0)
-      api.upsertLane(`lane_${Date.now().toString(36)}`, name, nextOrder).then(reload)
+      api.upsertLane(`lane_${Date.now().toString(36)}`, name, nextOrder, DEFAULT_LANE_HEIGHT).then(reload)
     },
     [graph, reload],
   )
 
-  const laneEntries: LaneEntry[] = useMemo(() => {
+  const resizeLane = useCallback(
+    (laneId: string, height: number) => {
+      if (!graph) return
+      const current = graph.lanes[laneId]
+      if (!current) return
+      api.upsertLane(laneId, current.name, current.order, height).then(reload)
+    },
+    [graph, reload],
+  )
+
+  const laneEntries: { id: string; lane: LaneOut }[] = useMemo(() => {
     if (!graph) return []
     return Object.entries(graph.lanes)
       .sort((a, b) => a[1].order - b[1].order)
       .map(([id, lane]) => ({ id, lane }))
   }, [graph])
 
+  // Cumulative pixel layout: lanes stack end-to-end by `order` with no gaps,
+  // so resizing one (see resizeLane) only ever shifts the ones after it --
+  // they can never overlap.
+  const laneLayout: LaneLayoutEntry[] = useMemo(
+    () => layoutLanes(laneEntries, collapsedLanes),
+    [laneEntries, collapsedLanes],
+  )
+
   const laneNodes: LaneBandNode[] = useMemo(
     () =>
-      laneEntries.map(({ id, lane }) => ({
+      laneLayout.map(({ id, lane, top, height }) => ({
         id: `laneband_${id}`,
         type: 'laneBand' as const,
-        position: { x: BAND_X, y: laneY(lane.order) },
+        position: { x: BAND_X, y: top },
         draggable: false,
         selectable: false,
         zIndex: -10,
-        data: { order: lane.order, collapsed: collapsedLanes.has(id) },
+        data: { order: lane.order, height, collapsed: collapsedLanes.has(id) },
       })),
-    [laneEntries, collapsedLanes],
+    [laneLayout, collapsedLanes],
   )
 
   const nodes: FlowNode[] = useMemo(() => [...laneNodes, ...blockNodes], [laneNodes, blockNodes])
@@ -168,18 +194,24 @@ function AppInner() {
     setBlockNodes((nds) => applyNodeChanges(changes, nds) as BlockFlowNode[])
   }, [])
 
+  const laneForY = useCallback(
+    (y: number): string | null => {
+      const hit = laneLayout.find((l) => y >= l.top && y < l.top + l.height)
+      return hit ? hit.id : null
+    },
+    [laneLayout],
+  )
+
   const onNodeDragStop = useCallback(
     (_: unknown, node: FlowNode) => {
       if (node.type !== 'modelBlock' || !graph) return
-      const laneOrder = Math.floor(node.position.y / BAND_HEIGHT)
-      const targetLane = Object.entries(graph.lanes).find(([, l]) => l.order === laneOrder)
-      const newLane = targetLane ? targetLane[0] : null
+      const newLane = laneForY(node.position.y)
       const currentLane = graph.blocks[node.id]?.lane ?? null
       const patch: Parameters<typeof api.updateBlock>[1] = { position: node.position }
       if (newLane !== currentLane) patch.lane = newLane
       api.updateBlock(node.id, patch).then(reload).catch(console.error)
     },
-    [graph, reload],
+    [graph, reload, laneForY],
   )
 
   const onConnect = useCallback(
@@ -199,7 +231,7 @@ function AppInner() {
   )
 
   const onEdgeClick = useCallback(
-    (_: unknown, edge: Edge) => {
+    (_: unknown, edge: DataWireEdgeType) => {
       if (confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
       }
@@ -208,9 +240,10 @@ function AppInner() {
   )
 
   const addBlock = useCallback(
-    (category: string) => {
+    (category: string, at?: { x: number; y: number }) => {
+      const pos = at ?? { x: 80 + Math.random() * 200, y: 80 + Math.random() * 200 }
       api
-        .createBlock({ category, x: 80 + Math.random() * 200, y: 80 + Math.random() * 200 })
+        .createBlock({ category, x: pos.x, y: pos.y })
         .then((b) => {
           reload()
           setSelectedId(b.id)
@@ -221,7 +254,7 @@ function AppInner() {
   )
 
   const addCustomBlock = useCallback(
-    (blockType: 'input' | 'standard' | 'output') => {
+    (blockType: 'input' | 'standard' | 'output', at?: { x: number; y: number }) => {
       // No name prompt -- create a blank block immediately and let the user
       // describe it via "Draft with AI" right away; rename later by clicking
       // the block's name in the inspector. An input block gets no `df`
@@ -229,13 +262,14 @@ function AppInner() {
       // both start as a df -> df passthrough the user redrafts from there.
       const fnName = `ai_block_${Date.now().toString(36)}`
       const isSource = blockType === 'input'
+      const pos = at ?? { x: 80 + Math.random() * 200, y: 80 + Math.random() * 200 }
       api
         .createBlock({
           category: fnName,
           block_type: blockType,
           name: `New AI ${blockType} block`,
-          x: 80 + Math.random() * 200,
-          y: 80 + Math.random() * 200,
+          x: pos.x,
+          y: pos.y,
           inputs: isSource ? [] : [{ name: 'df', type: 'dataframe' }],
           outputs: [{ name: 'out', type: 'dataframe' }],
           code: isSource ? `def ${fnName}():\n    return pl.DataFrame()\n` : `def ${fnName}(df):\n    return df\n`,
@@ -250,6 +284,25 @@ function AppInner() {
     [reload],
   )
 
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('application/x-modelmaker-block')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      const raw = e.dataTransfer.getData('application/x-modelmaker-block')
+      if (!raw) return
+      e.preventDefault()
+      const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      const dropped = JSON.parse(raw) as { kind: 'registry'; category: string } | { kind: 'custom'; blockType: 'input' | 'standard' | 'output' }
+      if (dropped.kind === 'registry') addBlock(dropped.category, at)
+      else addCustomBlock(dropped.blockType, at)
+    },
+    [screenToFlowPosition, addBlock, addCustomBlock],
+  )
+
   const selectedBlock: BlockOut | null = graph && selectedId ? (graph.blocks[selectedId] ?? null) : null
 
   return (
@@ -257,29 +310,40 @@ function AppInner() {
       <Toolbar onChanged={reload} projectPath={graph?.project_path ?? null} />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
-        <div style={{ flex: 1 }}>
-          <ReactFlow
-            nodes={nodes}
-            edges={graph ? toEdges(graph) : []}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onNodeDragStop={onNodeDragStop}
-            onConnect={onConnect}
-            onEdgeClick={onEdgeClick}
-            onNodeClick={(_, node) => node.type === 'modelBlock' && setSelectedId(node.id)}
-            onPaneClick={() => setSelectedId(null)}
-          >
-            <Background />
-            <Controls />
-            <LaneLabels
-              lanes={laneEntries}
-              collapsedLanes={collapsedLanes}
-              onToggleCollapse={toggleCollapse}
-              onRename={renameLane}
-              onDelete={deleteLane}
-              onMove={moveLane}
-            />
-          </ReactFlow>
+        <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
+          <WirePortalContext.Provider value={wirePortal}>
+            <ReactFlow
+              nodes={nodes}
+              edges={graph ? toEdges(graph) : []}
+              nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={onNodesChange}
+              onNodeDragStop={onNodeDragStop}
+              onConnect={onConnect}
+              onEdgeClick={onEdgeClick}
+              onNodeClick={(_, node) => node.type === 'modelBlock' && setSelectedId(node.id)}
+              onPaneClick={() => setSelectedId(null)}
+            >
+              <Background />
+              <Controls />
+              <LaneLabels
+                lanes={laneLayout}
+                collapsedLanes={collapsedLanes}
+                onToggleCollapse={toggleCollapse}
+                onRename={renameLane}
+                onDelete={deleteLane}
+                onMove={moveLane}
+              />
+              <LaneResizeHandles lanes={laneLayout} collapsedLanes={collapsedLanes} onResize={resizeLane} />
+              {/* Root-level sibling of the lane toolbar/handles above (not
+                  nested inside ReactFlow's internal node/edge layer) so a
+                  wire's midpoint controls -- portaled here from
+                  DataWireEdge, see WirePortalContext -- always paint (and
+                  receive clicks) above them, even when they overlap on
+                  screen. */}
+              <div ref={setWirePortal} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 8 }} />
+            </ReactFlow>
+          </WirePortalContext.Provider>
         </div>
         <Inspector block={selectedBlock} onChanged={reload} />
       </div>

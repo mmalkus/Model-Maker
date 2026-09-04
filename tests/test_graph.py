@@ -49,6 +49,18 @@ def test_cycle_detection_raises():
         graph.topo_order()
 
 
+def test_creates_cycle_detects_would_be_cycle():
+    a = make_block("a", "filter", params={"expr": "1=1"})
+    b = make_block("b", "filter", params={"expr": "1=1"})
+    graph = Graph(
+        blocks={"a": a, "b": b},
+        wires={"w1": Wire("w1", "a", "out", "b", "df")},
+    )
+    assert graph.creates_cycle("b", "a") is True
+    assert graph.creates_cycle("a", "a") is True
+    assert graph.creates_cycle("a", "b") is False
+
+
 def test_ancestors_transitive():
     a = make_block("a", "read_csv", params={"path": "x.csv"})
     b = make_block("b", "filter", params={"expr": "1=1"})

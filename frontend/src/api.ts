@@ -44,12 +44,13 @@ export const api = {
 
   deleteBlock: (id: string) => request<void>(`/blocks/${id}`, { method: 'DELETE' }),
 
-  upsertLane: (id: string, name: string, order: number) =>
-    request<Record<string, { name: string; order: number }>>('/lanes', {
+  upsertLane: (id: string, name: string, order: number, height?: number) =>
+    request<Record<string, { name: string; order: number; height: number }>>('/lanes', {
       method: 'PUT',
-      body: JSON.stringify({ id, name, order }),
+      body: JSON.stringify({ id, name, order, height }),
     }),
-  deleteLane: (id: string) => request<Record<string, { name: string; order: number }>>(`/lanes/${id}`, { method: 'DELETE' }),
+  deleteLane: (id: string) =>
+    request<Record<string, { name: string; order: number; height: number }>>(`/lanes/${id}`, { method: 'DELETE' }),
 
   inputSchema: (id: string) => request<InputSchemaOut>(`/blocks/${id}/input_schema`),
 
@@ -65,6 +66,8 @@ export const api = {
   createWire: (body: { from_block: string; from_port: string; to_block: string; to_port: string }) =>
     request<{ id: string; valid: boolean }>('/wires', { method: 'POST', body: JSON.stringify(body) }),
   deleteWire: (id: string) => request<void>(`/wires/${id}`, { method: 'DELETE' }),
+  renameWire: (id: string, name: string | null) =>
+    request<{ id: string; name: string | null }>(`/wires/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
 
   run: (id: string) => request<BlockOut>(`/blocks/${id}/run`, { method: 'POST' }),
   runToHere: (id: string) => request<BlockOut>(`/blocks/${id}/run_to_here`, { method: 'POST' }),

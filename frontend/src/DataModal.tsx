@@ -11,6 +11,13 @@ export function DataModal({
 }) {
   return (
     <div
+      // "nodrag nopan" + pointer-events: all matter when this is opened from
+      // a wire's mid-line data view (DataWireEdge): it's rendered inside
+      // ReactFlow's EdgeLabelRenderer portal, whose container has
+      // pointer-events: none by default so it doesn't block the canvas --
+      // without opting back in here, clicks would fall through to whatever
+      // canvas node sits behind the modal.
+      className="nodrag nopan"
       style={{
         position: 'fixed',
         inset: 24,
@@ -19,6 +26,7 @@ export function DataModal({
         borderRadius: 8,
         padding: 16,
         zIndex: 50,
+        pointerEvents: 'all',
         display: 'flex',
         flexDirection: 'column',
         boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
