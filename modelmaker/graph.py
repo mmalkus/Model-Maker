@@ -19,6 +19,11 @@ class Position:
 class Lane:
     name: str
     order: int
+    # Pixel height of this lane's band on the canvas -- user-resizable by
+    # dragging its top/bottom border (see LaneBand.tsx). Lanes stack
+    # end-to-end by `order` with no gap, so lanes can never overlap by
+    # construction; resizing one only shifts the ones after it.
+    height: float = 260.0
 
 
 @dataclass
@@ -28,6 +33,11 @@ class Wire:
     from_port: str
     to_block: str
     to_port: str
+    # A wire carries data from from_block:from_port to to_block:to_port --
+    # this is an optional human label for that data (e.g. "raw applications"),
+    # shown on the canvas at the wire's midpoint. Purely descriptive; compiled
+    # output and execution never read it.
+    name: str | None = None
 
 
 @dataclass
@@ -100,6 +110,16 @@ class Graph:
             seen.add(b)
             stack.extend(self.predecessors(b))
         return seen
+
+    def creates_cycle(self, from_block: str, to_block: str) -> bool:
+        """Would a wire from_block -> to_block create a cycle? True if
+        to_block is already an ancestor of from_block (including
+        from_block == to_block), i.e. a path to_block -> ... -> from_block
+        already exists, so adding from_block -> to_block would close a loop.
+        Checked before a wire is added -- see session.add_wire -- so the
+        graph a user can build is acyclic by construction and topo_order's
+        cycle branch is unreachable in normal use."""
+        return to_block in self.ancestors([from_block])
 
     def topo_order(self) -> list[str]:
         """Deterministic topological sort: ties broken by (lane order, canvas

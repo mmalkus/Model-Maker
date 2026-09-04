@@ -39,8 +39,8 @@ def test_compiled_script_runs_and_matches_engine_output(tmp_path):
     runner.run_all()
 
     source = compile_graph(graph, runner=runner)
-    assert "# === Block: b_read" in source
-    assert "# --- Call: b_select ---" in source
+    assert "# === Function: read_csv_b_read" in source
+    assert '# --- Call: b_select | name="b_select" ---' in source
     assert "OUTPUT_DIR" in source
 
     ns = {}
@@ -107,3 +107,50 @@ def test_compiled_generate_image_calls_get_a_distinct_block_id(tmp_path):
     source = compile_graph(graph, runner=runner)
     call_line = next(line for line in source.splitlines() if "generate_image_b_img(" in line and "=" in line)
     assert "block_id='b_img'" in call_line
+
+
+def test_two_blocks_of_the_same_type_compile_to_one_shared_function(tmp_path):
+    # Two "filter" blocks (same registry category => identical source) must
+    # produce exactly one function definition, called twice with each
+    # instance's own params -- not two near-duplicate function bodies.
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_filter2"] = make_block("b_filter2", "filter", params={"expr": "a > 2"}, x=3)
+    graph.wires["w3"] = Wire("w3", "b_read", "out", "b_filter2", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert source.count("# === Function: filter_") == 1
+    assert source.count("def filter_") == 1
+    assert '# --- Call: b_filter | name="b_filter" ---' in source
+    assert '# --- Call: b_filter2 | name="b_filter2" ---' in source
+
+    shared_fn = next(line for line in source.splitlines() if line.startswith("def filter_")).split("(")[0][len("def ") :]
+    assert f"{shared_fn}(df=" in source
+    assert source.count(f"{shared_fn}(df=") == 2
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["b_filter_b_filter"].to_dicts() != ns["b_filter2_b_filter2"].to_dicts()
+
+
+def test_compiled_calls_are_sectioned_by_lane(tmp_path):
+    from modelmaker.graph import Lane
+
+    graph, _ = _csv_graph(tmp_path)
+    graph.lanes["prep"] = Lane("Data Prep", 0)
+    graph.lanes["report"] = Lane("Reporting", 1)
+    graph.blocks["b_read"].lane = "prep"
+    graph.blocks["b_filter"].lane = "prep"
+    graph.blocks["b_select"].lane = "report"
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert "# ===== Lane: Data Prep =====" in source
+    assert "# ===== Lane: Reporting =====" in source
+    assert source.index("# ===== Lane: Data Prep =====") < source.index("# ===== Lane: Reporting =====")

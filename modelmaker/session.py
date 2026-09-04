@@ -125,6 +125,8 @@ class ProjectSession:
         self.runner.state.pop(block_id, None)
 
     def add_wire(self, from_block: str, from_port: str, to_block: str, to_port: str) -> Wire:
+        if self.graph.creates_cycle(from_block, to_block):
+            raise ValueError("connecting these blocks would create a cycle")
         # a target port accepts at most one incoming wire
         for wid, w in list(self.graph.wires.items()):
             if w.to_block == to_block and w.to_port == to_port:
@@ -137,8 +139,15 @@ class ProjectSession:
     def delete_wire(self, wire_id: str) -> None:
         self.graph.wires.pop(wire_id, None)
 
-    def set_lane(self, lane_id: str, name: str, order: int) -> None:
-        self.graph.lanes[lane_id] = Lane(name=name, order=order)
+    def rename_wire(self, wire_id: str, name: str | None) -> Wire:
+        wire = self.graph.wires[wire_id]
+        wire.name = name
+        return wire
+
+    def set_lane(self, lane_id: str, name: str, order: int, height: float | None = None) -> None:
+        existing = self.graph.lanes.get(lane_id)
+        resolved_height = height if height is not None else (existing.height if existing else 260.0)
+        self.graph.lanes[lane_id] = Lane(name=name, order=order, height=resolved_height)
 
     def delete_lane(self, lane_id: str) -> None:
         self.graph.lanes.pop(lane_id, None)

@@ -12,7 +12,10 @@ def load_project(path: Path) -> Graph:
     data = json.loads(path.read_text(encoding="utf-8"))
     project_dir = path.parent
 
-    lanes = {lid: Lane(name=l["name"], order=l["order"]) for lid, l in data.get("lanes", {}).items()}
+    lanes = {
+        lid: Lane(name=l["name"], order=l["order"], height=l.get("height", 260.0))
+        for lid, l in data.get("lanes", {}).items()
+    }
 
     blocks: dict[str, BlockInstance] = {}
     for bid, b in data.get("blocks", {}).items():
@@ -44,6 +47,7 @@ def load_project(path: Path) -> Graph:
             from_port=w["from"]["port"],
             to_block=w["to"]["block"],
             to_port=w["to"]["port"],
+            name=w.get("name"),
         )
         for wid, w in data.get("wires", {}).items()
     }
@@ -83,12 +87,13 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
         wid: {
             "from": {"block": w.from_block, "port": w.from_port},
             "to": {"block": w.to_block, "port": w.to_port},
+            "name": w.name,
         }
         for wid, w in sorted(graph.wires.items())
     }
 
     lanes_out = {
-        lid: {"name": l.name, "order": l.order}
+        lid: {"name": l.name, "order": l.order, "height": l.height}
         for lid, l in sorted(graph.lanes.items(), key=lambda kv: kv[1].order)
     }
 

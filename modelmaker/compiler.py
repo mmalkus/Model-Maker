@@ -43,6 +43,12 @@ def compile_graph(
     wants_output_dir: dict[str, bool] = {}
     wants_block_id: dict[str, bool] = {}
     def_lines: list[str] = []
+    # Two blocks that run the same code (same category, for registry blocks;
+    # same category *and* code text, for custom ones) get exactly one
+    # function definition, shared across every instance's call site below --
+    # e.g. two WoE blocks compile to one `woe_transform_<id>` function called
+    # twice with each instance's own params, not two near-identical copies.
+    seen_fns: dict[tuple[str, str], str] = {}
     for bid in order:
         block = graph.blocks[bid]
         fn = block.resolved_fn()
@@ -50,21 +56,36 @@ def compile_graph(
         wants_block_id[bid] = accepts_param(fn, "block_id")
         src = block.code if block.is_custom else inspect.getsource(fn)
         src = textwrap.dedent(src).strip("\n")
+        fn_sig = (block.category, src)
+        existing_fn_name = seen_fns.get(fn_sig)
+        if existing_fn_name is not None:
+            fn_names[bid] = existing_fn_name
+            continue
+
         fn_name = f"{_sanitize(block.category)}_{bid}"
+        seen_fns[fn_sig] = fn_name
         fn_names[bid] = fn_name
         src = src.replace(f"def {fn.__name__}(", f"def {fn_name}(", 1)
-        phase = graph.lanes[block.lane].name if block.lane in graph.lanes else ""
-        def_lines.append(
-            f'# === Block: {bid} | type={block.block_type} | phase="{phase}" | name="{block.name}" ==='
-        )
+        def_lines.append(f"# === Function: {fn_name} | type={block.block_type} | category={block.category} ===")
         def_lines.append(src)
         def_lines.append("")
         def_lines.append("")
 
     call_lines: list[str] = []
     var_names: dict[tuple[str, str], str] = {}
+    current_lane: str | None = "__unset__"
     for bid in order:
         block = graph.blocks[bid]
+        # Lanes group the pipeline into modeling phases (Data Prep -> Feature
+        # Engineering -> ...); a banner marks each phase's calls in the
+        # compiled script, purely for readability -- lane membership plays no
+        # role in execution order (see graph.topo_order).
+        lane_name = graph.lanes[block.lane].name if block.lane in graph.lanes else None
+        if lane_name != current_lane:
+            current_lane = lane_name
+            if lane_name:
+                call_lines.append(f"# ===== Lane: {lane_name} =====")
+
         kwargs = []
         for port, wire in sorted(graph.input_wires(bid).items()):
             kwargs.append(f"{port}={var_names[(wire.from_block, wire.from_port)]}")
@@ -77,7 +98,7 @@ def compile_graph(
 
         out_ports = [p.name for p in block.outputs]
         call = f"{fn_names[bid]}({', '.join(kwargs)})"
-        call_lines.append(f"# --- Call: {bid} ---")
+        call_lines.append(f'# --- Call: {bid} | name="{block.name}" ---')
         if not out_ports:
             call_lines.append(call)
         elif len(out_ports) == 1:

@@ -19,6 +19,24 @@ def _csv_graph(tmp_path):
     return graph, csv_path
 
 
+def test_status_reports_red_not_recursionerror_for_a_cyclic_graph():
+    # A cycle can't be created through the API/session anymore (see
+    # graph.creates_cycle), but a hand-built or manually-edited project file
+    # could still load one -- status() must fail cleanly, not blow the stack.
+    a = make_block("a", "filter", params={"expr": "1=1"})
+    b = make_block("b", "filter", params={"expr": "1=1"})
+    graph = Graph(
+        blocks={"a": a, "b": b},
+        wires={
+            "w1": Wire("w1", "a", "out", "b", "df"),
+            "w2": Wire("w2", "b", "out", "a", "df"),
+        },
+    )
+    runner = Runner(graph, CacheStore())
+    assert runner.status("a") == "red"
+    assert "cycle" in runner.state["a"].last_error.lower()
+
+
 def test_status_lifecycle_grey_to_green(tmp_path):
     graph, _ = _csv_graph(tmp_path)
     runner = Runner(graph, CacheStore())

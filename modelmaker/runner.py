@@ -48,10 +48,20 @@ class Runner:
     def _st(self, block_id: str) -> RunState:
         return self.state.setdefault(block_id, RunState())
 
-    def compute_key(self, block_id: str) -> str:
+    def compute_key(self, block_id: str, _stack: frozenset[str] = frozenset()) -> str:
         """Lineage-based cache key: hashes block identity/config plus the
         upstream blocks' *keys*, never the underlying DataFrame content, so
-        computing it is cheap no matter how large the data is."""
+        computing it is cheap no matter how large the data is.
+
+        `_stack` guards against a cyclic graph recursing forever (and
+        crashing the process with a RecursionError): wires that would
+        introduce a cycle are rejected at creation time (see
+        Graph.creates_cycle / session.add_wire), but a project file loaded
+        from disk could still contain one, and every read of block status
+        -- including a plain GET /api/graph -- calls this, so it must fail
+        cleanly rather than blow the stack."""
+        if block_id in _stack:
+            raise RuntimeError(f"cycle detected in graph at block '{block_id}'")
         block = self.graph.blocks[block_id]
         if block.block_type == "input":
             basis = {
@@ -61,8 +71,9 @@ class Runner:
                 "read_counter": self._st(block_id).read_counter,
             }
             return _hash(basis)
+        next_stack = _stack | {block_id}
         upstream = {
-            port: f"{self.compute_key(wire.from_block)}:{wire.from_port}"
+            port: f"{self.compute_key(wire.from_block, next_stack)}:{wire.from_port}"
             for port, wire in sorted(self.graph.input_wires(block_id).items())
         }
         basis = {
@@ -76,7 +87,15 @@ class Runner:
 
     def status(self, block_id: str) -> Status:
         st = self._st(block_id)
-        current = self.compute_key(block_id)
+        try:
+            current = self.compute_key(block_id)
+        except RuntimeError as e:
+            # e.g. a cyclic graph loaded from disk (see compute_key) -- surface
+            # it as a normal red/failed block instead of raising out of a
+            # plain status check, which every graph read goes through.
+            st.failed = True
+            st.last_error = str(e)
+            return "red"
         if st.failed and st.last_attempt_key == current:
             return "red"
         if st.last_successful_key == current:

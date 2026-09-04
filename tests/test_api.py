@@ -75,6 +75,30 @@ def test_invalid_wire_type_mismatch_is_flagged_not_rejected(client, tmp_path):
     assert wire.json()["valid"] is False
 
 
+def test_wire_that_would_create_a_cycle_is_rejected_not_a_crash(client):
+    # Regression: connecting two blocks into a loop used to crash the whole
+    # app (RecursionError out of runner.compute_key on the very next graph
+    # read) instead of a clean 4xx -- see graph.creates_cycle /
+    # session.add_wire.
+    a = client.post("/api/blocks", json={"category": "filter", "params": {"expr": "1=1"}}).json()
+    b = client.post("/api/blocks", json={"category": "filter", "params": {"expr": "1=1"}, "x": 200}).json()
+
+    first = client.post(
+        "/api/wires", json={"from_block": a["id"], "from_port": "out", "to_block": b["id"], "to_port": "df"}
+    )
+    assert first.status_code == 200
+
+    looped = client.post(
+        "/api/wires", json={"from_block": b["id"], "from_port": "out", "to_block": a["id"], "to_port": "df"}
+    )
+    assert looped.status_code == 400
+
+    # the graph is still perfectly readable afterwards
+    graph = client.get("/api/graph")
+    assert graph.status_code == 200
+    assert len(graph.json()["wires"]) == 1
+
+
 def test_run_all_and_compile(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n2,20\n3,30\n")
