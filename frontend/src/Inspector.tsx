@@ -3,7 +3,7 @@ import { api } from './api'
 import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
 import { PARAM_SPECS, ParamsForm } from './ParamsForm'
-import type { BlockOut, DraftOut, PreviewOut } from './types'
+import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
 
 export function Inspector({
   block,
@@ -29,7 +29,7 @@ export function Inspector({
   const [nameText, setNameText] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [showBrowser, setShowBrowser] = useState(false)
-  const [inputColumns, setInputColumns] = useState<string[]>([])
+  const [inputColumns, setInputColumns] = useState<SchemaColumn[]>([])
   const [drafting, setDrafting] = useState(false)
   const [draftElapsed, setDraftElapsed] = useState(0)
   const [metricValues, setMetricValues] = useState<Record<string, unknown>>({})
@@ -52,9 +52,9 @@ export function Inspector({
     api
       .inputSchema(block.id)
       .then((schema) => {
-        const cols = new Set<string>()
-        Object.values(schema).forEach((list) => list.forEach((c) => cols.add(c.name)))
-        setInputColumns([...cols])
+        const cols = new Map<string, SchemaColumn>()
+        Object.values(schema).forEach((list) => list.forEach((c) => cols.set(c.name, c)))
+        setInputColumns([...cols.values()])
       })
       .catch(() => setInputColumns([]))
     // Refetch on every graph reload (App hands down a fresh `block` object
@@ -487,7 +487,13 @@ export function Inspector({
       )}
 
       {showData && preview && (
-        <DataModal blockName={block.name} preview={preview} onClose={() => setShowData(false)} />
+        <DataModal
+          blockName={block.name}
+          blockId={block.id}
+          preview={preview}
+          onClose={() => setShowData(false)}
+          onChanged={onChanged}
+        />
       )}
 
       {showBrowser && <FileBrowser ext=".csv" onPick={pickPath} onClose={() => setShowBrowser(false)} />}

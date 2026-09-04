@@ -154,3 +154,27 @@ def test_compiled_calls_are_sectioned_by_lane(tmp_path):
     assert "# ===== Lane: Data Prep =====" in source
     assert "# ===== Lane: Reporting =====" in source
     assert source.index("# ===== Lane: Data Prep =====") < source.index("# ===== Lane: Reporting =====")
+
+
+def test_compile_bakes_in_the_role_tagged_target_when_param_left_unset(tmp_path):
+    # target is never in logreg's own params -- it's resolved from the
+    # upstream role=target tag, same as the live runner does (see
+    # test_runner.test_target_param_auto_fills_from_role_tagged_upstream_column),
+    # and baked into the generated call as a literal, same as output_dir/block_id.
+    csv_path = tmp_path / "clf.csv"
+    csv_path.write_text("x,y\n1,0\n2,1\n3,0\n4,1\n5,0\n6,1\n")
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    read.column_role_overrides = {"y": "target"}
+    logreg = make_block("b_logreg", "logistic_regression", params={"features": ["x"]}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg},
+        wires={"w1": Wire("w1", "b_read", "out", "b_logreg", "df")},
+    )
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_logreg") == "green"
+
+    source = compile_graph(graph, runner=runner)
+    call_line = next(line for line in source.splitlines() if "logistic_regression(" in line and "=" in line)
+    assert "target='y'" in call_line

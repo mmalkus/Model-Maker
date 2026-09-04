@@ -12,11 +12,13 @@ export function PortDataView({
   port,
   portType,
   title,
+  onChanged,
 }: {
   blockId: string
   port: string
   portType: PortType | undefined
   title: string
+  onChanged?: () => void
 }) {
   const [preview, setPreview] = useState<PreviewOut | null>(null)
   const [value, setValue] = useState<{ v: unknown } | null>(null)
@@ -80,7 +82,15 @@ export function PortDataView({
         </div>
       )}
 
-      {showTable && preview && <DataModal blockName={title} preview={preview} onClose={() => setShowTable(false)} />}
+      {showTable && preview && (
+        <DataModal
+          blockName={title}
+          blockId={blockId}
+          preview={preview}
+          onClose={() => setShowTable(false)}
+          onChanged={onChanged}
+        />
+      )}
     </>
   )
 }

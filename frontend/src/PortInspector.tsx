@@ -7,12 +7,14 @@ export function PortInspector({
   portType,
   graph,
   onClose,
+  onChanged,
 }: {
   blockId: string
   port: string
   portType: PortType
   graph: GraphOut
   onClose: () => void
+  onChanged: () => void
 }) {
   const block = graph.blocks[blockId]
 
@@ -34,7 +36,7 @@ export function PortInspector({
       </div>
       <div style={{ color: '#6b7280', marginBottom: 12 }}>output: {port}</div>
 
-      <PortDataView blockId={blockId} port={port} portType={portType} title={title} />
+      <PortDataView blockId={blockId} port={port} portType={portType} title={title} onChanged={onChanged} />
     </div>
   )
 }

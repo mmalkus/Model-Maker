@@ -38,6 +38,7 @@ def load_project(path: Path) -> Graph:
             code=code,
             metadata_transform=b.get("metadata_transform"),
             is_custom=b.get("is_custom", False),
+            column_role_overrides=b.get("column_role_overrides", {}),
         )
 
     wires = {
@@ -77,6 +78,7 @@ def save_project(graph: Graph, path: Path, project_name: str = "project") -> Non
             "params": b.params,
             "code_ref": code_ref,
             "metadata_transform": b.metadata_transform if b.is_custom else None,
+            "column_role_overrides": b.column_role_overrides,
             "ports": {
                 "inputs": [asdict(p) for p in b.inputs],
                 "outputs": [asdict(p) for p in b.outputs],

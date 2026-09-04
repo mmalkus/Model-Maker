@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -12,8 +12,8 @@ from .blocks.base import BLOCK_REGISTRY
 from .cache import CacheStore
 from .graph import Graph
 from .metadata_transforms import resolve_metadata_transform
-from .packet import DataFramePacket
-from .util import accepts_param
+from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_target_column
+from .util import accepts_param, find_target_param
 
 Status = Literal["grey", "green", "orange", "red"]
 
@@ -68,6 +68,7 @@ class Runner:
                 "category": block.category,
                 "code_version": block.code_version,
                 "params": block.params,
+                "column_role_overrides": block.column_role_overrides,
                 "read_counter": self._st(block_id).read_counter,
             }
             return _hash(basis)
@@ -80,6 +81,7 @@ class Runner:
             "category": block.category,
             "code_version": block.code_version,
             "params": block.params,
+            "column_role_overrides": block.column_role_overrides,
             "code": block.code if block.is_custom else None,
             "upstream": upstream,
         }
@@ -130,6 +132,19 @@ class Runner:
             }
             fn = block.resolved_fn()
             call_kwargs = dict(plain_inputs, **block.params)
+            target_param = find_target_param(fn)
+            if target_param is not None and target_param not in block.params:
+                # Dynamic default: resolved fresh on every run from whichever
+                # upstream column currently carries role=target, never
+                # written back into block.params -- so retagging the target
+                # elsewhere in the graph propagates here automatically
+                # instead of leaving a stale copy behind. An explicit value
+                # in block.params always wins (see the `not in` check above).
+                resolved_target = resolve_target_column(
+                    [p.schema_meta for p in input_packets.values() if isinstance(p, DataFramePacket)]
+                )
+                if resolved_target is not None:
+                    call_kwargs[target_param] = resolved_target
             if block.block_type == "output" and accepts_param(fn, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
             if block.block_type == "output" and accepts_param(fn, "block_id"):
@@ -153,6 +168,26 @@ class Runner:
                     data_outputs,
                     block.params,
                 )
+                if block.column_role_overrides:
+                    for port_meta in metas.values():
+                        for name, role_value in block.column_role_overrides.items():
+                            if name in port_meta:
+                                port_meta[name] = replace(port_meta[name], role=ColumnRole(role_value))
+                # The backstop half of the uniqueness rule (see
+                # packet.find_duplicate_unique_role): a hand-tagged column
+                # can only collide with what was already on *this* block's
+                # own schema (checked immediately in session.set_column_role
+                # instead), but two upstream branches independently tagged
+                # target/id/weight/... can still collide the moment
+                # something -- chiefly join -- merges their schemas into
+                # one. That can only be caught here, once the merge actually
+                # happens, so it's a hard failure rather than picking a
+                # winner silently.
+                for port_meta in metas.values():
+                    dup = find_duplicate_unique_role(port_meta)
+                    if dup:
+                        role, cols = dup
+                        raise ValueError(f"role '{role.value}' is set on more than one column: {', '.join(cols)}")
 
             packets: dict[str, Any] = {}
             for name, value in raw_outputs.items():

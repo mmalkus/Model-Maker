@@ -10,12 +10,20 @@ import polars as pl
 class ColumnRole(str, Enum):
     ID = "id"
     TARGET = "target"
+    PREDICTED = "predicted"
     WEIGHT = "weight"
     FEATURE = "feature"
     DATE = "date"
     SEGMENT = "segment"
     EXCLUDED = "excluded"
     UNASSIGNED = "unassigned"
+
+
+# Roles that may sit on at most one column within any single schema (a
+# block's own output, or wherever schemas get merged, e.g. join) --
+# everything else (feature/segment/excluded/unassigned) is fine on any
+# number of columns at once.
+UNIQUE_ROLES = frozenset({ColumnRole.ID, ColumnRole.TARGET, ColumnRole.PREDICTED, ColumnRole.WEIGHT, ColumnRole.DATE})
 
 
 @dataclass
@@ -66,3 +74,32 @@ class DataFramePacket:
                 max=s.max(),
             )
         return replace(self, summary=summary)
+
+
+def find_duplicate_unique_role(schema_meta: dict[str, ColumnMeta]) -> tuple[ColumnRole, list[str]] | None:
+    """A unique role (see UNIQUE_ROLES) sitting on more than one column
+    within one schema is a real conflict, not a preference -- e.g. a join
+    silently combining two independently-tagged target columns. Returns the
+    offending role and its (sorted) column names, or None if the schema is
+    clean. Called both when a role is hand-tagged (immediate feedback) and
+    after every block run (the backstop that catches a merge-time collision
+    neither side could have seen on its own)."""
+    by_role: dict[ColumnRole, list[str]] = {}
+    for name, meta in schema_meta.items():
+        if meta.role in UNIQUE_ROLES:
+            by_role.setdefault(meta.role, []).append(name)
+    for role, cols in by_role.items():
+        if len(cols) > 1:
+            return role, sorted(cols)
+    return None
+
+
+def resolve_target_column(schema_metas: list[dict[str, ColumnMeta]]) -> str | None:
+    """The column tagged role=target among one or more input schemas, for
+    auto-filling a block's `target`/`target_col` param when left unset (see
+    util.find_target_param). None if no column is tagged, or if more than
+    one distinctly-named column is (ambiguous -- caller leaves the param
+    unset rather than guessing, which surfaces as a normal missing-argument
+    error)."""
+    candidates = {name for meta in schema_metas for name, m in meta.items() if m.role == ColumnRole.TARGET}
+    return next(iter(candidates)) if len(candidates) == 1 else None

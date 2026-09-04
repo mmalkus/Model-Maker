@@ -61,6 +61,14 @@ class BlockInstance:
     # False for a block backed by a fixed BLOCK_REGISTRY entry. Independent of
     # block_type -- a custom block can be an input, standard, or output block.
     is_custom: bool = False
+    # column name -> ColumnRole value (see packet.py), hand-tagged by the
+    # user (see session.set_column_role) and layered on top of whatever role
+    # this block's own metadata_transform already computed -- applies to
+    # that column on every output port it appears on. Included in
+    # Runner.compute_key's hash basis alongside params/code, so retagging a
+    # column invalidates this block and everything downstream the same way
+    # any other param change does; no separate staleness bookkeeping needed.
+    column_role_overrides: dict[str, str] = field(default_factory=dict)
 
     def resolved_fn(self):
         if self.is_custom:

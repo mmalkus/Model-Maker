@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .blocks.base import BLOCK_REGISTRY, PortSpec
 from .cache import CacheStore
 from .graph import BlockInstance, Graph, Lane, Position, Wire
+from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
 from .project import load_project, save_project
 from .runner import Runner
 
@@ -115,6 +117,51 @@ class ProjectSession:
             block.code_version += 1
         if "metadata_transform" in fields and fields["metadata_transform"] is not None:
             block.metadata_transform = fields["metadata_transform"]
+        return block
+
+    def set_column_role(self, block_id: str, column: str, role: str) -> BlockInstance:
+        """Hand-tag one column's role on this block (see
+        BlockInstance.column_role_overrides). role="unassigned" clears a
+        previous tag. Rejects a role already sitting on a different column
+        of this block's own last-known output where that's checkable (the
+        block has been run at least once) -- the immediate half of the
+        uniqueness rule; the other half (two upstream branches colliding
+        once merged, e.g. by a join) can only be caught once that merge
+        actually runs, in Runner.run_block."""
+        block = self.graph.blocks[block_id]
+        try:
+            role_enum = ColumnRole(role)
+        except ValueError as e:
+            raise ValueError(f"unknown role: {role!r}") from e
+        if role_enum == ColumnRole.PREDICTED:
+            raise ValueError("'predicted' is assigned automatically by modelling blocks, not settable directly")
+
+        overrides = dict(block.column_role_overrides)
+        if role_enum == ColumnRole.UNASSIGNED:
+            overrides.pop(column, None)
+        else:
+            overrides[column] = role_enum.value
+
+        st = self.runner.state.get(block_id)
+        if st and st.last_successful_key:
+            entry = self.runner.cache.get(st.last_successful_key)
+            if entry:
+                for value in entry.outputs.values():
+                    if not isinstance(value, DataFramePacket):
+                        continue
+                    prospective = dict(value.schema_meta)
+                    for name, override_role in overrides.items():
+                        if name in prospective:
+                            prospective[name] = replace(prospective[name], role=ColumnRole(override_role))
+                    dup = find_duplicate_unique_role(prospective)
+                    if dup:
+                        dup_role, cols = dup
+                        others = [c for c in cols if c != column] or cols
+                        raise ValueError(
+                            f"role '{dup_role.value}' can only be on one column here -- already set on {others[0]!r}"
+                        )
+
+        block.column_role_overrides = overrides
         return block
 
     def delete_block(self, block_id: str) -> None:

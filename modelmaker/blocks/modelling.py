@@ -15,13 +15,24 @@ from ..packet import ColumnMeta, ColumnRole
 from .base import BlockSpec, PortSpec, register_block
 
 
-def _predictions_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    result = {}
-    for name in df.columns:
-        result[name] = in_meta[name] if name in in_meta else ColumnMeta(dtype=str(df.schema[name]), role=ColumnRole.FEATURE)
-    return {"predictions": result}
+def _predictions_meta(new_col_roles: dict[str, ColumnRole]):
+    """Tag each of this block's own new output columns with the given role;
+    every other output column is just the input passed through unchanged.
+    `predicted` is a unique role (see packet.UNIQUE_ROLES) -- a block that
+    emits more than one prediction-shaped column (logistic_regression's
+    predicted_proba/predicted_class) can only give PREDICTED to the one
+    that's actually the model's score; the rest fall back to FEATURE, same
+    as any other derived column."""
+
+    def _fn(input_metas, outputs, params):
+        (in_meta,) = input_metas.values()
+        (df,) = outputs.values()
+        result = dict(in_meta)
+        for name, role in new_col_roles.items():
+            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=role)
+        return {"predictions": {name: result[name] for name in df.columns if name in result}}
+
+    return _fn
 
 
 def glm_fit(
@@ -64,7 +75,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
         fn=glm_fit,
-        metadata_transform=_predictions_meta,
+        metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
     )
 )
 
@@ -108,7 +119,9 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
         fn=logistic_regression,
-        metadata_transform=_predictions_meta,
+        metadata_transform=_predictions_meta(
+            {"predicted_proba": ColumnRole.PREDICTED, "predicted_class": ColumnRole.FEATURE}
+        ),
     )
 )
 

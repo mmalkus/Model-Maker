@@ -6,10 +6,12 @@ export function WireInspector({
   wireId,
   graph,
   onClose,
+  onChanged,
 }: {
   wireId: string
   graph: GraphOut
   onClose: () => void
+  onChanged: () => void
 }) {
   const wire: WireOut | undefined = graph.wires[wireId]
   const fromBlock = wire ? graph.blocks[wire.from_block] : undefined
@@ -44,7 +46,7 @@ export function WireInspector({
         {!wire.valid && <div style={{ color: '#ef4444', marginTop: 2 }}>This wire is no longer valid.</div>}
       </div>
 
-      <PortDataView blockId={wire.from_block} port={wire.from_port} portType={portType} title={title} />
+      <PortDataView blockId={wire.from_block} port={wire.from_port} portType={portType} title={title} onChanged={onChanged} />
     </div>
   )
 }

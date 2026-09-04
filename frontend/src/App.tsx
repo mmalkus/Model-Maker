@@ -393,7 +393,7 @@ function AppInner() {
           </WirePortalContext.Provider>
         </div>
         {selectedWireId && graph ? (
-          <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} />
+          <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} onChanged={reload} />
         ) : selectedPort && graph ? (
           <PortInspector
             blockId={selectedPort.blockId}
@@ -401,6 +401,7 @@ function AppInner() {
             portType={selectedPort.portType}
             graph={graph}
             onClose={() => setSelectedPort(null)}
+            onChanged={reload}
           />
         ) : (
           <Inspector block={selectedBlock} onChanged={reload} provider={llmProvider} />
