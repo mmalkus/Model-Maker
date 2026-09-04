@@ -12,7 +12,7 @@ import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { BlockNode, type BlockFlowNode } from './BlockNode'
-import { DataWireEdge, WirePortalContext, type DataWireEdgeType } from './DataWireEdge'
+import { DataWireEdge, type DataWireEdgeType } from './DataWireEdge'
 import { Inspector } from './Inspector'
 import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
 import { LaneLabels, LaneResizeHandles } from './LaneLabels'
@@ -20,7 +20,6 @@ import { Palette } from './Palette'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
 import type { BlockOut, GraphOut, LaneOut, PortType } from './types'
-import { WireInspector } from './WireInspector'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -42,7 +41,7 @@ function toBlockNodes(
     }))
 }
 
-function toEdges(graph: GraphOut, selectedWireId: string | null, onView: (wireId: string) => void): DataWireEdgeType[] {
+function toEdges(graph: GraphOut): DataWireEdgeType[] {
   return Object.entries(graph.wires).map(([id, w]) => ({
     id,
     type: 'dataWire' as const,
@@ -52,7 +51,6 @@ function toEdges(graph: GraphOut, selectedWireId: string | null, onView: (wireId
     targetHandle: w.to_port,
     style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
     animated: !w.valid,
-    data: { wire: w, onView, isViewed: id === selectedWireId },
   }))
 }
 
@@ -68,10 +66,8 @@ function AppInner() {
   const [graph, setGraph] = useState<GraphOut | null>(null)
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [selectedWireId, setSelectedWireId] = useState<string | null>(null)
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
-  const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
   const [llmProviders, setLlmProviders] = useState<string[]>([])
   const [llmProvider, setLlmProvider] = useState<string | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
@@ -89,7 +85,6 @@ function AppInner() {
 
   const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
     setSelectedPort({ blockId, port, portType })
-    setSelectedWireId(null)
   }, [])
 
   const reload = useCallback(() => {
@@ -255,17 +250,10 @@ function AppInner() {
     (_: unknown, edge: DataWireEdgeType) => {
       if (confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
-        setSelectedWireId((id) => (id === edge.id ? null : id))
       }
     },
     [reload],
   )
-
-  const onViewWire = useCallback((wireId: string) => {
-    setSelectedWireId(wireId)
-    setSelectedId(null)
-    setSelectedPort(null)
-  }, [])
 
   const addBlock = useCallback(
     (category: string, at?: { x: number; y: number }) => {
@@ -275,7 +263,6 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
-          setSelectedWireId(null)
           setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
@@ -308,7 +295,6 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
-          setSelectedWireId(null)
           setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
@@ -349,52 +335,39 @@ function AppInner() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
-          <WirePortalContext.Provider value={wirePortal}>
-            <ReactFlow
-              nodes={nodes}
-              edges={graph ? toEdges(graph, selectedWireId, onViewWire) : []}
-              nodeTypes={nodeTypes}
-              edgeTypes={edgeTypes}
-              onNodesChange={onNodesChange}
-              onNodeDragStop={onNodeDragStop}
-              onConnect={onConnect}
-              onEdgeClick={onEdgeClick}
-              onNodeClick={(_, node) => {
-                if (node.type !== 'modelBlock') return
-                setSelectedId(node.id)
-                setSelectedWireId(null)
-                setSelectedPort(null)
-              }}
-              onPaneClick={() => {
-                setSelectedId(null)
-                setSelectedWireId(null)
-                setSelectedPort(null)
-              }}
-            >
-              <Background />
-              <Controls />
-              <LaneLabels
-                lanes={laneLayout}
-                collapsedLanes={collapsedLanes}
-                onToggleCollapse={toggleCollapse}
-                onRename={renameLane}
-                onDelete={deleteLane}
-                onMove={moveLane}
-              />
-              <LaneResizeHandles lanes={laneLayout} collapsedLanes={collapsedLanes} onResize={resizeLane} />
-              {/* Root-level sibling of the lane toolbar/handles above (not
-                  nested inside ReactFlow's internal node/edge layer) so a
-                  wire's midpoint controls -- portaled here from
-                  DataWireEdge, see WirePortalContext -- always paint (and
-                  receive clicks) above them, even when they overlap on
-                  screen. */}
-              <div ref={setWirePortal} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 8 }} />
-            </ReactFlow>
-          </WirePortalContext.Provider>
+          <ReactFlow
+            nodes={nodes}
+            edges={graph ? toEdges(graph) : []}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            onNodesChange={onNodesChange}
+            onNodeDragStop={onNodeDragStop}
+            onConnect={onConnect}
+            onEdgeClick={onEdgeClick}
+            onNodeClick={(_, node) => {
+              if (node.type !== 'modelBlock') return
+              setSelectedId(node.id)
+              setSelectedPort(null)
+            }}
+            onPaneClick={() => {
+              setSelectedId(null)
+              setSelectedPort(null)
+            }}
+          >
+            <Background />
+            <Controls />
+            <LaneLabels
+              lanes={laneLayout}
+              collapsedLanes={collapsedLanes}
+              onToggleCollapse={toggleCollapse}
+              onRename={renameLane}
+              onDelete={deleteLane}
+              onMove={moveLane}
+            />
+            <LaneResizeHandles lanes={laneLayout} collapsedLanes={collapsedLanes} onResize={resizeLane} />
+          </ReactFlow>
         </div>
-        {selectedWireId && graph ? (
-          <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} onChanged={reload} />
-        ) : selectedPort && graph ? (
+        {selectedPort && graph ? (
           <PortInspector
             blockId={selectedPort.blockId}
             port={selectedPort.port}

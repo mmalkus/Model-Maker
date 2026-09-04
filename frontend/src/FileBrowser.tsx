@@ -5,16 +5,26 @@ import type { BrowseOut } from './types'
 export function FileBrowser({
   startPath,
   ext,
+  mode = 'open',
+  defaultName,
   onPick,
   onClose,
 }: {
   startPath?: string | null
   ext?: string
+  // 'open' picks an existing file immediately on click (e.g. choosing a CSV
+  // to read). 'save' instead fills a filename field the user can edit --
+  // clicking an existing file just reuses its name (to overwrite it) --
+  // and a Save button combines it with the current directory into the path
+  // handed to onPick, since the target file need not exist yet.
+  mode?: 'open' | 'save'
+  defaultName?: string
   onPick: (path: string) => void
   onClose: () => void
 }) {
   const [listing, setListing] = useState<BrowseOut | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [fileName, setFileName] = useState(defaultName ?? '')
 
   const load = (path?: string) => {
     api
@@ -30,6 +40,17 @@ export function FileBrowser({
     load(startPath ?? undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const joinPath = (dir: string, name: string) => {
+    const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+    return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`
+  }
+
+  const doSave = () => {
+    if (!listing || !fileName.trim()) return
+    const name = ext && !fileName.trim().toLowerCase().endsWith(ext.toLowerCase()) ? `${fileName.trim()}${ext}` : fileName.trim()
+    onPick(joinPath(listing.path, name))
+  }
 
   return (
     <div
@@ -73,7 +94,7 @@ export function FileBrowser({
           {listing?.entries.map((e) => (
             <div
               key={e.path}
-              onClick={() => (e.is_dir ? load(e.path) : onPick(e.path))}
+              onClick={() => (e.is_dir ? load(e.path) : mode === 'save' ? setFileName(e.name) : onPick(e.path))}
               style={{
                 padding: '6px 10px',
                 cursor: 'pointer',
@@ -89,6 +110,21 @@ export function FileBrowser({
             </div>
           ))}
         </div>
+        {mode === 'save' && (
+          <div style={{ padding: 10, borderTop: '1px solid #e5e7eb', display: 'flex', gap: 6 }}>
+            <input
+              autoFocus
+              value={fileName}
+              onChange={(e) => setFileName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && doSave()}
+              placeholder="filename"
+              style={{ flex: 1, fontFamily: 'monospace', fontSize: 12, boxSizing: 'border-box' }}
+            />
+            <button disabled={!fileName.trim()} onClick={doSave}>
+              Save
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

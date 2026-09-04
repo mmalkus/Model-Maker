@@ -12,8 +12,8 @@ from .blocks.base import BLOCK_REGISTRY
 from .cache import CacheStore
 from .graph import Graph
 from .metadata_transforms import resolve_metadata_transform
-from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_target_column
-from .util import accepts_param, find_target_param
+from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
+from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 Status = Literal["grey", "green", "orange", "red"]
 
@@ -132,19 +132,21 @@ class Runner:
             }
             fn = block.resolved_fn()
             call_kwargs = dict(plain_inputs, **block.params)
-            target_param = find_target_param(fn)
-            if target_param is not None and target_param not in block.params:
-                # Dynamic default: resolved fresh on every run from whichever
-                # upstream column currently carries role=target, never
-                # written back into block.params -- so retagging the target
-                # elsewhere in the graph propagates here automatically
-                # instead of leaving a stale copy behind. An explicit value
-                # in block.params always wins (see the `not in` check above).
-                resolved_target = resolve_target_column(
-                    [p.schema_meta for p in input_packets.values() if isinstance(p, DataFramePacket)]
-                )
-                if resolved_target is not None:
-                    call_kwargs[target_param] = resolved_target
+            # Dynamic defaults: for every role a block's signature opts into
+            # (target via target/target_col, predicted via
+            # score_col/predicted_col, ...), resolve it fresh on every run
+            # from whichever upstream column currently carries that role,
+            # never written back into block.params -- so retagging the role
+            # elsewhere in the graph propagates here automatically instead of
+            # leaving a stale copy behind. An explicit value in block.params
+            # always wins (see the `not in` check below).
+            input_schema_metas = [p.schema_meta for p in input_packets.values() if isinstance(p, DataFramePacket)]
+            for role in ROLE_PARAM_NAMES:
+                role_param = find_role_param(fn, role)
+                if role_param is not None and role_param not in block.params:
+                    resolved = resolve_role_column(input_schema_metas, role)
+                    if resolved is not None:
+                        call_kwargs[role_param] = resolved
             if block.block_type == "output" and accepts_param(fn, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
             if block.block_type == "output" and accepts_param(fn, "block_id"):

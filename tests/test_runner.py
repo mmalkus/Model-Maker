@@ -233,6 +233,25 @@ def test_target_param_auto_fills_from_role_tagged_upstream_column(tmp_path):
     assert predictions.schema_meta["y"].role.value == "target"
 
 
+def test_predicted_param_auto_fills_from_role_tagged_upstream_column(tmp_path):
+    # auc_gini's score_col is never set in params -- it must resolve from
+    # whichever upstream column logistic_regression tagged role=predicted
+    # (predicted_proba), the same dynamic-default mechanism target_col
+    # already gets from role=target.
+    graph = _classification_graph(tmp_path)
+    graph.blocks["b_read"].column_role_overrides = {"y": "target"}
+    graph.blocks["b_gini"] = make_block("b_gini", "auc_gini", x=2)
+    graph.wires["w2"] = Wire("w2", "b_logreg", "predictions", "b_gini", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_logreg") == "green"
+    assert runner.run_block("b_gini") == "green"
+    metric = runner.cache.get(runner.state["b_gini"].last_successful_key).outputs["metric"]
+    assert metric["kind"] == "auc_gini"
+    assert -1.0 <= metric["gini"] <= 1.0
+
+
 def test_explicit_target_param_overrides_the_role_tagged_default(tmp_path):
     # y is tagged target, but the block explicitly names x instead -- the
     # explicit choice must win, not the upstream tag (sklearn will happily

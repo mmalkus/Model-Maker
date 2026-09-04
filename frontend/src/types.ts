@@ -32,6 +32,7 @@ export interface BlockOut {
   metadata_transform: Record<string, unknown> | null
   inputs: PortSpec[]
   outputs: PortSpec[]
+  port_names: Record<string, string>
   status: Status
   last_error: string | null
   last_successful_read_at: string | null
@@ -43,7 +44,6 @@ export interface WireOut {
   from_port: string
   to_block: string
   to_port: string
-  name: string | null
   valid: boolean
 }
 

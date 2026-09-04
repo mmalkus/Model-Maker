@@ -89,6 +89,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {block.outputs.map((p) => {
               const badge = PORT_BADGE[p.type] ?? PORT_BADGE.any
+              const dataName = block.port_names[p.name]
               return (
                 <button
                   key={p.name}
@@ -97,7 +98,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                     e.stopPropagation()
                     onViewPort(block.id, p.name, p.type)
                   }}
-                  title={`${p.name}: produces a ${badge.label} -- click to view`}
+                  title={`${p.name}: produces a ${badge.label} -- click to view or name its data`}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -112,7 +113,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                   }}
                 >
                   <span>{badge.icon}</span>
-                  {p.name}
+                  {dataName ?? p.name}
                 </button>
               )
             })}

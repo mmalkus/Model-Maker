@@ -21,6 +21,7 @@ def _build_graph():
         outputs=[PortSpec("out")],
         metadata_transform={"kind": "declared", "base": "df", "adds": [{"name": "income_bucket", "role": "feature"}]},
     )
+    custom.port_names = {"out": "income_bucketed"}
     return Graph(
         lanes={"lane_data": Lane("Data Prep", 0), "lane_feat": Lane("Feature Engineering", 1)},
         blocks={"b_001": read, "b_002": custom},
@@ -43,6 +44,7 @@ def test_save_then_load_round_trips(tmp_path):
     assert loaded.blocks["b_002"].code == graph.blocks["b_002"].code
     assert loaded.blocks["b_002"].code_version == 2
     assert loaded.blocks["b_002"].metadata_transform["kind"] == "declared"
+    assert loaded.blocks["b_002"].port_names == {"out": "income_bucketed"}
     assert loaded.wires["w_001"].from_block == "b_001"
     assert loaded.lanes["lane_feat"].order == 1
 

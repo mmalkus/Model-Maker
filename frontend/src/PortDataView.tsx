@@ -4,9 +4,8 @@ import { DataModal } from './DataModal'
 import type { PortType, PreviewOut } from './types'
 
 // The actual look at a port's data (dataframe preview, image, or plain
-// value) -- shared by WireInspector (a wire's source port) and
-// PortInspector (a port badge clicked directly on a block), so the two
-// panels differ only in their header, not in how they fetch or render.
+// value) -- rendered by PortInspector for whichever output port badge the
+// user clicked on a block.
 export function PortDataView({
   blockId,
   port,

@@ -5,8 +5,8 @@ import textwrap
 from datetime import datetime, timezone
 
 from .graph import Graph
-from .packet import DataFramePacket, resolve_target_column
-from .util import accepts_param, find_target_param
+from .packet import ColumnRole, DataFramePacket, resolve_role_column
+from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 
 class CompileError(Exception):
@@ -18,15 +18,16 @@ def _sanitize(name: str) -> str:
     return out if out and not out[0].isdigit() else f"_{out}"
 
 
-def _resolve_target_value(graph: Graph, runner, block_id: str) -> str | None:
-    """Same dynamic default as Runner.run_block (see packet.resolve_target_column),
+def _resolve_role_value(graph: Graph, runner, block_id: str, role: ColumnRole) -> str | None:
+    """Same dynamic default as Runner.run_block (see packet.resolve_role_column),
     computed here from the already-cached, already-green upstream packets
     `runner` holds (compiling requires every reachable block to be green
     first -- see the not_ready check above) rather than re-running anything.
     Retagging a column's role changes the block's cache key (see
-    Runner.compute_key), so a block whose target just moved is grey again
-    and (in strict mode) blocks compilation until it's re-run -- by the time
-    this runs, the cached packet always reflects the current tag."""
+    Runner.compute_key), so a block whose target/predicted column just moved
+    is grey again and (in strict mode) blocks compilation until it's re-run
+    -- by the time this runs, the cached packet always reflects the current
+    tag."""
     if runner is None:
         return None
     schema_metas = []
@@ -40,7 +41,7 @@ def _resolve_target_value(graph: Graph, runner, block_id: str) -> str | None:
         packet = entry.outputs.get(wire.from_port)
         if isinstance(packet, DataFramePacket):
             schema_metas.append(packet.schema_meta)
-    return resolve_target_column(schema_metas)
+    return resolve_role_column(schema_metas, role)
 
 
 def compile_graph(
@@ -68,7 +69,7 @@ def compile_graph(
     fn_names: dict[str, str] = {}
     wants_output_dir: dict[str, bool] = {}
     wants_block_id: dict[str, bool] = {}
-    wants_target: dict[str, str | None] = {}
+    wants_role_params: dict[str, dict[ColumnRole, str]] = {}
     def_lines: list[str] = []
     # Two blocks that run the same code (same category, for registry blocks;
     # same category *and* code text, for custom ones) get exactly one
@@ -82,7 +83,9 @@ def compile_graph(
         fn = block.resolved_fn()
         wants_output_dir[bid] = accepts_param(fn, "output_dir")
         wants_block_id[bid] = accepts_param(fn, "block_id")
-        wants_target[bid] = find_target_param(fn)
+        wants_role_params[bid] = {
+            role: role_param for role in ROLE_PARAM_NAMES if (role_param := find_role_param(fn, role)) is not None
+        }
         src = block.code if block.is_custom else inspect.getsource(fn)
         src = textwrap.dedent(src).strip("\n")
         fn_sig = (block.category, src)
@@ -91,13 +94,16 @@ def compile_graph(
             fn_names[bid] = existing_fn_name
             continue
 
-        # The plain category name, unless a *different*-bodied block already
-        # claimed it -- registry blocks never collide here (same category
-        # always means identical source, so they're deduped above already);
-        # this only bites two custom AI blocks that happen to share a
-        # category but were drafted with different bodies, where the block
-        # id disambiguates them.
-        base_name = _sanitize(block.category)
+        # A custom (AI-authored) block's function is named after the block
+        # itself -- the same human-chosen name already used for its call-site
+        # variable below -- rather than its auto-generated category (e.g.
+        # "ai_block_lz3k9f"), so the compiled def reads like the block does
+        # in the UI. Registry blocks keep the plain category name (a stable,
+        # well-known function name shared by every instance); a different
+        # *bodied* block already claiming it only bites two custom blocks
+        # that happen to share a category but were drafted with different
+        # bodies, where the block id disambiguates them.
+        base_name = _sanitize(block.name) if block.is_custom else _sanitize(block.category)
         fn_name = base_name if base_name not in used_fn_names else f"{base_name}_{bid}"
         used_fn_names.add(fn_name)
         seen_fns[fn_sig] = fn_name
@@ -110,6 +116,7 @@ def compile_graph(
 
     call_lines: list[str] = []
     var_names: dict[tuple[str, str], str] = {}
+    used_var_names: set[str] = set()
     current_lane: str | None = "__unset__"
     for bid in order:
         block = graph.blocks[bid]
@@ -128,11 +135,11 @@ def compile_graph(
             kwargs.append(f"{port}={var_names[(wire.from_block, wire.from_port)]}")
         for pname, pval in block.params.items():
             kwargs.append(f"{pname}={pval!r}")
-        target_param = wants_target[bid]
-        if target_param is not None and target_param not in block.params:
-            resolved_target = _resolve_target_value(graph, runner, bid)
-            if resolved_target is not None:
-                kwargs.append(f"{target_param}={resolved_target!r}")
+        for role, role_param in wants_role_params[bid].items():
+            if role_param not in block.params:
+                resolved = _resolve_role_value(graph, runner, bid, role)
+                if resolved is not None:
+                    kwargs.append(f"{role_param}={resolved!r}")
         if block.block_type == "output" and wants_output_dir[bid]:
             kwargs.append("output_dir=OUTPUT_DIR")
         if block.block_type == "output" and wants_block_id[bid]:
@@ -143,17 +150,24 @@ def compile_graph(
         call_lines.append(f'# --- Call: {bid} | name="{block.name}" ---')
         if not out_ports:
             call_lines.append(call)
-        elif len(out_ports) == 1:
-            var = f"{_sanitize(block.name)}_{bid}"
-            var_names[(bid, out_ports[0])] = var
-            call_lines.append(f"{var} = {call}")
         else:
             varlist = []
             for p in out_ports:
-                var = f"{_sanitize(block.name)}_{bid}_{p}"
+                # A port the user's named (see BlockInstance.port_names,
+                # settable by clicking that output's data in the UI) becomes
+                # the variable holding it here, so the compiled script reads
+                # with the same names the user gave the data -- falling back
+                # to the block-name/id/port scheme, which is always unique by
+                # construction, for any port left unnamed or whose chosen
+                # name collides with another one already used in this script.
+                custom = block.port_names.get(p)
+                var = _sanitize(custom) if custom else None
+                if var is None or var in used_var_names:
+                    var = f"{_sanitize(block.name)}_{bid}" if len(out_ports) == 1 else f"{_sanitize(block.name)}_{bid}_{p}"
+                used_var_names.add(var)
                 var_names[(bid, p)] = var
                 varlist.append(var)
-            call_lines.append(f"{', '.join(varlist)} = {call}")
+            call_lines.append(f"{', '.join(varlist)} = {call}" if len(varlist) > 1 else f"{varlist[0]} = {call}")
         call_lines.append("")
 
     header = [

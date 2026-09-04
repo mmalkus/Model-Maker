@@ -94,12 +94,18 @@ def find_duplicate_unique_role(schema_meta: dict[str, ColumnMeta]) -> tuple[Colu
     return None
 
 
-def resolve_target_column(schema_metas: list[dict[str, ColumnMeta]]) -> str | None:
-    """The column tagged role=target among one or more input schemas, for
-    auto-filling a block's `target`/`target_col` param when left unset (see
-    util.find_target_param). None if no column is tagged, or if more than
+def resolve_role_column(schema_metas: list[dict[str, ColumnMeta]], role: ColumnRole) -> str | None:
+    """The column tagged the given role among one or more input schemas, for
+    auto-filling a block's role-named param (e.g. target/target_col for
+    role=TARGET, score_col/predicted_col for role=PREDICTED) when left unset
+    (see util.find_role_param). None if no column is tagged, or if more than
     one distinctly-named column is (ambiguous -- caller leaves the param
     unset rather than guessing, which surfaces as a normal missing-argument
     error)."""
-    candidates = {name for meta in schema_metas for name, m in meta.items() if m.role == ColumnRole.TARGET}
+    candidates = {name for meta in schema_metas for name, m in meta.items() if m.role == role}
     return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def resolve_target_column(schema_metas: list[dict[str, ColumnMeta]]) -> str | None:
+    """The column tagged role=target -- see resolve_role_column."""
+    return resolve_role_column(schema_metas, ColumnRole.TARGET)

@@ -178,3 +178,65 @@ def test_compile_bakes_in_the_role_tagged_target_when_param_left_unset(tmp_path)
     source = compile_graph(graph, runner=runner)
     call_line = next(line for line in source.splitlines() if "logistic_regression(" in line and "=" in line)
     assert "target='y'" in call_line
+
+
+def test_compile_bakes_in_the_role_tagged_predicted_column_when_param_left_unset(tmp_path):
+    # score_col is never in auc_gini's own params -- it's resolved from the
+    # upstream role=predicted tag left by logistic_regression, same as the
+    # live runner (see test_runner.test_predicted_param_auto_fills_from_role_tagged_upstream_column).
+    csv_path = tmp_path / "clf.csv"
+    csv_path.write_text("x,y\n1,0\n2,1\n3,0\n4,1\n5,0\n6,1\n")
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    read.column_role_overrides = {"y": "target"}
+    logreg = make_block("b_logreg", "logistic_regression", params={"features": ["x"]}, x=1)
+    gini = make_block("b_gini", "auc_gini", x=2)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg, "b_gini": gini},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_logreg", "df"),
+            "w2": Wire("w2", "b_logreg", "predictions", "b_gini", "df"),
+        },
+    )
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_logreg") == "green"
+    assert runner.run_block("b_gini") == "green"
+
+    source = compile_graph(graph, runner=runner)
+    call_line = next(line for line in source.splitlines() if "auc_gini(" in line and "=" in line)
+    assert "target_col='y'" in call_line
+    assert "score_col='predicted_proba'" in call_line
+
+
+def test_custom_block_compiles_to_a_function_named_after_the_block_not_its_category(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_custom"] = make_block(
+        "b_custom",
+        "ai_block_lz3k9f",
+        code="def ai_block_lz3k9f(df):\n    return df\n",
+        x=3,
+    )
+    graph.blocks["b_custom"].name = "Score bucketer"
+    graph.wires["w3"] = Wire("w3", "b_select", "out", "b_custom", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_all()["b_custom"] == "green"
+
+    source = compile_graph(graph, runner=runner)
+    assert "def Score_bucketer(" in source
+    assert "def ai_block_lz3k9f(" not in source
+
+
+def test_naming_a_port_uses_that_name_as_the_compiled_variable(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_select"].port_names = {"out": "clean_rows"}
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert "clean_rows = " in source
+    assert "b_select_b_select" not in source

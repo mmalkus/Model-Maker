@@ -6,11 +6,13 @@ type FieldSpec =
   | { key: string; label: string; kind: 'number'; step?: number }
   | { key: string; label: string; kind: 'select'; options: string[] }
   // autoRole marks a field that should default to whichever input column
-  // currently carries that role (see packet.resolve_target_column) when the
+  // currently carries that role (see packet.resolve_role_column) when the
   // param is left out of `params` entirely -- the field then offers an
   // "Auto" option that clears the key rather than setting it to '', putting
-  // it back in that dynamically-resolved state. Only 'target' exists today.
-  | { key: string; label: string; kind: 'column'; autoRole?: 'target' }
+  // it back in that dynamically-resolved state. 'target' picks up the
+  // role=target column; 'predicted' picks up whichever column a modelling
+  // block upstream tagged role=predicted (see blocks/modelling.py).
+  | { key: string; label: string; kind: 'column'; autoRole?: 'target' | 'predicted' }
   | { key: string; label: string; kind: 'columns' }
 
 // Declarative field lists for the block categories common enough to be
@@ -54,11 +56,11 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'bins', label: 'Bins (numeric columns)', kind: 'number' },
   ],
   ks_test: [
-    { key: 'score_col', label: 'Score column', kind: 'column' },
+    { key: 'score_col', label: 'Score column', kind: 'column', autoRole: 'predicted' },
     { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
   ],
   auc_gini: [
-    { key: 'score_col', label: 'Score column', kind: 'column' },
+    { key: 'score_col', label: 'Score column', kind: 'column', autoRole: 'predicted' },
     { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
   ],
   psi_test: [

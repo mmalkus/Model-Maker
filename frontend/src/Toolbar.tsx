@@ -1,5 +1,15 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from './api'
+import { FileBrowser } from './FileBrowser'
+
+// Splits a server-side path into (directory, filename), tolerating both
+// '/' (POSIX) and '\' (Windows) separators, whichever the path was given
+// with -- used to default the Save/Load file browser to wherever the
+// currently-open project already lives.
+function splitPath(path: string): { dir: string; name: string } {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return idx === -1 ? { dir: '', name: path } : { dir: path.slice(0, idx), name: path.slice(idx + 1) }
+}
 
 export function Toolbar({
   onChanged,
@@ -17,6 +27,16 @@ export function Toolbar({
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showSave, setShowSave] = useState(false)
+  const [showLoad, setShowLoad] = useState(false)
+  const [defaultProjectsDir, setDefaultProjectsDir] = useState<string | null>(null)
+
+  useEffect(() => {
+    api
+      .projectDefaultDir()
+      .then((d) => setDefaultProjectsDir(d.path))
+      .catch(() => setDefaultProjectsDir(null))
+  }, [])
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -37,13 +57,22 @@ export function Toolbar({
       setCompiled(source)
     })
 
-  const doSave = () =>
-    run(() => api.save(projectPath ?? prompt('Save project to path:', 'project.json') ?? undefined))
-
-  const doLoad = () => {
-    const path = prompt('Load project from path:', projectPath ?? 'project.json')
-    if (path) run(() => api.load(path))
+  const doSavePick = (path: string) => {
+    setShowSave(false)
+    run(() => api.save(path))
   }
+
+  const doLoadPick = (path: string) => {
+    setShowLoad(false)
+    run(() => api.load(path))
+  }
+
+  // Both dialogs default to wherever the currently-open project lives; with
+  // no project open yet they fall back to the server's default projects
+  // subdirectory (see /api/project/default_dir), so Save always lands
+  // somewhere sensible instead of the server's raw working directory.
+  const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: 'project.json' }
+  const browseStartPath = openDir || defaultProjectsDir
 
   return (
     <div
@@ -80,10 +109,10 @@ export function Toolbar({
         Compile
       </button>
       <span style={{ flex: 1 }} />
-      <button disabled={busy} onClick={doSave}>
+      <button disabled={busy} onClick={() => setShowSave(true)}>
         Save
       </button>
-      <button disabled={busy} onClick={doLoad}>
+      <button disabled={busy} onClick={() => setShowLoad(true)}>
         Load
       </button>
       <span style={{ fontSize: 12, color: '#6b7280' }}>{projectPath ?? '(unsaved)'}</span>
@@ -153,6 +182,20 @@ export function Toolbar({
             {compiled}
           </pre>
         </div>
+      )}
+
+      {showSave && (
+        <FileBrowser
+          mode="save"
+          ext=".json"
+          startPath={browseStartPath}
+          defaultName={openName}
+          onPick={doSavePick}
+          onClose={() => setShowSave(false)}
+        />
+      )}
+      {showLoad && (
+        <FileBrowser ext=".json" startPath={browseStartPath} onPick={doLoadPick} onClose={() => setShowLoad(false)} />
       )}
     </div>
   )
