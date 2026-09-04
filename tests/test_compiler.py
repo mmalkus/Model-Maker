@@ -90,3 +90,20 @@ def test_output_blocks_only_get_output_dir_kwarg_when_their_signature_wants_it(t
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)  # would raise TypeError if the bug regressed
+
+
+def test_compiled_generate_image_calls_get_a_distinct_block_id(tmp_path):
+    # Regression: generate_image's compiled call site must carry block_id
+    # (like output_dir) so two image blocks in one script don't collide on
+    # the same output filename.
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_img"] = make_block("b_img", "generate_image", params={"kind": "hist", "x": "a"}, x=3)
+    graph.wires["w3"] = Wire("w3", "b_select", "out", "b_img", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_all()["b_img"] == "green"
+
+    source = compile_graph(graph, runner=runner)
+    call_line = next(line for line in source.splitlines() if "generate_image_b_img(" in line and "=" in line)
+    assert "block_id='b_img'" in call_line

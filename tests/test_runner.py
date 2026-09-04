@@ -154,3 +154,27 @@ def test_run_to_here_cascades_upstream(tmp_path):
     status = runner.run_to_here("b_filter")
     assert status == "green"
     assert runner.status("b_filter") == "green"
+
+
+def test_two_generate_image_blocks_write_distinct_files(tmp_path):
+    # Regression: generate_image used to always write to a hardcoded
+    # "generate_image.png", so a second image block in the same pipeline
+    # silently overwrote the first block's saved output file.
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_img1"] = make_block(
+        "b_img1", "generate_image", params={"kind": "hist", "x": "a"}, x=2
+    )
+    graph.blocks["b_img2"] = make_block(
+        "b_img2", "generate_image", params={"kind": "hist", "x": "b"}, x=2, y=1
+    )
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_img1", "df")
+    graph.wires["w3"] = Wire("w3", "b_read", "out", "b_img2", "df")
+
+    output_dir = tmp_path / "out"
+    runner = Runner(graph, CacheStore(), output_dir=str(output_dir))
+    runner.refresh("b_read")
+    assert runner.run_block("b_img1") == "green"
+    assert runner.run_block("b_img2") == "green"
+
+    pngs = sorted(p.name for p in output_dir.glob("*.png"))
+    assert len(pngs) == 2

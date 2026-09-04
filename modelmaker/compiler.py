@@ -41,11 +41,13 @@ def compile_graph(
 
     fn_names: dict[str, str] = {}
     wants_output_dir: dict[str, bool] = {}
+    wants_block_id: dict[str, bool] = {}
     def_lines: list[str] = []
     for bid in order:
         block = graph.blocks[bid]
         fn = block.resolved_fn()
         wants_output_dir[bid] = accepts_param(fn, "output_dir")
+        wants_block_id[bid] = accepts_param(fn, "block_id")
         src = block.code if block.is_custom else inspect.getsource(fn)
         src = textwrap.dedent(src).strip("\n")
         fn_name = f"{_sanitize(block.category)}_{bid}"
@@ -70,6 +72,8 @@ def compile_graph(
             kwargs.append(f"{pname}={pval!r}")
         if block.block_type == "output" and wants_output_dir[bid]:
             kwargs.append("output_dir=OUTPUT_DIR")
+        if block.block_type == "output" and wants_block_id[bid]:
+            kwargs.append(f"block_id={bid!r}")
 
         out_ports = [p.name for p in block.outputs]
         call = f"{fn_names[bid]}({', '.join(kwargs)})"
