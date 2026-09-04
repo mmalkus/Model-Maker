@@ -2,47 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
-from .prompts import build_user_prompt, contract_for
+from .prompts import JSON_ONLY_INSTRUCTIONS, build_user_prompt, contract_for, extract_json_response
 
 DEFAULT_MODEL = "claude-sonnet-5"
 CLI_TIMEOUT_SECONDS = 90
-
-JSON_ONLY_INSTRUCTIONS = """
-Respond with ONLY a single JSON object -- no markdown code fences, no prose \
-before or after it. It must have exactly these keys:
-{
-  "code": "<the complete function definition as a string>",
-  "metadata_transform": {
-    "kind": "passthrough" | "narrow" | "declared",
-    "base": "<input port name, only when kind is 'declared', else null>",
-    "drops": ["<column name>", ...],
-    "adds": [{"name": "...", "dtype": "...", "role": "..."}, ...]
-  },
-  "params": {"<param name>": <default value>, ...},
-  "explanation": "<one or two sentences>"
-}
-Omit "drops"/"adds"/"base" (send empty list / null) when kind is not \
-"declared". The response must be valid JSON parseable by a standard parser."""
-
-
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
-    if fenced:
-        return json.loads(fenced.group(1))
-    brace = re.search(r"\{.*\}", text, re.DOTALL)
-    if brace:
-        return json.loads(brace.group(0))
-    raise ValueError(f"claude CLI did not return parseable JSON: {text[:500]!r}")
 
 
 @register_provider("claude_cli")
@@ -61,7 +28,7 @@ class ClaudeCliProvider(LLMProvider):
             raise RuntimeError("claude CLI not found on PATH; install Claude Code or choose a different LLM provider")
 
     def draft(self, ctx: DraftContext) -> DraftResult:
-        system = contract_for(ctx.mode) + "\n" + JSON_ONLY_INSTRUCTIONS
+        system = contract_for(ctx.mode, ctx.include_reference) + "\n" + JSON_ONLY_INSTRUCTIONS
         try:
             result = subprocess.run(
                 [
@@ -104,7 +71,7 @@ class ClaudeCliProvider(LLMProvider):
         if payload.get("is_error"):
             raise RuntimeError(f"claude CLI error: {payload.get('result')}")
 
-        data = _extract_json(payload["result"])
+        data = extract_json_response(payload["result"])
 
         try:
             code = data["code"]

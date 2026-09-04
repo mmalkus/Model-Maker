@@ -32,6 +32,11 @@ class DraftContext:
     # for its existing parameters, given the fixed source for context.
     mode: Literal["author", "params_only"] = "author"
     fixed_source: str | None = None
+    # Off by default: appends a condensed Polars API cheat sheet + worked
+    # example to the system prompt. Costs extra tokens on every call, so it's
+    # opt-in -- mainly useful to compensate smaller/local models' weaker
+    # recall of a less-common library's exact API surface.
+    include_reference: bool = False
 
 
 @dataclass
@@ -61,11 +66,11 @@ def register_provider(name: str):
     return _reg
 
 
-def get_provider(name: str | None = None) -> LLMProvider:
+def get_provider(name: str | None = None, model: str | None = None) -> LLMProvider:
     provider_name = name or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
     cls = LLM_PROVIDER_REGISTRY.get(provider_name)
     if cls is None:
         raise ValueError(
             f"unknown LLM provider {provider_name!r}; available: {sorted(LLM_PROVIDER_REGISTRY)}"
         )
-    return cls()
+    return cls(model=model)

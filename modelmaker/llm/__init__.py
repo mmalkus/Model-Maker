@@ -1,5 +1,6 @@
 from .base import LLM_PROVIDER_REGISTRY, ColumnInfo, DraftContext, DraftResult, LLMProvider, get_provider, register_provider
 from .claude_cli_provider import ClaudeCliProvider
+from .lmstudio_provider import LMStudioProvider
 from .stub_provider import StubProvider
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "register_provider",
     "StubProvider",
     "ClaudeCliProvider",
+    "LMStudioProvider",
 ]
 
 try:
