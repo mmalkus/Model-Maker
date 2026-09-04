@@ -6,3 +6,4 @@ __pycache__/
 output/
 *.egg-info/
 modelmaker/static/
+build/

@@ -10,6 +10,9 @@ class StubProvider(LLMProvider):
     register a class with @register_provider("name") and point
     MODELMAKER_LLM_PROVIDER at it."""
 
+    def __init__(self, model: str | None = None):
+        pass
+
     def draft(self, ctx: DraftContext) -> DraftResult:
         if ctx.mode == "params_only":
             explanation = (
