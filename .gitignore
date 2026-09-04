@@ -5,3 +5,4 @@ __pycache__/
 .modelmaker-cache/
 output/
 *.egg-info/
+modelmaker/static/
