@@ -43,12 +43,14 @@ export interface WireOut {
   from_port: string
   to_block: string
   to_port: string
+  name: string | null
   valid: boolean
 }
 
 export interface LaneOut {
   name: string
   order: number
+  height: number
 }
 
 export interface GraphOut {

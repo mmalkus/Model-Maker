@@ -55,6 +55,16 @@ const AI_BLOCK_TYPES: { blockType: 'input' | 'standard' | 'output'; label: strin
   { blockType: 'output', label: '+ AI output block', title: 'A terminal block (report, metric, export...) -- Claude writes the code' },
 ]
 
+// Payload dragged from a palette button, read back on drop in App.tsx
+const DRAG_MIME = 'application/x-modelmaker-block'
+
+function dragStartFor(payload: { kind: 'registry'; category: string } | { kind: 'custom'; blockType: 'input' | 'standard' | 'output' }) {
+  return (e: React.DragEvent) => {
+    e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload))
+    e.dataTransfer.effectAllowed = 'copy'
+  }
+}
+
 export function Palette({
   onAdd,
   onAddCustom,
@@ -104,8 +114,10 @@ export function Palette({
         {AI_BLOCK_TYPES.map(({ blockType, label, title }) => (
           <button
             key={blockType}
+            draggable
+            onDragStart={dragStartFor({ kind: 'custom', blockType })}
             onClick={() => onAddCustom(blockType)}
-            title={title}
+            title={`${title} (click, or drag onto the canvas)`}
             style={{
               ...buttonStyle,
               textAlign: 'center',
@@ -147,7 +159,14 @@ export function Palette({
             </button>
             {!collapsed &&
               groups[group].map((e) => (
-                <button key={e.category} onClick={() => onAdd(e.category)} style={buttonStyle}>
+                <button
+                  key={e.category}
+                  draggable
+                  onDragStart={dragStartFor({ kind: 'registry', category: e.category })}
+                  onClick={() => onAdd(e.category)}
+                  title="Click, or drag onto the canvas"
+                  style={buttonStyle}
+                >
                   {e.display_name}
                 </button>
               ))}
