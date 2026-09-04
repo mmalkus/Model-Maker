@@ -31,6 +31,13 @@ see [Building a self-contained package](#building-a-self-contained-package).
   default LLM provider. See [LLM provider](#llm-provider) below for
   alternatives.
 
+## Quick start (Windows)
+
+Double-click [`run.bat`](run.bat) (or run it from a terminal). It creates
+`.venv` if missing, installs the backend and frontend dependencies, builds
+the frontend, and starts `modelmaker-api` at `http://127.0.0.1:8001`. Safe
+to re-run any time — it just re-syncs dependencies and rebuilds.
+
 ## Install
 
 Install the backend as an editable package:
