@@ -112,3 +112,15 @@ export interface DraftOut {
   params: Record<string, unknown>
   explanation: string
 }
+
+export interface LLMProviderSettings {
+  model?: string | null
+  base_url?: string
+}
+
+export interface LLMSettingsOut {
+  providers: string[]
+  active_provider: string
+  include_reference: boolean | null
+  settings: Record<string, LLMProviderSettings>
+}

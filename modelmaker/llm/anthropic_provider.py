@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
+import anthropic
 from pydantic import BaseModel, Field
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
@@ -46,8 +47,6 @@ class AnthropicProvider(LLMProvider):
     Requires an API key (ANTHROPIC_API_KEY or an `ant auth login` profile)."""
 
     def __init__(self, model: str | None = None):
-        import anthropic
-
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL", DEFAULT_MODEL)
         self.client = anthropic.Anthropic()
 

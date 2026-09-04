@@ -1,4 +1,14 @@
-import type { BlockOut, BlockType, BrowseOut, DraftOut, GraphOut, InputSchemaOut, PreviewOut, RegistryEntry } from './types'
+import type {
+  BlockOut,
+  BlockType,
+  BrowseOut,
+  DraftOut,
+  GraphOut,
+  InputSchemaOut,
+  LLMSettingsOut,
+  PreviewOut,
+  RegistryEntry,
+} from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -102,7 +112,17 @@ export const api = {
     return request<BrowseOut>(`/browse${qs ? `?${qs}` : ''}`)
   },
 
-  llmProviders: () => request<{ providers: string[]; active: string }>('/llm/providers'),
+  llmSettings: () => request<LLMSettingsOut>('/llm/settings'),
+  updateLlmSettings: (body: {
+    active_provider?: string
+    include_reference?: boolean | null
+    settings?: Record<string, { model?: string | null; base_url?: string }>
+  }) => request<LLMSettingsOut>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  llmModels: (provider: string, baseUrl?: string) => {
+    const q = new URLSearchParams({ provider })
+    if (baseUrl) q.set('base_url', baseUrl)
+    return request<{ models: string[] }>(`/llm/models?${q.toString()}`)
+  },
   draftBlock: (id: string, instruction: string, provider?: string) =>
     request<DraftOut>(`/blocks/${id}/draft`, { method: 'POST', body: JSON.stringify({ instruction, provider }) }),
   suggestFix: (id: string, instruction?: string, provider?: string) =>

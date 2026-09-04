@@ -19,7 +19,7 @@ import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut, LaneOut, PortType } from './types'
+import type { BlockOut, GraphOut, LaneOut, LLMSettingsOut, PortType } from './types'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -68,20 +68,17 @@ function AppInner() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
-  const [llmProviders, setLlmProviders] = useState<string[]>([])
-  const [llmProvider, setLlmProvider] = useState<string | null>(null)
+  const [llmSettings, setLlmSettings] = useState<LLMSettingsOut | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
-  useEffect(() => {
-    api
-      .llmProviders()
-      .then((p) => {
-        setLlmProviders(p.providers)
-        setLlmProvider((prev) => prev ?? p.active)
-      })
-      .catch(() => setLlmProviders([]))
+  const reloadLlmSettings = useCallback(() => {
+    api.llmSettings().then(setLlmSettings).catch(() => setLlmSettings(null))
   }, [])
+
+  useEffect(() => {
+    reloadLlmSettings()
+  }, [reloadLlmSettings])
 
   const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
     setSelectedPort({ blockId, port, portType })
@@ -122,11 +119,10 @@ function AppInner() {
   }, [])
 
   const renameLane = useCallback(
-    (laneId: string) => {
+    (laneId: string, name: string) => {
       if (!graph) return
       const current = graph.lanes[laneId]
-      const name = prompt('Rename lane:', current?.name ?? '')
-      if (name) api.upsertLane(laneId, name, current?.order ?? 0).then(reload)
+      api.upsertLane(laneId, name, current?.order ?? 0).then(reload)
     },
     [graph, reload],
   )
@@ -328,9 +324,8 @@ function AppInner() {
       <Toolbar
         onChanged={reload}
         projectPath={graph?.project_path ?? null}
-        llmProviders={llmProviders}
-        llmProvider={llmProvider}
-        onLlmProviderChange={setLlmProvider}
+        llmSettings={llmSettings}
+        onLlmSettingsChange={setLlmSettings}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
@@ -377,7 +372,7 @@ function AppInner() {
             onChanged={reload}
           />
         ) : (
-          <Inspector block={selectedBlock} onChanged={reload} provider={llmProvider} />
+          <Inspector block={selectedBlock} onChanged={reload} provider={llmSettings?.active_provider ?? null} />
         )}
       </div>
     </div>

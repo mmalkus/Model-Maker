@@ -13,11 +13,23 @@ export function LaneLabels({
   lanes: LaneLayoutEntry[]
   collapsedLanes: Set<string>
   onToggleCollapse: (laneId: string) => void
-  onRename: (laneId: string) => void
+  onRename: (laneId: string, name: string) => void
   onDelete: (laneId: string) => void
   onMove: (laneId: string, direction: -1 | 1) => void
 }) {
   const viewport = useViewport()
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameText, setRenameText] = useState('')
+
+  const startRename = (laneId: string, currentName: string) => {
+    setRenamingId(laneId)
+    setRenameText(currentName)
+  }
+
+  const commitRename = (laneId: string) => {
+    setRenamingId(null)
+    if (renameText.trim()) onRename(laneId, renameText.trim())
+  }
 
   return (
     <>
@@ -49,14 +61,30 @@ export function LaneLabels({
             <button style={{ padding: '0 4px' }} onClick={() => onToggleCollapse(id)} title="Collapse/expand">
               {collapsed ? '▸' : '▾'}
             </button>
-            <strong>{lane.name}</strong>
+            {renamingId === id ? (
+              <input
+                autoFocus
+                value={renameText}
+                onChange={(e) => setRenameText(e.target.value)}
+                onBlur={() => commitRename(id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitRename(id)
+                  if (e.key === 'Escape') setRenamingId(null)
+                }}
+                style={{ fontSize: 11, width: 100, boxSizing: 'border-box' }}
+              />
+            ) : (
+              <strong style={{ cursor: 'text' }} title="Click to rename" onDoubleClick={() => startRename(id, lane.name)}>
+                {lane.name}
+              </strong>
+            )}
             <button style={{ padding: '0 4px' }} onClick={() => onMove(id, -1)} disabled={i === 0} title="Move up">
               {'↑'}
             </button>
             <button style={{ padding: '0 4px' }} onClick={() => onMove(id, 1)} disabled={i === lanes.length - 1} title="Move down">
               {'↓'}
             </button>
-            <button style={{ padding: '0 4px' }} onClick={() => onRename(id)} title="Rename">
+            <button style={{ padding: '0 4px' }} onClick={() => startRename(id, lane.name)} title="Rename">
               {'✎'}
             </button>
             <button style={{ padding: '0 4px' }} onClick={() => onDelete(id)} title="Delete lane">

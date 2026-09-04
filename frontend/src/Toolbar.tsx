@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import { FileBrowser } from './FileBrowser'
+import { SettingsPanel } from './SettingsPanel'
+import type { LLMSettingsOut } from './types'
 
 // Splits a server-side path into (directory, filename), tolerating both
 // '/' (POSIX) and '\' (Windows) separators, whichever the path was given
@@ -14,15 +16,13 @@ function splitPath(path: string): { dir: string; name: string } {
 export function Toolbar({
   onChanged,
   projectPath,
-  llmProviders,
-  llmProvider,
-  onLlmProviderChange,
+  llmSettings,
+  onLlmSettingsChange,
 }: {
   onChanged: () => void
   projectPath: string | null
-  llmProviders: string[]
-  llmProvider: string | null
-  onLlmProviderChange: (provider: string) => void
+  llmSettings: LLMSettingsOut | null
+  onLlmSettingsChange: (settings: LLMSettingsOut) => void
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
@@ -120,42 +120,7 @@ export function Toolbar({
       <div style={{ position: 'relative' }}>
         <button onClick={() => setShowSettings((s) => !s)}>Settings</button>
         {showSettings && (
-          <div
-            style={{
-              position: 'absolute',
-              top: '100%',
-              right: 0,
-              marginTop: 4,
-              background: '#fff',
-              border: '1px solid #d1d5db',
-              borderRadius: 8,
-              padding: 12,
-              zIndex: 50,
-              minWidth: 220,
-              boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-              <strong style={{ fontSize: 13 }}>Settings</strong>
-              <button onClick={() => setShowSettings(false)}>Close</button>
-            </div>
-            <label style={{ display: 'block', fontSize: 12 }}>
-              <div style={{ color: '#6b7280', marginBottom: 2 }}>AI provider (used to draft/fix block code)</div>
-              <select
-                value={llmProvider ?? ''}
-                onChange={(e) => onLlmProviderChange(e.target.value)}
-                disabled={llmProviders.length === 0}
-                style={{ width: '100%', fontSize: 12 }}
-              >
-                {llmProviders.length === 0 && <option value="">(unavailable)</option>}
-                {llmProviders.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+          <SettingsPanel settings={llmSettings} onChange={onLlmSettingsChange} onClose={() => setShowSettings(false)} />
         )}
       </div>
 

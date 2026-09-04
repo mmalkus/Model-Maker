@@ -19,9 +19,17 @@ from .blocks import modelling as _modelling  # noqa: F401
 from .blocks import stat_tests as _stat_tests  # noqa: F401
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
-from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, get_provider
+from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
+from .llm import claude_cli_provider as _claude_cli_provider
+from .llm import lmstudio_provider as _lmstudio_provider
+from .llm.settings import LLMSettingsStore
 from .packet import DataFramePacket
 from .session import ProjectSession, wire_is_valid
+
+try:
+    from .llm import anthropic_provider as _anthropic_provider
+except ImportError:
+    _anthropic_provider = None
 
 app = FastAPI(title="Model-Maker API")
 app.add_middleware(
@@ -32,6 +40,17 @@ app.add_middleware(
 )
 
 SESSION = ProjectSession()
+LLM_SETTINGS = LLMSettingsStore()
+
+# Static curated list -- the `claude` CLI has no scriptable "list models"
+# command, so this is what the model dropdown offers for the claude_cli
+# provider instead of a live query.
+CLAUDE_CLI_KNOWN_MODELS = [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5-1",
+    "claude-haiku-4-5-20251001",
+]
 
 # Where Save/Load default to when no project path is already known (see
 # Toolbar.tsx) -- a subdirectory next to wherever the server runs. Not
@@ -113,6 +132,16 @@ class CompileRequest(BaseModel):
 class DraftRequest(BaseModel):
     instruction: str = ""
     provider: str | None = None
+
+
+class LLMSettingsUpdate(BaseModel):
+    active_provider: str | None = None
+    # Global toggle for including the Polars API reference in the system
+    # prompt -- applies across every provider (see DraftContext.include_reference).
+    include_reference: bool | None = None
+    # Per-provider fields, e.g. {"lmstudio": {"model": "...", "base_url": "..."}}.
+    # Unrecognized keys for a given provider are ignored by get_provider.
+    settings: dict[str, dict[str, Any]] | None = None
 
 
 # ---- helpers -------------------------------------------------------------
@@ -573,12 +602,92 @@ def compile_ep(req: CompileRequest) -> dict[str, str]:
     return {"source": source}
 
 
-@app.get("/api/llm/providers")
-def list_llm_providers() -> dict[str, Any]:
+def _effective_llm_settings() -> dict[str, Any]:
+    """The Settings panel's view of LLM config: every field resolved to what
+    would actually be used right now (a UI override, else the env var each
+    provider itself falls back to, else its hardcoded default) -- so text
+    fields and checkboxes always show a real value instead of blank."""
+    lmstudio_override = LLM_SETTINGS.for_provider("lmstudio")
+    claude_cli_override = LLM_SETTINGS.for_provider("claude_cli")
+    settings: dict[str, Any] = {
+        "lmstudio": {
+            "base_url": lmstudio_override.get("base_url")
+            or os.environ.get("MODELMAKER_LLM_BASE_URL", _lmstudio_provider.DEFAULT_BASE_URL),
+            "model": lmstudio_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
+        },
+        "claude_cli": {
+            "model": claude_cli_override.get("model")
+            or os.environ.get("MODELMAKER_LLM_MODEL")
+            or _claude_cli_provider.DEFAULT_MODEL,
+        },
+    }
+    if _anthropic_provider is not None:
+        anthropic_override = LLM_SETTINGS.for_provider("anthropic")
+        settings["anthropic"] = {
+            "model": anthropic_override.get("model")
+            or os.environ.get("MODELMAKER_LLM_MODEL")
+            or _anthropic_provider.DEFAULT_MODEL,
+        }
     return {
         "providers": sorted(LLM_PROVIDER_REGISTRY),
-        "active": os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
+        "active_provider": LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
+        # Tri-state: null means "each provider's own default" (on for LM
+        # Studio, off elsewhere) rather than an explicit choice.
+        "include_reference": LLM_SETTINGS.include_reference,
+        "settings": settings,
     }
+
+
+@app.get("/api/llm/settings")
+def get_llm_settings() -> dict[str, Any]:
+    return _effective_llm_settings()
+
+
+@app.put("/api/llm/settings")
+def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
+    if req.active_provider is not None and req.active_provider not in LLM_PROVIDER_REGISTRY:
+        raise HTTPException(400, f"unknown LLM provider: {req.active_provider}")
+    LLM_SETTINGS.update(req.active_provider, req.include_reference, req.settings)
+    return _effective_llm_settings()
+
+
+@app.get("/api/llm/models")
+def list_llm_models(provider: str, base_url: str | None = None) -> dict[str, list[str]]:
+    """Query a provider for the models it currently has available -- used by
+    the Settings panel's "Fetch models" so the user can pick one instead of
+    typing an id from memory. `base_url` (LM Studio only) lets the panel
+    query a not-yet-saved address before committing it via PUT /llm/settings."""
+    if provider == "lmstudio":
+        effective_base_url = base_url or _effective_llm_settings()["settings"]["lmstudio"]["base_url"]
+        try:
+            return {"models": _lmstudio_provider.list_models(effective_base_url)}
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+    if provider == "claude_cli":
+        return {"models": CLAUDE_CLI_KNOWN_MODELS}
+    if provider == "anthropic":
+        if _anthropic_provider is None:
+            raise HTTPException(400, "the anthropic provider is unavailable -- install the `anthropic` package")
+        try:
+            client = _anthropic_provider.anthropic.Anthropic()
+            return {"models": [m.id for m in client.models.list()]}
+        except Exception as e:
+            raise HTTPException(502, f"could not list Anthropic models: {e}")
+    if provider == "stub":
+        return {"models": []}
+    raise HTTPException(400, f"unknown LLM provider: {provider}")
+
+
+def _provider_for(name: str | None) -> LLMProvider:
+    """Resolve a provider for a draft/suggest_fix call: an explicit request
+    override if given, else the Settings panel's active provider, else the
+    env var default -- configured with whatever overrides (model, base_url)
+    are on file for it."""
+    provider_name = name or LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
+    overrides = dict(LLM_SETTINGS.for_provider(provider_name))
+    if LLM_SETTINGS.include_reference is not None:
+        overrides.setdefault("include_reference", LLM_SETTINGS.include_reference)
+    return get_provider(provider_name, **overrides)
 
 
 def _draft_context_for_block(block, block_id: str, instruction: str, error: str | None = None) -> DraftContext:
@@ -590,6 +699,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
     model touch fixed code."""
     input_ports = _input_schema_for_block(block_id)
     param_names = list(block.params)
+    include_reference = LLM_SETTINGS.include_reference if LLM_SETTINGS.include_reference is not None else False
 
     if block.is_custom:
         return DraftContext(
@@ -599,6 +709,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
             param_names=param_names,
             existing_code=block.code,
             error=error,
+            include_reference=include_reference,
         )
 
     spec = BLOCK_REGISTRY.get(block.category)
@@ -613,6 +724,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
         fixed_source=fixed_source,
         error=error,
         mode="params_only",
+        include_reference=include_reference,
     )
 
 
@@ -630,7 +742,7 @@ def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
 
     ctx = _draft_context_for_block(block, block_id, req.instruction)
     try:
-        provider = get_provider(req.provider)
+        provider = _provider_for(req.provider)
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM draft failed: {e}")
@@ -655,7 +767,7 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
 
     ctx = _draft_context_for_block(block, block_id, req.instruction.strip() or "Fix the error.", error=st.last_error)
     try:
-        provider = get_provider(req.provider)
+        provider = _provider_for(req.provider)
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM suggest_fix failed: {e}")

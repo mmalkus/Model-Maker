@@ -117,16 +117,30 @@ including before building a distributable wheel/sdist.
 
 ## LLM provider
 
-AI-assisted block drafting ("Draft with AI", suggest-a-fix) is pluggable
-via the `MODELMAKER_LLM_PROVIDER` environment variable:
+AI-assisted block drafting ("Draft with AI", suggest-a-fix) is pluggable:
 
 | Provider | Value | Requirements |
 |---|---|---|
 | Claude Code CLI (default) | `claude_cli` | `claude` binary on `PATH`, logged in (`claude` or `claude /login`) |
 | Anthropic API | `anthropic` | `pip install -e ".[anthropic]"` and `ANTHROPIC_API_KEY` set (or an `ant auth login` profile) |
+| LM Studio (local) | `lmstudio` | LM Studio running with its local server started (Developer tab → Start Server) and a model loaded |
 | Stub (no network, deterministic) | `stub` | none — used by default in tests |
 
-Optionally pin the model with `MODELMAKER_LLM_MODEL`.
+The **Settings** menu in the app's top bar picks the active provider and,
+for LM Studio, its base URL (address:port) and model — "Fetch" queries the
+running LM Studio server for the models it has available, so you can pick
+one instead of typing an id. A "Include Polars reference examples in
+prompts" toggle there applies to every provider; it's mainly useful for
+smaller/local models that know Polars' shape but not its exact syntax.
+These are in-memory server settings (no restart needed, reset when the
+server restarts) that override the env vars below when set.
+
+Env vars are still honored as defaults (useful for headless/CI use, or to
+set a starting point before the server starts): `MODELMAKER_LLM_PROVIDER`
+picks the provider, `MODELMAKER_LLM_MODEL` pins a model, and for
+`lmstudio` specifically `MODELMAKER_LLM_BASE_URL` sets the base URL
+(default `http://localhost:1234/v1`) and `MODELMAKER_LLM_INCLUDE_REFERENCE`
+(default on) controls the Polars reference toggle.
 
 ```bash
 export MODELMAKER_LLM_PROVIDER=anthropic
