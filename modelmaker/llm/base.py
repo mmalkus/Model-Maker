@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -66,11 +67,19 @@ def register_provider(name: str):
     return _reg
 
 
-def get_provider(name: str | None = None, model: str | None = None) -> LLMProvider:
+def get_provider(name: str | None = None, model: str | None = None, **overrides: Any) -> LLMProvider:
+    """Instantiate a registered provider. Extra keyword overrides (e.g.
+    base_url, include_reference) are only passed through to providers whose
+    constructor actually declares them -- most providers just take `model`,
+    so this lets callers (the Settings panel, via the API) pass a uniform
+    set of overrides without every provider needing to accept and ignore
+    params it has no use for."""
     provider_name = name or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
     cls = LLM_PROVIDER_REGISTRY.get(provider_name)
     if cls is None:
         raise ValueError(
             f"unknown LLM provider {provider_name!r}; available: {sorted(LLM_PROVIDER_REGISTRY)}"
         )
-    return cls(model=model)
+    accepted = inspect.signature(cls.__init__).parameters
+    kwargs = {k: v for k, v in overrides.items() if k in accepted and v is not None}
+    return cls(model=model, **kwargs)

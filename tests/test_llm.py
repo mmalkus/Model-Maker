@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 import modelmaker.api as api_module
 from modelmaker.llm import ColumnInfo, DraftContext, get_provider
+from modelmaker.llm.settings import LLMSettingsStore
 from modelmaker.session import ProjectSession
 
 
@@ -10,6 +11,7 @@ from modelmaker.session import ProjectSession
 def client(monkeypatch):
     monkeypatch.setenv("MODELMAKER_LLM_PROVIDER", "stub")
     api_module.SESSION = ProjectSession()
+    api_module.LLM_SETTINGS = LLMSettingsStore()
     return TestClient(api_module.app)
 
 
@@ -158,9 +160,25 @@ def test_suggest_fix_on_a_standard_block_is_params_only(client, tmp_path):
     assert graph["blocks"][filt["id"]]["category"] == "filter"
 
 
-def test_providers_endpoint_lists_registered_providers(client):
-    resp = client.get("/api/llm/providers")
+def test_llm_settings_endpoint_lists_registered_providers(client):
+    resp = client.get("/api/llm/settings")
     assert resp.status_code == 200
     body = resp.json()
     assert {"stub", "claude_cli"} <= set(body["providers"])
-    assert body["active"] == "stub"
+    assert body["active_provider"] == "stub"
+
+
+def test_llm_settings_can_be_updated(client):
+    resp = client.put(
+        "/api/llm/settings",
+        json={"active_provider": "lmstudio", "settings": {"lmstudio": {"base_url": "http://example:9999/v1"}}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["active_provider"] == "lmstudio"
+    assert body["settings"]["lmstudio"]["base_url"] == "http://example:9999/v1"
+
+
+def test_llm_settings_rejects_unknown_provider(client):
+    resp = client.put("/api/llm/settings", json={"active_provider": "not_a_real_provider"})
+    assert resp.status_code == 400

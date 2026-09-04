@@ -18,6 +18,23 @@ DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_MAX_TOKENS = 4096
 
 
+def list_models(base_url: str) -> list[str]:
+    """Model ids LM Studio's OpenAI-compatible /v1/models endpoint currently
+    reports (downloaded models it can serve, not just the one already
+    loaded) -- used both to auto-detect a model when none is configured and
+    to populate the Settings panel's model picker."""
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.load(resp)
+        return [m["id"] for m in data["data"]]
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        raise RuntimeError(
+            f"could not reach LM Studio at {base_url} -- is the local server running "
+            "(LM Studio > Developer > Start Server)?"
+        ) from e
+
+
 @register_provider("lmstudio")
 class LMStudioProvider(LLMProvider):
     """Calls a local LM Studio server's OpenAI-compatible chat-completions
@@ -33,23 +50,27 @@ class LMStudioProvider(LLMProvider):
     and the reference reliably fixes that. Set MODELMAKER_LLM_INCLUDE_REFERENCE
     to a falsy value (0/false/no/off) to turn it back off and save tokens."""
 
-    def __init__(self, model: str | None = None):
-        self.base_url = os.environ.get("MODELMAKER_LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        include_reference: bool | None = None,
+    ):
+        self.base_url = (base_url or os.environ.get("MODELMAKER_LLM_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
         self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
         self.max_tokens = int(os.environ.get("MODELMAKER_LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS))
-        self.include_reference = os.environ.get("MODELMAKER_LLM_INCLUDE_REFERENCE", "true").strip().lower() in _TRUTHY
+        if include_reference is None:
+            include_reference = os.environ.get("MODELMAKER_LLM_INCLUDE_REFERENCE", "true").strip().lower() in _TRUTHY
+        self.include_reference = include_reference
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL") or self._detect_loaded_model()
 
     def _detect_loaded_model(self) -> str:
         try:
-            with urllib.request.urlopen(f"{self.base_url}/models", timeout=10) as resp:
-                data = json.load(resp)
-            return data["data"][0]["id"]
-        except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError) as e:
+            return list_models(self.base_url)[0]
+        except IndexError as e:
             raise RuntimeError(
-                f"could not detect a loaded model from LM Studio at {self.base_url} -- "
-                "is the local server running with a model loaded? Set "
-                "MODELMAKER_LLM_MODEL to skip auto-detection."
+                f"LM Studio at {self.base_url} has no models loaded -- load one in the "
+                "Developer tab, or set MODELMAKER_LLM_MODEL to skip auto-detection."
             ) from e
 
     def draft(self, ctx: DraftContext) -> DraftResult:
