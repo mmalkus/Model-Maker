@@ -72,8 +72,20 @@ function AppInner() {
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
+  const [llmProviders, setLlmProviders] = useState<string[]>([])
+  const [llmProvider, setLlmProvider] = useState<string | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
+
+  useEffect(() => {
+    api
+      .llmProviders()
+      .then((p) => {
+        setLlmProviders(p.providers)
+        setLlmProvider((prev) => prev ?? p.active)
+      })
+      .catch(() => setLlmProviders([]))
+  }, [])
 
   const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
     setSelectedPort({ blockId, port, portType })
@@ -327,7 +339,13 @@ function AppInner() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      <Toolbar onChanged={reload} projectPath={graph?.project_path ?? null} />
+      <Toolbar
+        onChanged={reload}
+        projectPath={graph?.project_path ?? null}
+        llmProviders={llmProviders}
+        llmProvider={llmProvider}
+        onLlmProviderChange={setLlmProvider}
+      />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
@@ -385,7 +403,7 @@ function AppInner() {
             onClose={() => setSelectedPort(null)}
           />
         ) : (
-          <Inspector block={selectedBlock} onChanged={reload} />
+          <Inspector block={selectedBlock} onChanged={reload} provider={llmProvider} />
         )}
       </div>
     </div>
