@@ -19,6 +19,7 @@ import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
 import { Toolbar } from './Toolbar'
 import type { BlockOut, GraphOut, LaneOut } from './types'
+import { WireInspector } from './WireInspector'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -36,22 +37,18 @@ function toBlockNodes(graph: GraphOut, collapsedLanes: Set<string>): BlockFlowNo
     }))
 }
 
-function toEdges(graph: GraphOut): DataWireEdgeType[] {
-  return Object.entries(graph.wires).map(([id, w]) => {
-    const fromBlock = graph.blocks[w.from_block]
-    const portType = fromBlock?.outputs.find((p) => p.name === w.from_port)?.type
-    return {
-      id,
-      type: 'dataWire' as const,
-      source: w.from_block,
-      sourceHandle: w.from_port,
-      target: w.to_block,
-      targetHandle: w.to_port,
-      style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
-      animated: !w.valid,
-      data: { wire: w, portType, fromLabel: fromBlock?.name ?? w.from_block },
-    }
-  })
+function toEdges(graph: GraphOut, selectedWireId: string | null, onView: (wireId: string) => void): DataWireEdgeType[] {
+  return Object.entries(graph.wires).map(([id, w]) => ({
+    id,
+    type: 'dataWire' as const,
+    source: w.from_block,
+    sourceHandle: w.from_port,
+    target: w.to_block,
+    targetHandle: w.to_port,
+    style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
+    animated: !w.valid,
+    data: { wire: w, onView, isViewed: id === selectedWireId },
+  }))
 }
 
 export default function App() {
@@ -66,6 +63,7 @@ function AppInner() {
   const [graph, setGraph] = useState<GraphOut | null>(null)
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedWireId, setSelectedWireId] = useState<string | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
@@ -234,10 +232,16 @@ function AppInner() {
     (_: unknown, edge: DataWireEdgeType) => {
       if (confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
+        setSelectedWireId((id) => (id === edge.id ? null : id))
       }
     },
     [reload],
   )
+
+  const onViewWire = useCallback((wireId: string) => {
+    setSelectedWireId(wireId)
+    setSelectedId(null)
+  }, [])
 
   const addBlock = useCallback(
     (category: string, at?: { x: number; y: number }) => {
@@ -314,15 +318,22 @@ function AppInner() {
           <WirePortalContext.Provider value={wirePortal}>
             <ReactFlow
               nodes={nodes}
-              edges={graph ? toEdges(graph) : []}
+              edges={graph ? toEdges(graph, selectedWireId, onViewWire) : []}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onNodeDragStop={onNodeDragStop}
               onConnect={onConnect}
               onEdgeClick={onEdgeClick}
-              onNodeClick={(_, node) => node.type === 'modelBlock' && setSelectedId(node.id)}
-              onPaneClick={() => setSelectedId(null)}
+              onNodeClick={(_, node) => {
+                if (node.type !== 'modelBlock') return
+                setSelectedId(node.id)
+                setSelectedWireId(null)
+              }}
+              onPaneClick={() => {
+                setSelectedId(null)
+                setSelectedWireId(null)
+              }}
             >
               <Background />
               <Controls />
@@ -345,7 +356,11 @@ function AppInner() {
             </ReactFlow>
           </WirePortalContext.Provider>
         </div>
-        <Inspector block={selectedBlock} onChanged={reload} />
+        {selectedWireId && graph ? (
+          <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} />
+        ) : (
+          <Inspector block={selectedBlock} onChanged={reload} />
+        )}
       </div>
     </div>
   )

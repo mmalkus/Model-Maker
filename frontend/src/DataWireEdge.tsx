@@ -1,14 +1,13 @@
 import { BaseEdge, getBezierPath, useViewport, type Edge, type EdgeProps } from '@xyflow/react'
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from './api'
-import { DataModal } from './DataModal'
-import type { PortType, PreviewOut, WireOut } from './types'
+import type { WireOut } from './types'
 
 export type DataWireData = {
   wire: WireOut
-  portType: PortType | undefined
-  fromLabel: string
+  onView: (wireId: string) => void
+  isViewed: boolean
 }
 export type DataWireEdgeType = Edge<DataWireData, 'dataWire'>
 
@@ -25,8 +24,9 @@ export const WirePortalContext = createContext<HTMLDivElement | null>(null)
 
 // A wire is data flowing from one block's output port to another's input --
 // the small button at its midpoint opens a look at that data itself
-// (whatever shape it is: a dataframe preview, an image, or a plain value),
-// and the wire can be given its own name, shown right there on the canvas.
+// (whatever shape it is: a dataframe preview, an image, or a plain value) in
+// the side panel, same as clicking a block does, and the wire can be given
+// its own name, shown right there on the canvas.
 export function DataWireEdge({
   id,
   sourceX,
@@ -50,12 +50,11 @@ export function DataWireEdge({
   })
   const viewport = useViewport()
   const portalEl = useContext(WirePortalContext)
-  const [open, setOpen] = useState(false)
   const wire = data?.wire
 
   const viewContent = (e: React.MouseEvent) => {
     e.stopPropagation()
-    setOpen(true)
+    data?.onView(id)
   }
 
   const rename = (e: React.MouseEvent) => {
@@ -97,8 +96,8 @@ export function DataWireEdge({
           height: 20,
           padding: 0,
           borderRadius: '50%',
-          border: selected ? '1px solid var(--brand)' : '1px solid #d1d5db',
-          background: '#fff',
+          border: selected || data?.isViewed ? '1px solid var(--brand)' : '1px solid #d1d5db',
+          background: data?.isViewed ? 'var(--brand-light)' : '#fff',
           fontSize: 11,
           lineHeight: 1,
           cursor: 'pointer',
@@ -122,15 +121,6 @@ export function DataWireEdge({
       >
         {wire?.name ?? '+ name'}
       </span>
-      {open && wire && (
-        <WireDataModal
-          title={wire.name || data?.fromLabel || `${wire.from_block}:${wire.from_port}`}
-          blockId={wire.from_block}
-          port={wire.from_port}
-          portType={data?.portType}
-          onClose={() => setOpen(false)}
-        />
-      )}
     </div>
   )
 
@@ -139,104 +129,5 @@ export function DataWireEdge({
       <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
       {portalEl && createPortal(overlay, portalEl)}
     </>
-  )
-}
-
-function WireDataModal({
-  title,
-  blockId,
-  port,
-  portType,
-  onClose,
-}: {
-  title: string
-  blockId: string
-  port: string
-  portType: PortType | undefined
-  onClose: () => void
-}) {
-  const [preview, setPreview] = useState<PreviewOut | null>(null)
-  const [value, setValue] = useState<{ v: unknown } | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    if (portType === 'image') return
-    const load =
-      portType === 'dataframe'
-        ? api.preview(blockId, { port, rows: 200, summary: true }).then((p) => {
-            if (!cancelled) setPreview(p)
-          })
-        : api.value(blockId, port).then((v) => {
-            if (!cancelled) setValue({ v })
-          })
-    load.catch((e) => {
-      if (!cancelled) setError((e as Error).message)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [blockId, port, portType])
-
-  if (portType === 'dataframe') {
-    return preview ? (
-      <DataModal blockName={title} preview={preview} onClose={onClose} />
-    ) : (
-      <ModalShell title={title} onClose={onClose}>
-        {error ?? 'Loading...'}
-      </ModalShell>
-    )
-  }
-
-  if (portType === 'image') {
-    return (
-      <ModalShell title={title} onClose={onClose}>
-        <img src={api.imageUrl(blockId, port)} alt={title} style={{ maxWidth: '100%', borderRadius: 6 }} />
-      </ModalShell>
-    )
-  }
-
-  return (
-    <ModalShell title={title} onClose={onClose}>
-      {error ? (
-        <span style={{ color: '#b91c1c' }}>{error}</span>
-      ) : (
-        <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
-          {value ? JSON.stringify(value.v, null, 2) : 'Loading...'}
-        </pre>
-      )}
-    </ModalShell>
-  )
-}
-
-function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div
-      // The wire-controls portal container (see WirePortalContext) sets
-      // pointer-events: none so it doesn't block clicks/drags elsewhere on
-      // the canvas -- anything interactive inside it, this modal included,
-      // has to opt back in explicitly or clicks fall through to the canvas.
-      className="nodrag nopan"
-      style={{
-        position: 'fixed',
-        inset: '20% 30%',
-        minWidth: 320,
-        maxHeight: '60vh',
-        overflow: 'auto',
-        background: '#fff',
-        border: '1px solid #d1d5db',
-        borderRadius: 8,
-        padding: 16,
-        zIndex: 50,
-        pointerEvents: 'all',
-        boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-        <strong style={{ fontSize: 14 }}>{title}</strong>
-        <button onClick={onClose}>Close</button>
-      </div>
-      {children}
-    </div>
   )
 }
