@@ -11,4 +11,10 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    // Emit into the Python package so it ships as part of the modelmaker
+    // wheel/sdist and modelmaker.api can serve it directly.
+    outDir: '../modelmaker/static',
+    emptyOutDir: true,
+  },
 })

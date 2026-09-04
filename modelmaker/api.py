@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
@@ -600,6 +601,16 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
         "params": result.params,
         "explanation": result.explanation,
     }
+
+
+# Serve the built frontend (from `npm run build` in frontend/, which emits
+# into this directory) if present, so `modelmaker-api` alone can serve the
+# whole app on one port. Mounted last so it never shadows the /api routes
+# above. Absent in a dev checkout that hasn't built the frontend -- run the
+# Vite dev server separately in that case.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
 
 
 def main() -> None:

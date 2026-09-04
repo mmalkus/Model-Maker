@@ -26,5 +26,10 @@ modelmaker-api = "modelmaker.api:main"
 [tool.setuptools.packages.find]
 include = ["modelmaker*"]
 
+[tool.setuptools.package-data]
+# Built frontend assets (frontend/`npm run build`, emitted here) -- optional,
+# ships with the package when present so modelmaker-api can serve the UI.
+modelmaker = ["static/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

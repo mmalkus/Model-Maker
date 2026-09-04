@@ -15,6 +15,13 @@ The project has two parts:
 - **`frontend/`** — a React + Vite UI for building and running pipelines
   against that API.
 
+The frontend is optional at the Python-package level: `pip install` works
+without it, and the two can be run separately for development (see
+[Running it (development)](#running-it-development)). Building the
+frontend emits its bundle into `modelmaker/static/`, which the backend
+then serves itself and which ships inside the `modelmaker` wheel/sdist —
+see [Building a self-contained package](#building-a-self-contained-package).
+
 ## Requirements
 
 - Python >= 3.11
@@ -47,7 +54,7 @@ cd frontend
 npm install
 ```
 
-## Running it
+## Running it (development)
 
 Run the backend and frontend in two terminals.
 
@@ -77,6 +84,29 @@ npm run dev
 ```
 
 Then open `http://localhost:5173` in a browser.
+
+## Building a self-contained package
+
+`npm run build` writes the frontend's production bundle straight into
+`modelmaker/static/` (configured in `frontend/vite.config.ts`), and
+`modelmaker.api` serves that directory at `/` whenever it's present — API
+routes stay under `/api/*`, so nothing conflicts. That means a single
+`modelmaker-api` process can serve the whole app on one port, and the
+built assets are picked up as package data, so they're included in a wheel
+or sdist built from the repo.
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+pip install .          # or: python -m build
+modelmaker-api          # now serves the UI at http://127.0.0.1:8001/ too
+```
+
+`modelmaker/static/` is a build artifact (gitignored, not checked in) —
+regenerate it with `npm run build` whenever you want an up-to-date bundle,
+including before building a distributable wheel/sdist.
 
 ## LLM provider
 
@@ -116,6 +146,7 @@ modelmaker/
   compiler.py         Compiles a graph to a single Python script
   packet.py           DataFramePacket: the typed value flowing over wires
   project.py          Load/save project files (JSON + block source files)
+  static/             Built frontend bundle (generated, gitignored)
 frontend/             React + Vite UI
 tests/                Pytest suite for the backend
 sample_data/          Example CSVs for building demo pipelines
