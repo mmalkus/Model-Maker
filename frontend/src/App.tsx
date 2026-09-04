@@ -17,41 +17,43 @@ import { Inspector } from './Inspector'
 import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
 import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
+import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut, LaneOut } from './types'
+import type { BlockOut, GraphOut, LaneOut, PortType } from './types'
+import { WireInspector } from './WireInspector'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
 
 type FlowNode = BlockFlowNode | LaneBandNode
 
-function toBlockNodes(graph: GraphOut, collapsedLanes: Set<string>): BlockFlowNode[] {
+function toBlockNodes(
+  graph: GraphOut,
+  collapsedLanes: Set<string>,
+  onViewPort: (blockId: string, port: string, portType: PortType) => void,
+): BlockFlowNode[] {
   return Object.values(graph.blocks)
     .filter((block) => !(block.lane && collapsedLanes.has(block.lane)))
     .map((block) => ({
       id: block.id,
       type: 'modelBlock' as const,
       position: block.position,
-      data: { block },
+      data: { block, onViewPort },
     }))
 }
 
-function toEdges(graph: GraphOut): DataWireEdgeType[] {
-  return Object.entries(graph.wires).map(([id, w]) => {
-    const fromBlock = graph.blocks[w.from_block]
-    const portType = fromBlock?.outputs.find((p) => p.name === w.from_port)?.type
-    return {
-      id,
-      type: 'dataWire' as const,
-      source: w.from_block,
-      sourceHandle: w.from_port,
-      target: w.to_block,
-      targetHandle: w.to_port,
-      style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
-      animated: !w.valid,
-      data: { wire: w, portType, fromLabel: fromBlock?.name ?? w.from_block },
-    }
-  })
+function toEdges(graph: GraphOut, selectedWireId: string | null, onView: (wireId: string) => void): DataWireEdgeType[] {
+  return Object.entries(graph.wires).map(([id, w]) => ({
+    id,
+    type: 'dataWire' as const,
+    source: w.from_block,
+    sourceHandle: w.from_port,
+    target: w.to_block,
+    targetHandle: w.to_port,
+    style: w.valid ? undefined : { stroke: '#ef4444', strokeDasharray: '4 4' },
+    animated: !w.valid,
+    data: { wire: w, onView, isViewed: id === selectedWireId },
+  }))
 }
 
 export default function App() {
@@ -66,15 +68,34 @@ function AppInner() {
   const [graph, setGraph] = useState<GraphOut | null>(null)
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedWireId, setSelectedWireId] = useState<string | null>(null)
+  const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
+  const [llmProviders, setLlmProviders] = useState<string[]>([])
+  const [llmProvider, setLlmProvider] = useState<string | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
+
+  useEffect(() => {
+    api
+      .llmProviders()
+      .then((p) => {
+        setLlmProviders(p.providers)
+        setLlmProvider((prev) => prev ?? p.active)
+      })
+      .catch(() => setLlmProviders([]))
+  }, [])
+
+  const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
+    setSelectedPort({ blockId, port, portType })
+    setSelectedWireId(null)
+  }, [])
 
   const reload = useCallback(() => {
     api.graph().then((g) => {
       setGraph(g)
-      const nextBlockNodes = toBlockNodes(g, collapsedLanes)
+      const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort)
       setBlockNodes(nextBlockNodes)
       // fit the view to the actual blocks (not the oversized lane bands) once,
       // on first load -- re-fitting on every later reload would yank the
@@ -84,7 +105,7 @@ function AppInner() {
         requestAnimationFrame(() => fitView({ nodes: nextBlockNodes.map((n) => ({ id: n.id })), padding: 0.2 }))
       }
     })
-  }, [collapsedLanes, fitView])
+  }, [collapsedLanes, fitView, onViewPort])
 
   useEffect(() => {
     reload()
@@ -92,7 +113,7 @@ function AppInner() {
   }, [])
 
   useEffect(() => {
-    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes))
+    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collapsedLanes])
 
@@ -234,10 +255,17 @@ function AppInner() {
     (_: unknown, edge: DataWireEdgeType) => {
       if (confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
+        setSelectedWireId((id) => (id === edge.id ? null : id))
       }
     },
     [reload],
   )
+
+  const onViewWire = useCallback((wireId: string) => {
+    setSelectedWireId(wireId)
+    setSelectedId(null)
+    setSelectedPort(null)
+  }, [])
 
   const addBlock = useCallback(
     (category: string, at?: { x: number; y: number }) => {
@@ -247,6 +275,8 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
+          setSelectedWireId(null)
+          setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
     },
@@ -278,6 +308,8 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
+          setSelectedWireId(null)
+          setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
     },
@@ -307,22 +339,37 @@ function AppInner() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      <Toolbar onChanged={reload} projectPath={graph?.project_path ?? null} />
+      <Toolbar
+        onChanged={reload}
+        projectPath={graph?.project_path ?? null}
+        llmProviders={llmProviders}
+        llmProvider={llmProvider}
+        onLlmProviderChange={setLlmProvider}
+      />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
           <WirePortalContext.Provider value={wirePortal}>
             <ReactFlow
               nodes={nodes}
-              edges={graph ? toEdges(graph) : []}
+              edges={graph ? toEdges(graph, selectedWireId, onViewWire) : []}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onNodeDragStop={onNodeDragStop}
               onConnect={onConnect}
               onEdgeClick={onEdgeClick}
-              onNodeClick={(_, node) => node.type === 'modelBlock' && setSelectedId(node.id)}
-              onPaneClick={() => setSelectedId(null)}
+              onNodeClick={(_, node) => {
+                if (node.type !== 'modelBlock') return
+                setSelectedId(node.id)
+                setSelectedWireId(null)
+                setSelectedPort(null)
+              }}
+              onPaneClick={() => {
+                setSelectedId(null)
+                setSelectedWireId(null)
+                setSelectedPort(null)
+              }}
             >
               <Background />
               <Controls />
@@ -345,7 +392,20 @@ function AppInner() {
             </ReactFlow>
           </WirePortalContext.Provider>
         </div>
-        <Inspector block={selectedBlock} onChanged={reload} />
+        {selectedWireId && graph ? (
+          <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} onChanged={reload} />
+        ) : selectedPort && graph ? (
+          <PortInspector
+            blockId={selectedPort.blockId}
+            port={selectedPort.port}
+            portType={selectedPort.portType}
+            graph={graph}
+            onClose={() => setSelectedPort(null)}
+            onChanged={reload}
+          />
+        ) : (
+          <Inspector block={selectedBlock} onChanged={reload} provider={llmProvider} />
+        )}
       </div>
     </div>
   )

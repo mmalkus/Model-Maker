@@ -66,6 +66,11 @@ class BlockUpdate(BaseModel):
     metadata_transform: dict[str, Any] | None = None
 
 
+class ColumnRoleUpdate(BaseModel):
+    column: str
+    role: str
+
+
 class WireCreate(BaseModel):
     from_block: str
     from_port: str
@@ -337,6 +342,22 @@ def update_block(block_id: str, req: BlockUpdate) -> dict[str, Any]:
     if block_id not in SESSION.graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
     SESSION.update_block(block_id, **req.model_dump(exclude_unset=True))
+    return _block_out(block_id)
+
+
+@app.post("/api/blocks/{block_id}/column_role")
+def set_column_role(block_id: str, req: ColumnRoleUpdate) -> dict[str, Any]:
+    """Hand-tag a column's role (id/target/weight/feature/date/segment/
+    excluded, or "unassigned" to clear it) on this block -- see
+    ProjectSession.set_column_role. Changing it is a normal block edit: it
+    changes the block's cache key, so this block and everything downstream
+    go stale like any other param change, rather than needing separate
+    invalidation."""
+    _require_block(block_id)
+    try:
+        SESSION.set_column_role(block_id, req.column, req.role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return _block_out(block_id)
 
 

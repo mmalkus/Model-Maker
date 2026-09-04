@@ -54,6 +54,9 @@ export const api = {
 
   inputSchema: (id: string) => request<InputSchemaOut>(`/blocks/${id}/input_schema`),
 
+  setColumnRole: (id: string, column: string, role: string) =>
+    request<BlockOut>(`/blocks/${id}/column_role`, { method: 'POST', body: JSON.stringify({ column, role }) }),
+
   preview: (id: string, opts: { port?: string; rows?: number; summary?: boolean } = {}) => {
     const q = new URLSearchParams()
     if (opts.port) q.set('port', opts.port)

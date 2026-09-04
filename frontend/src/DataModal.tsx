@@ -1,14 +1,51 @@
+import { useState } from 'react'
+import { api } from './api'
+import { ASSIGNABLE_ROLES, ROLE_LABELS } from './roles'
 import type { PreviewOut } from './types'
 
 export function DataModal({
   blockName,
+  blockId,
   preview,
   onClose,
+  onChanged,
 }: {
   blockName: string
+  // The block whose output this preview shows -- present only when the
+  // caller has one to hand (every caller does today), so a column's role
+  // can be tagged right here where the data is visible. onChanged, if
+  // given, reloads the graph afterward since retagging invalidates this
+  // block and everything downstream (see runner.compute_key).
+  blockId?: string
   preview: PreviewOut
   onClose: () => void
+  onChanged?: () => void
 }) {
+  // The tag itself is stored immediately, but `preview` is a snapshot of
+  // the block's *last run* -- role tagging invalidates the cache (see
+  // runner.compute_key) without recomputing it, so the new role won't show
+  // up in `preview.columns[].role` until the block is re-run. Without this,
+  // the <select> (controlled straight off that stale prop) would visibly
+  // snap back to the old value right after picking a new one, looking like
+  // the click did nothing. Tracked here rather than bumping preview itself,
+  // since there's nothing valid to bump it to before that re-run happens.
+  const [pendingRoles, setPendingRoles] = useState<Record<string, string>>({})
+
+  const setRole = (column: string, role: string) => {
+    if (!blockId) return
+    setPendingRoles((prev) => ({ ...prev, [column]: role }))
+    api
+      .setColumnRole(blockId, column, role)
+      .then(onChanged)
+      .catch((e) => {
+        setPendingRoles((prev) => {
+          const next = { ...prev }
+          delete next[column]
+          return next
+        })
+        alert((e as Error).message)
+      })
+  }
   return (
     <div
       // "nodrag nopan" + pointer-events: all matter when this is opened from
@@ -47,12 +84,34 @@ export function DataModal({
             <tr>
               {preview.columns.map((c) => {
                 const s = preview.summary?.[c.name]
+                const pending = pendingRoles[c.name]
+                const displayedRole = pending ?? c.role
                 return (
                   <th key={c.name} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid #e5e7eb' }}>
                     {c.name}
-                    <div style={{ fontWeight: 400, color: '#9ca3af' }}>
-                      {c.dtype} / {c.role}
+                    <div style={{ fontWeight: 400, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 2 }}>
+                      {c.dtype} /
+                      {blockId && c.role !== 'predicted' ? (
+                        <select
+                          value={displayedRole}
+                          onChange={(e) => setRole(c.name, e.target.value)}
+                          title="Tag this column's role"
+                          style={{ fontSize: 10, color: '#9ca3af', border: 'none', background: 'transparent', padding: 0 }}
+                        >
+                          <option value="unassigned">{ROLE_LABELS.unassigned}</option>
+                          {ASSIGNABLE_ROLES.map((r) => (
+                            <option key={r} value={r}>
+                              {ROLE_LABELS[r]}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span>{c.role}</span>
+                      )}
                     </div>
+                    {pending !== undefined && pending !== c.role && (
+                      <div style={{ fontWeight: 400, color: 'var(--brand-dark, #b45309)' }}>re-run to apply</div>
+                    )}
                     {s && (
                       <div style={{ fontWeight: 400, color: '#9ca3af' }}>
                         {s.null_count > 0 && `${s.null_count} null `}

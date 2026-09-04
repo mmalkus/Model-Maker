@@ -3,9 +3,19 @@ import { api } from './api'
 import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
 import { PARAM_SPECS, ParamsForm } from './ParamsForm'
-import type { BlockOut, DraftOut, PreviewOut } from './types'
+import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
 
-export function Inspector({ block, onChanged }: { block: BlockOut | null; onChanged: () => void }) {
+export function Inspector({
+  block,
+  onChanged,
+  provider,
+}: {
+  block: BlockOut | null
+  onChanged: () => void
+  // Which LLM provider to draft with -- picked in the Settings menu (see
+  // Toolbar), not here; the inspector just uses whatever App hands it.
+  provider: string | null
+}) {
   const [paramsText, setParamsText] = useState('')
   const [paramsError, setParamsError] = useState<string | null>(null)
   const [codeText, setCodeText] = useState('')
@@ -19,21 +29,13 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
   const [nameText, setNameText] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [showBrowser, setShowBrowser] = useState(false)
-  const [inputColumns, setInputColumns] = useState<string[]>([])
+  const [inputColumns, setInputColumns] = useState<SchemaColumn[]>([])
   const [drafting, setDrafting] = useState(false)
   const [draftElapsed, setDraftElapsed] = useState(0)
-  const [llmProvider, setLlmProvider] = useState<string | null>(null)
   const [metricValues, setMetricValues] = useState<Record<string, unknown>>({})
   const [dynamicDataframePorts, setDynamicDataframePorts] = useState<Set<string>>(new Set())
   const [dynamicImagePorts, setDynamicImagePorts] = useState<Set<string>>(new Set())
   const instructionRef = useRef<HTMLTextAreaElement | null>(null)
-
-  useEffect(() => {
-    api
-      .llmProviders()
-      .then((p) => setLlmProvider(p.active))
-      .catch(() => setLlmProvider(null))
-  }, [])
 
   useEffect(() => {
     if (!drafting) return
@@ -50,9 +52,9 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
     api
       .inputSchema(block.id)
       .then((schema) => {
-        const cols = new Set<string>()
-        Object.values(schema).forEach((list) => list.forEach((c) => cols.add(c.name)))
-        setInputColumns([...cols])
+        const cols = new Map<string, SchemaColumn>()
+        Object.values(schema).forEach((list) => list.forEach((c) => cols.set(c.name, c)))
+        setInputColumns([...cols.values()])
       })
       .catch(() => setInputColumns([]))
     // Refetch on every graph reload (App hands down a fresh `block` object
@@ -206,7 +208,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
     run(async () => {
       setDrafting(true)
       try {
-        applyDraft(await api.draftBlock(block.id, instruction))
+        applyDraft(await api.draftBlock(block.id, instruction, provider ?? undefined))
       } finally {
         setDrafting(false)
       }
@@ -216,7 +218,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
     run(async () => {
       setDrafting(true)
       try {
-        applyDraft(await api.suggestFix(block.id))
+        applyDraft(await api.suggestFix(block.id, undefined, provider ?? undefined))
       } finally {
         setDrafting(false)
       }
@@ -376,7 +378,7 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
       <div style={{ marginBottom: 12, background: 'var(--brand-light)', border: '1px solid var(--brand-border)', borderRadius: 6, padding: 8 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
           Draft with AI
-          {llmProvider && <span style={{ fontWeight: 400, color: '#9ca3af' }}> (via {llmProvider})</span>}
+          {provider && <span style={{ fontWeight: 400, color: '#9ca3af' }}> (via {provider})</span>}
         </div>
         <textarea
           ref={instructionRef}
@@ -403,8 +405,8 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
         {drafting && (
           <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftElapsed < 5
-              ? `Asking ${llmProvider ?? 'the LLM provider'}...`
-              : llmProvider === 'claude_cli'
+              ? `Asking ${provider ?? 'the LLM provider'}...`
+              : provider === 'claude_cli'
                 ? `Still waiting on the local claude CLI (${draftElapsed}s)... it can take a while, or hang if the configured model isn't available on your plan.`
                 : `Still waiting (${draftElapsed}s)...`}
           </div>
@@ -485,7 +487,13 @@ export function Inspector({ block, onChanged }: { block: BlockOut | null; onChan
       )}
 
       {showData && preview && (
-        <DataModal blockName={block.name} preview={preview} onClose={() => setShowData(false)} />
+        <DataModal
+          blockName={block.name}
+          blockId={block.id}
+          preview={preview}
+          onClose={() => setShowData(false)}
+          onChanged={onChanged}
+        />
       )}
 
       {showBrowser && <FileBrowser ext=".csv" onPick={pickPath} onClose={() => setShowBrowser(false)} />}

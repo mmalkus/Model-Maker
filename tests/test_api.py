@@ -117,7 +117,7 @@ def test_run_all_and_compile(client, tmp_path):
     assert report[filt["id"]] == "green"
 
     compiled = client.post("/api/compile", json={}).json()
-    assert "def filter_" in compiled["source"]
+    assert "def filter(" in compiled["source"]
 
 
 def test_compile_before_run_returns_409(client, tmp_path):
@@ -436,3 +436,61 @@ def test_value_endpoint_rejects_an_image_port(client, tmp_path):
     client.post(f"/api/blocks/{img_block['id']}/run")
     resp = client.get(f"/api/blocks/{img_block['id']}/value")
     assert resp.status_code == 400
+
+
+def test_column_role_tag_flows_downstream_and_auto_fills_target(client, tmp_path):
+    read = _wired_read_csv(client, tmp_path, client.post("/api/blocks", json={"category": "display_table"}).json()["id"])
+
+    resp = client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "target"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "orange"  # retagging invalidated the cached run, same as any param edit
+
+    client.post(f"/api/blocks/{read['id']}/run")
+    preview = client.get(f"/api/blocks/{read['id']}/preview").json()
+    roles = {c["name"]: c["role"] for c in preview["columns"]}
+    assert roles == {"a": "target", "b": "unassigned"}
+
+    # clearing it back to unassigned
+    client.post(f"/api/blocks/{read['id']}/run")
+    resp = client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "unassigned"})
+    assert resp.status_code == 200
+    client.post(f"/api/blocks/{read['id']}/run")
+    preview2 = client.get(f"/api/blocks/{read['id']}/preview").json()
+    assert {c["name"]: c["role"] for c in preview2["columns"]} == {"a": "unassigned", "b": "unassigned"}
+
+
+def test_column_role_rejects_a_second_column_with_the_same_unique_role(client, tmp_path):
+    read = _wired_read_csv(client, tmp_path, client.post("/api/blocks", json={"category": "display_table"}).json()["id"])
+    client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "target"})
+    client.post(f"/api/blocks/{read['id']}/run")
+
+    resp = client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "b", "role": "target"})
+    assert resp.status_code == 400
+    assert "already set on 'a'" in resp.json()["detail"]
+
+
+def test_column_role_rejects_unknown_role_and_manual_predicted(client, tmp_path):
+    read = _wired_read_csv(client, tmp_path, client.post("/api/blocks", json={"category": "display_table"}).json()["id"])
+
+    resp = client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "nonsense"})
+    assert resp.status_code == 400
+
+    resp2 = client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "predicted"})
+    assert resp2.status_code == 400
+    assert "predicted" in resp2.json()["detail"].lower()
+
+
+def test_logistic_regression_predictions_are_tagged_predicted_role(client, tmp_path):
+    logreg = client.post("/api/blocks", json={"category": "logistic_regression", "params": {"features": ["x"]}}).json()
+    read = _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "y", "role": "target"})
+    client.post(f"/api/blocks/{read['id']}/run")
+
+    resp = client.post(f"/api/blocks/{logreg['id']}/run")
+    assert resp.json()["status"] == "green", resp.json()
+
+    preview = client.get(f"/api/blocks/{logreg['id']}/preview", params={"port": "predictions"}).json()
+    roles = {c["name"]: c["role"] for c in preview["columns"]}
+    assert roles["predicted_proba"] == "predicted"
+    assert roles["predicted_class"] == "feature"
+    assert roles["y"] == "target"

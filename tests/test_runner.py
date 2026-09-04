@@ -5,6 +5,19 @@ from modelmaker.runner import Runner
 from .helpers import make_block
 
 
+def _classification_graph(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("x,y\n1,0\n2,1\n3,0\n4,1\n5,0\n6,1\n")
+
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    logreg = make_block("b_logreg", "logistic_regression", params={"features": ["x"]}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg},
+        wires={"w1": Wire("w1", "b_read", "out", "b_logreg", "df")},
+    )
+    return graph
+
+
 def _csv_graph(tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n2,20\n3,30\n")
@@ -196,3 +209,91 @@ def test_two_generate_image_blocks_write_distinct_files(tmp_path):
 
     pngs = sorted(p.name for p in output_dir.glob("*.png"))
     assert len(pngs) == 2
+
+
+def test_target_param_left_unset_fails_clearly_with_no_role_tagged(tmp_path):
+    graph = _classification_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_logreg") == "red"
+    assert "target" in runner.state["b_logreg"].last_error.lower()
+
+
+def test_target_param_auto_fills_from_role_tagged_upstream_column(tmp_path):
+    graph = _classification_graph(tmp_path)
+    graph.blocks["b_read"].column_role_overrides = {"y": "target"}
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_logreg") == "green"
+    predictions = runner.cache.get(runner.state["b_logreg"].last_successful_key).outputs["predictions"]
+    assert predictions.schema_meta["predicted_proba"].role.value == "predicted"
+    assert predictions.schema_meta["predicted_class"].role.value == "feature"
+    assert predictions.schema_meta["y"].role.value == "target"
+
+
+def test_explicit_target_param_overrides_the_role_tagged_default(tmp_path):
+    # y is tagged target, but the block explicitly names x instead -- the
+    # explicit choice must win, not the upstream tag (sklearn will happily
+    # "fit" on a constant-ish column, this only checks which name was used).
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("x,y,z\n1,0,0\n2,1,1\n3,0,0\n4,1,1\n5,0,0\n6,1,1\n")
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    logreg = make_block("b_logreg", "logistic_regression", params={"features": ["z"], "target": "x"}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg},
+        wires={"w1": Wire("w1", "b_read", "out", "b_logreg", "df")},
+    )
+    graph.blocks["b_read"].column_role_overrides = {"y": "target"}
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_logreg") == "green"
+    artifact = runner.cache.get(runner.state["b_logreg"].last_successful_key).outputs["model"]
+    assert artifact["target"] == "x"
+
+
+def test_retagging_the_target_column_invalidates_downstream_and_repropagates(tmp_path):
+    graph = _classification_graph(tmp_path)
+    graph.blocks["b_read"].column_role_overrides = {"y": "target"}
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_logreg") == "green"
+
+    # Retag: y is no longer target, x is (a nonsense model, but exercises
+    # the propagation, not the statistics).
+    graph.blocks["b_read"].column_role_overrides = {"x": "target"}
+    assert runner.status("b_read") == "orange"
+    runner.run_block("b_read")
+    assert runner.status("b_logreg") == "orange"  # cache key changed via upstream, not yet re-run
+
+    assert runner.run_block("b_logreg") == "green"
+    artifact = runner.cache.get(runner.state["b_logreg"].last_successful_key).outputs["model"]
+    assert artifact["target"] == "x"
+
+
+def test_two_upstream_branches_tagging_the_same_role_collide_only_once_joined(tmp_path):
+    csv1 = tmp_path / "a.csv"
+    csv2 = tmp_path / "b.csv"
+    csv1.write_text("id,y1\n1,0\n2,1\n")
+    csv2.write_text("id,y2\n1,1\n2,0\n")
+
+    r1 = make_block("b_r1", "read_csv", params={"path": str(csv1)})
+    r2 = make_block("b_r2", "read_csv", params={"path": str(csv2)}, x=0, y=1)
+    r1.column_role_overrides = {"y1": "target"}
+    r2.column_role_overrides = {"y2": "target"}
+    j = make_block("b_join", "join", params={"on": ["id"], "how": "inner"}, x=1)
+    graph = Graph(
+        blocks={"b_r1": r1, "b_r2": r2, "b_join": j},
+        wires={
+            "w1": Wire("w1", "b_r1", "out", "b_join", "left"),
+            "w2": Wire("w2", "b_r2", "out", "b_join", "right"),
+        },
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_r1")
+    runner.refresh("b_r2")
+
+    assert runner.run_block("b_join") == "red"
+    assert "target" in runner.state["b_join"].last_error.lower()

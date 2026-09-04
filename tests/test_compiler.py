@@ -39,7 +39,7 @@ def test_compiled_script_runs_and_matches_engine_output(tmp_path):
     runner.run_all()
 
     source = compile_graph(graph, runner=runner)
-    assert "# === Function: read_csv_b_read" in source
+    assert "# === Function: read_csv | type=input | category=read_csv ===" in source
     assert '# --- Call: b_select | name="b_select" ---' in source
     assert "OUTPUT_DIR" in source
 
@@ -82,10 +82,10 @@ def test_output_blocks_only_get_output_dir_kwarg_when_their_signature_wants_it(t
     assert report["b_write"] == "green"
 
     source = compile_graph(graph, runner=runner)
-    assert "display_table_b_display(df=" in source
+    assert "display_table(df=" in source
     assert "output_dir=OUTPUT_DIR" in source
     # the display_table call site must not have picked up output_dir too
-    display_call_line = next(line for line in source.splitlines() if "display_table_b_display(" in line and "=" in line)
+    display_call_line = next(line for line in source.splitlines() if "display_table(" in line and "=" in line)
     assert "output_dir" not in display_call_line
 
     ns = {}
@@ -105,7 +105,7 @@ def test_compiled_generate_image_calls_get_a_distinct_block_id(tmp_path):
     assert runner.run_all()["b_img"] == "green"
 
     source = compile_graph(graph, runner=runner)
-    call_line = next(line for line in source.splitlines() if "generate_image_b_img(" in line and "=" in line)
+    call_line = next(line for line in source.splitlines() if "generate_image(" in line and "=" in line)
     assert "block_id='b_img'" in call_line
 
 
@@ -122,12 +122,12 @@ def test_two_blocks_of_the_same_type_compile_to_one_shared_function(tmp_path):
     runner.run_all()
 
     source = compile_graph(graph, runner=runner)
-    assert source.count("# === Function: filter_") == 1
-    assert source.count("def filter_") == 1
+    assert source.count("# === Function: filter |") == 1
+    assert source.count("def filter(") == 1
     assert '# --- Call: b_filter | name="b_filter" ---' in source
     assert '# --- Call: b_filter2 | name="b_filter2" ---' in source
 
-    shared_fn = next(line for line in source.splitlines() if line.startswith("def filter_")).split("(")[0][len("def ") :]
+    shared_fn = next(line for line in source.splitlines() if line.startswith("def filter(")).split("(")[0][len("def ") :]
     assert f"{shared_fn}(df=" in source
     assert source.count(f"{shared_fn}(df=") == 2
 
@@ -154,3 +154,27 @@ def test_compiled_calls_are_sectioned_by_lane(tmp_path):
     assert "# ===== Lane: Data Prep =====" in source
     assert "# ===== Lane: Reporting =====" in source
     assert source.index("# ===== Lane: Data Prep =====") < source.index("# ===== Lane: Reporting =====")
+
+
+def test_compile_bakes_in_the_role_tagged_target_when_param_left_unset(tmp_path):
+    # target is never in logreg's own params -- it's resolved from the
+    # upstream role=target tag, same as the live runner does (see
+    # test_runner.test_target_param_auto_fills_from_role_tagged_upstream_column),
+    # and baked into the generated call as a literal, same as output_dir/block_id.
+    csv_path = tmp_path / "clf.csv"
+    csv_path.write_text("x,y\n1,0\n2,1\n3,0\n4,1\n5,0\n6,1\n")
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    read.column_role_overrides = {"y": "target"}
+    logreg = make_block("b_logreg", "logistic_regression", params={"features": ["x"]}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg},
+        wires={"w1": Wire("w1", "b_read", "out", "b_logreg", "df")},
+    )
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_logreg") == "green"
+
+    source = compile_graph(graph, runner=runner)
+    call_line = next(line for line in source.splitlines() if "logistic_regression(" in line and "=" in line)
+    assert "target='y'" in call_line

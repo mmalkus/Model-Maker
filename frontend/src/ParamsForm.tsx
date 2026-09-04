@@ -1,10 +1,16 @@
 import type { CSSProperties } from 'react'
+import type { SchemaColumn } from './types'
 
 type FieldSpec =
   | { key: string; label: string; kind: 'text'; placeholder?: string }
   | { key: string; label: string; kind: 'number'; step?: number }
   | { key: string; label: string; kind: 'select'; options: string[] }
-  | { key: string; label: string; kind: 'column' }
+  // autoRole marks a field that should default to whichever input column
+  // currently carries that role (see packet.resolve_target_column) when the
+  // param is left out of `params` entirely -- the field then offers an
+  // "Auto" option that clears the key rather than setting it to '', putting
+  // it back in that dynamically-resolved state. Only 'target' exists today.
+  | { key: string; label: string; kind: 'column'; autoRole?: 'target' }
   | { key: string; label: string; kind: 'columns' }
 
 // Declarative field lists for the block categories common enough to be
@@ -31,29 +37,29 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'title', label: 'Title', kind: 'text' },
   ],
   glm_fit: [
-    { key: 'target', label: 'Target column', kind: 'column' },
+    { key: 'target', label: 'Target column', kind: 'column', autoRole: 'target' },
     { key: 'features', label: 'Feature columns', kind: 'columns' },
     { key: 'family', label: 'Family', kind: 'select', options: ['gaussian', 'poisson', 'gamma', 'inverse_gaussian'] },
     { key: 'alpha', label: 'Regularization (alpha)', kind: 'number', step: 0.01 },
   ],
   logistic_regression: [
-    { key: 'target', label: 'Target column (binary)', kind: 'column' },
+    { key: 'target', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
     { key: 'features', label: 'Feature columns', kind: 'columns' },
     { key: 'C', label: 'Inverse regularization (C)', kind: 'number', step: 0.1 },
     { key: 'max_iter', label: 'Max iterations', kind: 'number' },
   ],
   woe_transform: [
     { key: 'col', label: 'Column to transform', kind: 'column' },
-    { key: 'target', label: 'Target column (binary)', kind: 'column' },
+    { key: 'target', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
     { key: 'bins', label: 'Bins (numeric columns)', kind: 'number' },
   ],
   ks_test: [
     { key: 'score_col', label: 'Score column', kind: 'column' },
-    { key: 'target_col', label: 'Target column (binary)', kind: 'column' },
+    { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
   ],
   auc_gini: [
     { key: 'score_col', label: 'Score column', kind: 'column' },
-    { key: 'target_col', label: 'Target column (binary)', kind: 'column' },
+    { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
   ],
   psi_test: [
     { key: 'col', label: 'Column to compare', kind: 'column' },
@@ -71,7 +77,7 @@ export function ParamsForm({
   spec: FieldSpec[]
   paramsText: string
   setParamsText: (text: string) => void
-  columns: string[]
+  columns: SchemaColumn[]
   disabled: boolean
 }) {
   let params: Record<string, unknown> = {}
@@ -85,7 +91,17 @@ export function ParamsForm({
     setParamsText(JSON.stringify({ ...params, [key]: value }, null, 2))
   }
 
+  // Removes the key entirely (as opposed to setting it to '' / undefined),
+  // putting an autoRole field back into "follow the tagged column" mode --
+  // see FieldSpec.autoRole and Runner.run_block's dynamic target resolution.
+  const clear = (key: string) => {
+    const rest = { ...params }
+    delete rest[key]
+    setParamsText(JSON.stringify(rest, null, 2))
+  }
+
   const fieldStyle: CSSProperties = { width: '100%', fontSize: 11, boxSizing: 'border-box' }
+  const AUTO = '__auto__'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -130,7 +146,29 @@ export function ParamsForm({
                 ))}
               </select>
             )}
-            {f.kind === 'column' && (
+            {f.kind === 'column' && f.autoRole && (() => {
+              const autoResolved = columns.find((c) => c.role === f.autoRole)?.name
+              const isAuto = !(f.key in params)
+              return (
+                <select
+                  disabled={disabled}
+                  value={isAuto ? AUTO : typeof value === 'string' ? value : ''}
+                  onChange={(e) => (e.target.value === AUTO ? clear(f.key) : update(f.key, e.target.value))}
+                  style={fieldStyle}
+                >
+                  <option value={AUTO}>{autoResolved ? `Auto (${autoResolved})` : 'Auto (no target tagged upstream)'}</option>
+                  {columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                  {typeof value === 'string' && value && !columns.some((c) => c.name === value) && (
+                    <option value={value}>{value}</option>
+                  )}
+                </select>
+              )
+            })()}
+            {f.kind === 'column' && !f.autoRole && (
               <select
                 disabled={disabled}
                 value={typeof value === 'string' ? value : ''}
@@ -139,30 +177,32 @@ export function ParamsForm({
               >
                 <option value="">(none)</option>
                 {columns.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
+                  <option key={c.name} value={c.name}>
+                    {c.name}
                   </option>
                 ))}
-                {typeof value === 'string' && value && !columns.includes(value) && <option value={value}>{value}</option>}
+                {typeof value === 'string' && value && !columns.some((c) => c.name === value) && (
+                  <option value={value}>{value}</option>
+                )}
               </select>
             )}
             {f.kind === 'columns' &&
               (columns.length > 0 ? (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {columns.map((c) => {
-                    const selected = Array.isArray(value) && value.includes(c)
+                    const selected = Array.isArray(value) && value.includes(c.name)
                     return (
-                      <label key={c} style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 11 }}>
+                      <label key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 11 }}>
                         <input
                           type="checkbox"
                           disabled={disabled}
                           checked={selected}
                           onChange={(e) => {
                             const cur = Array.isArray(value) ? (value as string[]) : []
-                            update(f.key, e.target.checked ? [...cur, c] : cur.filter((v) => v !== c))
+                            update(f.key, e.target.checked ? [...cur, c.name] : cur.filter((v) => v !== c.name))
                           }}
                         />
-                        {c}
+                        {c.name}
                       </label>
                     )
                   })}
