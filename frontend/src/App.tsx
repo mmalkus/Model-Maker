@@ -17,8 +17,9 @@ import { Inspector } from './Inspector'
 import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
 import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
+import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut, LaneOut } from './types'
+import type { BlockOut, GraphOut, LaneOut, PortType } from './types'
 import { WireInspector } from './WireInspector'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
@@ -26,14 +27,18 @@ const edgeTypes = { dataWire: DataWireEdge }
 
 type FlowNode = BlockFlowNode | LaneBandNode
 
-function toBlockNodes(graph: GraphOut, collapsedLanes: Set<string>): BlockFlowNode[] {
+function toBlockNodes(
+  graph: GraphOut,
+  collapsedLanes: Set<string>,
+  onViewPort: (blockId: string, port: string, portType: PortType) => void,
+): BlockFlowNode[] {
   return Object.values(graph.blocks)
     .filter((block) => !(block.lane && collapsedLanes.has(block.lane)))
     .map((block) => ({
       id: block.id,
       type: 'modelBlock' as const,
       position: block.position,
-      data: { block },
+      data: { block, onViewPort },
     }))
 }
 
@@ -64,15 +69,21 @@ function AppInner() {
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedWireId, setSelectedWireId] = useState<string | null>(null)
+  const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [wirePortal, setWirePortal] = useState<HTMLDivElement | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
+  const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
+    setSelectedPort({ blockId, port, portType })
+    setSelectedWireId(null)
+  }, [])
+
   const reload = useCallback(() => {
     api.graph().then((g) => {
       setGraph(g)
-      const nextBlockNodes = toBlockNodes(g, collapsedLanes)
+      const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort)
       setBlockNodes(nextBlockNodes)
       // fit the view to the actual blocks (not the oversized lane bands) once,
       // on first load -- re-fitting on every later reload would yank the
@@ -82,7 +93,7 @@ function AppInner() {
         requestAnimationFrame(() => fitView({ nodes: nextBlockNodes.map((n) => ({ id: n.id })), padding: 0.2 }))
       }
     })
-  }, [collapsedLanes, fitView])
+  }, [collapsedLanes, fitView, onViewPort])
 
   useEffect(() => {
     reload()
@@ -90,7 +101,7 @@ function AppInner() {
   }, [])
 
   useEffect(() => {
-    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes))
+    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collapsedLanes])
 
@@ -241,6 +252,7 @@ function AppInner() {
   const onViewWire = useCallback((wireId: string) => {
     setSelectedWireId(wireId)
     setSelectedId(null)
+    setSelectedPort(null)
   }, [])
 
   const addBlock = useCallback(
@@ -251,6 +263,8 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
+          setSelectedWireId(null)
+          setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
     },
@@ -282,6 +296,8 @@ function AppInner() {
         .then((b) => {
           reload()
           setSelectedId(b.id)
+          setSelectedWireId(null)
+          setSelectedPort(null)
         })
         .catch((e) => alert(e.message))
     },
@@ -329,10 +345,12 @@ function AppInner() {
                 if (node.type !== 'modelBlock') return
                 setSelectedId(node.id)
                 setSelectedWireId(null)
+                setSelectedPort(null)
               }}
               onPaneClick={() => {
                 setSelectedId(null)
                 setSelectedWireId(null)
+                setSelectedPort(null)
               }}
             >
               <Background />
@@ -358,6 +376,14 @@ function AppInner() {
         </div>
         {selectedWireId && graph ? (
           <WireInspector wireId={selectedWireId} graph={graph} onClose={() => setSelectedWireId(null)} />
+        ) : selectedPort && graph ? (
+          <PortInspector
+            blockId={selectedPort.blockId}
+            port={selectedPort.port}
+            portType={selectedPort.portType}
+            graph={graph}
+            onClose={() => setSelectedPort(null)}
+          />
         ) : (
           <Inspector block={selectedBlock} onChanged={reload} />
         )}

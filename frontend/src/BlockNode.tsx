@@ -27,11 +27,11 @@ function formatParamValue(v: unknown): string {
   return s.length > 18 ? `${s.slice(0, 16)}…` : s
 }
 
-export type BlockNodeData = { block: BlockOut }
+export type BlockNodeData = { block: BlockOut; onViewPort: (blockId: string, port: string, portType: PortType) => void }
 export type BlockFlowNode = Node<BlockNodeData, 'modelBlock'>
 
 export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
-  const { block } = data
+  const { block, onViewPort } = data
   const color = STATUS_COLOR[block.status] ?? STATUS_COLOR.grey
   const paramEntries = Object.entries(block.params)
 
@@ -90,9 +90,14 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
             {block.outputs.map((p) => {
               const badge = PORT_BADGE[p.type] ?? PORT_BADGE.any
               return (
-                <span
+                <button
                   key={p.name}
-                  title={`${p.name}: produces a ${badge.label}`}
+                  className="nodrag"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onViewPort(block.id, p.name, p.type)
+                  }}
+                  title={`${p.name}: produces a ${badge.label} -- click to view`}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -102,11 +107,13 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                     border: `1px solid ${badge.color}55`,
                     borderRadius: 4,
                     padding: '0 4px',
+                    background: '#fff',
+                    cursor: 'pointer',
                   }}
                 >
                   <span>{badge.icon}</span>
                   {p.name}
-                </span>
+                </button>
               )
             })}
           </div>
