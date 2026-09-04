@@ -78,7 +78,7 @@ def build_user_prompt(ctx: DraftContext) -> str:
         ]
 
     parts += ["", "Input schema:"]
-    for port, cols in (ctx.input_ports or {"df": []}).items():
+    for port, cols in (ctx.input_ports or {}).items():
         parts.append(f"  Port `{port}`:")
         parts.append(format_columns(cols))
 

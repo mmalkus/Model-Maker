@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import inspect
 import os
 from dataclasses import asdict
@@ -98,6 +99,18 @@ class DraftRequest(BaseModel):
 # ---- helpers -------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
+def _safe_getsource(fn) -> str | None:
+    """inspect.getsource(), but None instead of raising for a function whose
+    source isn't available (e.g. defined in a REPL or compiled extension).
+    Cached since registry block functions are fixed at import time, and this
+    is called on every /api/graph and /api/blocks/{id} poll."""
+    try:
+        return inspect.getsource(fn)
+    except (OSError, TypeError):
+        return None
+
+
 def _source_for_block(block) -> str | None:
     """Read-only source for the block's underlying Python function. For
     custom (is_custom) blocks the editable source is already exposed via
@@ -108,10 +121,7 @@ def _source_for_block(block) -> str | None:
     spec = BLOCK_REGISTRY.get(block.category)
     if spec is None:
         return None
-    try:
-        return inspect.getsource(spec.fn)
-    except (OSError, TypeError):
-        return None
+    return _safe_getsource(spec.fn)
 
 
 def _block_out(block_id: str) -> dict[str, Any]:
@@ -194,7 +204,7 @@ def _packet_preview(packet: DataFramePacket, rows: int, with_summary: bool) -> d
 
 
 def _input_schema_for_block(block_id: str) -> dict[str, list[ColumnInfo]]:
-    result: dict[str, list[ColumnInfo]] = {}
+    result: dict[str, list[ColumnInfo]] = {p.name: [] for p in SESSION.graph.blocks[block_id].inputs}
     for port, wire in SESSION.graph.input_wires(block_id).items():
         result.setdefault(port, [])
         if SESSION.runner.status(wire.from_block) not in ("green", "orange"):
@@ -529,10 +539,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
     spec = BLOCK_REGISTRY.get(block.category)
     if spec is None:
         raise HTTPException(400, f"unknown block category: {block.category}")
-    try:
-        fixed_source = inspect.getsource(spec.fn)
-    except (OSError, TypeError):
-        fixed_source = None
+    fixed_source = _safe_getsource(spec.fn)
     return DraftContext(
         instruction=instruction,
         function_name=block.category,

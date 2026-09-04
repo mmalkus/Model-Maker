@@ -346,6 +346,16 @@ def test_psi_test_compares_two_inputs(client, tmp_path):
     assert metric["psi"] == pytest.approx(0.0, abs=1e-9)
 
 
+def test_input_schema_lists_all_declared_ports_even_when_unwired(client):
+    # Regression: a block whose input ports aren't named "df" (e.g.
+    # psi_test's expected/actual) used to disappear entirely from the input
+    # schema when unwired, which fed a misleading "df" fallback into the
+    # AI-draft prompt.
+    psi = client.post("/api/blocks", json={"category": "psi_test", "params": {"col": "x", "bins": 4}}).json()
+    schema = client.get(f"/api/blocks/{psi['id']}/input_schema").json()
+    assert schema == {"expected": [], "actual": []}
+
+
 def test_display_value_wires_up_to_a_scalar_metric_port(client, tmp_path):
     # display_value's ports are typed "any" -- wiring a scalar_metric port
     # (auc_gini) into it must be accepted despite the type mismatch.

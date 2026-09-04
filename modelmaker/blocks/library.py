@@ -227,6 +227,7 @@ def generate_image(
     bins: int = 30,
     title: str = "",
     output_dir: str = ".",
+    block_id: str = "",
 ) -> bytes:
     # Self-contained imports (rather than relying on this module's own
     # top-level imports) so this function stays a valid, independent unit
@@ -263,7 +264,8 @@ def generate_image(
     plt.close(fig)
 
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "generate_image.png"), "wb") as f:
+    filename = f"generate_image_{block_id}.png" if block_id else "generate_image.png"
+    with open(os.path.join(output_dir, filename), "wb") as f:
         f.write(buf.getvalue())
 
     return buf.getvalue()

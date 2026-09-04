@@ -113,6 +113,8 @@ class Runner:
             call_kwargs = dict(plain_inputs, **block.params)
             if block.block_type == "output" and accepts_param(fn, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
+            if block.block_type == "output" and accepts_param(fn, "block_id"):
+                call_kwargs["block_id"] = block_id
             raw = fn(**call_kwargs)
 
             out_names = [p.name for p in block.outputs]

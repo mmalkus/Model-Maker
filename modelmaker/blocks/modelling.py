@@ -122,7 +122,8 @@ def woe_transform(df: pl.DataFrame, col: str, target: str, bins: int = 10) -> pl
     bucket_expr = (
         pl.col(col).qcut(bins, allow_duplicates=True).alias("_bucket") if is_numeric else pl.col(col).cast(pl.Utf8).alias("_bucket")
     )
-    tagged = df.select(bucket_expr, pl.col(target).alias("_target"))
+    bucketed = df.with_columns(bucket_expr)
+    tagged = bucketed.select("_bucket", pl.col(target).alias("_target"))
 
     total_goods = (tagged["_target"] == 0).sum()
     total_bads = (tagged["_target"] == 1).sum()
@@ -136,7 +137,6 @@ def woe_transform(df: pl.DataFrame, col: str, target: str, bins: int = 10) -> pl
         (((pl.col("goods") + 0.5) / (total_goods + 0.5)) / ((pl.col("bads") + 0.5) / (total_bads + 0.5))).log().alias("_woe")
     )
 
-    bucketed = df.with_columns(bucket_expr)
     result = bucketed.join(stats.select("_bucket", "_woe"), on="_bucket", how="left")
     result = result.rename({"_woe": out_col}).drop("_bucket")
     return result
