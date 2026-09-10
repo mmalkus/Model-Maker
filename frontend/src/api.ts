@@ -116,7 +116,7 @@ export const api = {
   updateLlmSettings: (body: {
     active_provider?: string
     include_reference?: boolean | null
-    settings?: Record<string, { model?: string | null; base_url?: string }>
+    settings?: Record<string, { model?: string | null; base_url?: string | null; api_key?: string | null }>
   }) => request<LLMSettingsOut>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
   llmModels: (provider: string, baseUrl?: string) => {
     const q = new URLSearchParams({ provider })

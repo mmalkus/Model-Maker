@@ -182,3 +182,75 @@ def test_llm_settings_can_be_updated(client):
 def test_llm_settings_rejects_unknown_provider(client):
     resp = client.put("/api/llm/settings", json={"active_provider": "not_a_real_provider"})
     assert resp.status_code == 400
+
+
+def test_llm_settings_lists_openai_and_gemini_providers(client):
+    resp = client.get("/api/llm/settings")
+    body = resp.json()
+    assert {"openai", "gemini"} <= set(body["providers"])
+    assert "openai" in body["settings"]
+    assert "gemini" in body["settings"]
+
+
+def test_api_key_is_never_echoed_back_but_presence_is_reported(client):
+    resp = client.put(
+        "/api/llm/settings",
+        json={"settings": {"openai": {"api_key": "sk-super-secret-value", "model": "gpt-test"}}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    openai_settings = body["settings"]["openai"]
+    assert "api_key" not in openai_settings
+    assert "sk-super-secret-value" not in resp.text
+    assert openai_settings["api_key_set"] is True
+    assert openai_settings["api_key_source"] == "override"
+    assert openai_settings["model"] == "gpt-test"
+
+    # a second GET reflects the same redacted state
+    resp2 = client.get("/api/llm/settings")
+    assert resp2.json()["settings"]["openai"]["api_key_set"] is True
+    assert "sk-super-secret-value" not in resp2.text
+
+
+def test_api_key_can_be_cleared_with_explicit_null(client):
+    client.put("/api/llm/settings", json={"settings": {"openai": {"api_key": "sk-abc"}}})
+    resp = client.put("/api/llm/settings", json={"settings": {"openai": {"api_key": None}}})
+    assert resp.json()["settings"]["openai"]["api_key_set"] is False
+    assert resp.json()["settings"]["openai"]["api_key_source"] is None
+
+
+def test_api_key_reported_as_env_sourced_when_not_overridden(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    resp = client.get("/api/llm/settings")
+    openai_settings = resp.json()["settings"]["openai"]
+    assert openai_settings["api_key_set"] is True
+    assert openai_settings["api_key_source"] == "env"
+    assert "sk-from-env" not in resp.text
+
+
+def test_openai_provider_requires_api_key_and_model(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MODELMAKER_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MODELMAKER_LLM_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="API key"):
+        get_provider("openai")
+
+    with pytest.raises(RuntimeError, match="model"):
+        get_provider("openai", api_key="sk-abc")
+
+
+def test_openai_provider_custom_base_url_is_configurable(monkeypatch):
+    provider = get_provider("openai", api_key="sk-abc", model="gpt-test", base_url="http://localhost:9999/v1")
+    assert provider.base_url == "http://localhost:9999/v1"
+
+
+def test_gemini_provider_requires_api_key_and_model(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("MODELMAKER_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("MODELMAKER_LLM_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="API key"):
+        get_provider("gemini")
+
+    with pytest.raises(RuntimeError, match="model"):
+        get_provider("gemini", api_key="key-abc")

@@ -12,7 +12,13 @@ class LLMSettingsStore:
     something, each provider falls back to its own constructor defaults
     (env vars, then hardcoded constants), exactly as before this store
     existed. Setting a field here overrides that provider's default until
-    changed again or the server restarts."""
+    changed again or the server restarts.
+
+    This includes API keys (per_provider[name]["api_key"]): they live only
+    in this process's memory, are never written to disk, and the API layer
+    (see api.py's _effective_llm_settings) never echoes a raw key value back
+    to the client -- only whether one is currently set and where it came
+    from (an explicit override here vs. an environment variable)."""
 
     active_provider: str | None = None
     per_provider: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -30,4 +36,12 @@ class LLMSettingsStore:
             self.include_reference = include_reference
         for name, values in (settings or {}).items():
             slot = self.per_provider.setdefault(name, {})
-            slot.update({k: v for k, v in values.items() if v is not None})
+            for key, value in values.items():
+                # An explicit null clears a previously-set override (e.g. an
+                # emptied text field, or "Remove key") so the provider falls
+                # back to its own default (env var / hardcoded constant)
+                # instead of being stuck with a stale value.
+                if value is None:
+                    slot.pop(key, None)
+                else:
+                    slot[key] = value

@@ -122,29 +122,45 @@ AI-assisted block drafting ("Draft with AI", suggest-a-fix) is pluggable:
 | Provider | Value | Requirements |
 |---|---|---|
 | Claude Code CLI (default) | `claude_cli` | `claude` binary on `PATH`, logged in (`claude` or `claude /login`) |
-| Anthropic API | `anthropic` | `pip install -e ".[anthropic]"` and `ANTHROPIC_API_KEY` set (or an `ant auth login` profile) |
+| Anthropic API | `anthropic` | `pip install -e ".[anthropic]"` and an API key (Settings, or `ANTHROPIC_API_KEY` / an `ant auth login` profile) |
+| OpenAI API / OpenAI-compatible endpoint | `openai` | An API key (Settings, or `OPENAI_API_KEY`) and a model id. Defaults to `https://api.openai.com/v1`, but the base URL is configurable — point it at Groq, Together, OpenRouter, Fireworks, Azure OpenAI's `/openai` surface, or a self-hosted vLLM/text-generation-webui server instead |
+| Google Gemini API | `gemini` | An API key (Settings, or `GEMINI_API_KEY` / `GOOGLE_API_KEY`) and a model id, e.g. `gemini-2.5-pro` |
 | LM Studio (local) | `lmstudio` | LM Studio running with its local server started (Developer tab → Start Server) and a model loaded |
 | Stub (no network, deterministic) | `stub` | none — used by default in tests |
 
+The `openai` and `gemini` providers talk plain HTTPS via the standard
+library, so they need no extra `pip install`.
+
 The **Settings** menu in the app's top bar picks the active provider and,
-for LM Studio, its base URL (address:port) and model — "Fetch" queries the
-running LM Studio server for the models it has available, so you can pick
-one instead of typing an id. A "Include Polars reference examples in
-prompts" toggle there applies to every provider; it's mainly useful for
-smaller/local models that know Polars' shape but not its exact syntax.
-These are in-memory server settings (no restart needed, reset when the
-server restarts) that override the env vars below when set.
+per provider, its model, base URL (`lmstudio`/`openai`), and API key
+(`anthropic`/`openai`/`gemini`) — "Fetch" queries the endpoint for the
+models it has available, so you can pick one instead of typing an id by
+hand. A "Include Polars reference examples in prompts" toggle there applies
+to every provider; it's mainly useful for smaller/local models that know
+Polars' shape but not its exact syntax.
+
+These are in-memory server settings (no restart needed) that override the
+env vars below when set — including API keys: a key entered in Settings is
+held only in the running server process's memory, is never written to
+disk, and is never sent back to the browser (the settings endpoint reports
+only whether a key is currently set and whether it came from Settings or
+an env var, never the value itself). Like every other setting here, it
+does not survive a server restart — set the corresponding env var instead
+for a value that should.
 
 Env vars are still honored as defaults (useful for headless/CI use, or to
 set a starting point before the server starts): `MODELMAKER_LLM_PROVIDER`
-picks the provider, `MODELMAKER_LLM_MODEL` pins a model, and for
-`lmstudio` specifically `MODELMAKER_LLM_BASE_URL` sets the base URL
-(default `http://localhost:1234/v1`) and `MODELMAKER_LLM_INCLUDE_REFERENCE`
-(default on) controls the Polars reference toggle.
+picks the provider, `MODELMAKER_LLM_MODEL` pins a model, and
+`MODELMAKER_LLM_INCLUDE_REFERENCE` (default on) controls the Polars
+reference toggle. Per provider: `lmstudio` reads `MODELMAKER_LLM_BASE_URL`
+(default `http://localhost:1234/v1`); `openai` reads `OPENAI_API_KEY` (or
+`MODELMAKER_OPENAI_API_KEY`) and `MODELMAKER_OPENAI_BASE_URL`; `gemini`
+reads `GEMINI_API_KEY` / `GOOGLE_API_KEY` (or `MODELMAKER_GEMINI_API_KEY`).
 
 ```bash
-export MODELMAKER_LLM_PROVIDER=anthropic
-export ANTHROPIC_API_KEY=sk-...
+export MODELMAKER_LLM_PROVIDER=openai
+export OPENAI_API_KEY=sk-...
+export MODELMAKER_LLM_MODEL=gpt-5.1
 modelmaker-api
 ```
 

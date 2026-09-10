@@ -21,7 +21,9 @@ from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
 from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
 from .llm import claude_cli_provider as _claude_cli_provider
+from .llm import gemini_provider as _gemini_provider
 from .llm import lmstudio_provider as _lmstudio_provider
+from .llm import openai_provider as _openai_provider
 from .llm.settings import LLMSettingsStore
 from .packet import DataFramePacket
 from .session import ProjectSession, wire_is_valid
@@ -139,8 +141,13 @@ class LLMSettingsUpdate(BaseModel):
     # Global toggle for including the Polars API reference in the system
     # prompt -- applies across every provider (see DraftContext.include_reference).
     include_reference: bool | None = None
-    # Per-provider fields, e.g. {"lmstudio": {"model": "...", "base_url": "..."}}.
-    # Unrecognized keys for a given provider are ignored by get_provider.
+    # Per-provider fields, e.g. {"lmstudio": {"model": "...", "base_url": "..."}}
+    # or {"openai": {"model": "...", "base_url": "...", "api_key": "sk-..."}}.
+    # Unrecognized keys for a given provider are ignored by get_provider. An
+    # explicit null for a field (e.g. {"openai": {"api_key": null}}) clears
+    # a previously-set override -- see LLMSettingsStore.update. API keys are
+    # write-only: GET/PUT never echo a raw key back, only whether one is set
+    # (see _redacted_provider_settings).
     settings: dict[str, dict[str, Any]] | None = None
 
 
@@ -602,32 +609,96 @@ def compile_ep(req: CompileRequest) -> dict[str, str]:
     return {"source": source}
 
 
+# Env vars (beyond the per-provider override stored in LLM_SETTINGS) each
+# key-requiring provider's API key can fall back to, in priority order --
+# mirrors what each provider's own __init__ checks, used only to report
+# *whether* a key is available, never its value.
+_API_KEY_ENV_VARS: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "openai": ["MODELMAKER_OPENAI_API_KEY", "OPENAI_API_KEY"],
+    "gemini": ["MODELMAKER_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+}
+
+
+def _resolve_api_key(provider_name: str) -> str | None:
+    """The API key that would actually be used for this provider right now
+    (a Settings override, else the first set env var) -- never exposed to
+    the client, only used server-side to call the provider or check
+    liveness (e.g. for /api/llm/models)."""
+    override = LLM_SETTINGS.for_provider(provider_name).get("api_key")
+    if override:
+        return override
+    for var in _API_KEY_ENV_VARS.get(provider_name, []):
+        value = os.environ.get(var)
+        if value:
+            return value
+    return None
+
+
+def _redacted_provider_settings(provider_name: str, **fields: Any) -> dict[str, Any]:
+    """Build one provider's entry for GET/PUT /api/llm/settings: the given
+    resolved (non-secret) fields, plus an api_key_set/api_key_source pair
+    that reports *whether* a key is configured and where it came from --
+    never the key itself. This is the only place a stored key's presence is
+    surfaced to the client."""
+    result: dict[str, Any] = dict(fields)
+    if provider_name in _API_KEY_ENV_VARS:
+        override = LLM_SETTINGS.for_provider(provider_name).get("api_key")
+        if override:
+            result["api_key_set"] = True
+            result["api_key_source"] = "override"
+        else:
+            env_value = next(
+                (os.environ.get(var) for var in _API_KEY_ENV_VARS[provider_name] if os.environ.get(var)), None
+            )
+            result["api_key_set"] = bool(env_value)
+            result["api_key_source"] = "env" if env_value else None
+    return result
+
+
 def _effective_llm_settings() -> dict[str, Any]:
     """The Settings panel's view of LLM config: every field resolved to what
     would actually be used right now (a UI override, else the env var each
     provider itself falls back to, else its hardcoded default) -- so text
-    fields and checkboxes always show a real value instead of blank."""
+    fields and checkboxes always show a real value instead of blank. API
+    keys are the exception: only their presence/source is reported, never
+    the value (see _redacted_provider_settings)."""
     lmstudio_override = LLM_SETTINGS.for_provider("lmstudio")
     claude_cli_override = LLM_SETTINGS.for_provider("claude_cli")
+    openai_override = LLM_SETTINGS.for_provider("openai")
+    gemini_override = LLM_SETTINGS.for_provider("gemini")
     settings: dict[str, Any] = {
-        "lmstudio": {
-            "base_url": lmstudio_override.get("base_url")
+        "lmstudio": _redacted_provider_settings(
+            "lmstudio",
+            base_url=lmstudio_override.get("base_url")
             or os.environ.get("MODELMAKER_LLM_BASE_URL", _lmstudio_provider.DEFAULT_BASE_URL),
-            "model": lmstudio_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
-        },
-        "claude_cli": {
-            "model": claude_cli_override.get("model")
+            model=lmstudio_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
+        ),
+        "claude_cli": _redacted_provider_settings(
+            "claude_cli",
+            model=claude_cli_override.get("model")
             or os.environ.get("MODELMAKER_LLM_MODEL")
             or _claude_cli_provider.DEFAULT_MODEL,
-        },
+        ),
+        "openai": _redacted_provider_settings(
+            "openai",
+            base_url=openai_override.get("base_url")
+            or os.environ.get("MODELMAKER_OPENAI_BASE_URL", _openai_provider.DEFAULT_BASE_URL),
+            model=openai_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
+        ),
+        "gemini": _redacted_provider_settings(
+            "gemini",
+            model=gemini_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
+        ),
     }
     if _anthropic_provider is not None:
         anthropic_override = LLM_SETTINGS.for_provider("anthropic")
-        settings["anthropic"] = {
-            "model": anthropic_override.get("model")
+        settings["anthropic"] = _redacted_provider_settings(
+            "anthropic",
+            model=anthropic_override.get("model")
             or os.environ.get("MODELMAKER_LLM_MODEL")
             or _anthropic_provider.DEFAULT_MODEL,
-        }
+        )
     return {
         "providers": sorted(LLM_PROVIDER_REGISTRY),
         "active_provider": LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
@@ -655,8 +726,9 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
 def list_llm_models(provider: str, base_url: str | None = None) -> dict[str, list[str]]:
     """Query a provider for the models it currently has available -- used by
     the Settings panel's "Fetch models" so the user can pick one instead of
-    typing an id from memory. `base_url` (LM Studio only) lets the panel
-    query a not-yet-saved address before committing it via PUT /llm/settings."""
+    typing an id from memory. `base_url` (LM Studio and openai only) lets
+    the panel query a not-yet-saved address before committing it via
+    PUT /llm/settings."""
     if provider == "lmstudio":
         effective_base_url = base_url or _effective_llm_settings()["settings"]["lmstudio"]["base_url"]
         try:
@@ -668,11 +740,29 @@ def list_llm_models(provider: str, base_url: str | None = None) -> dict[str, lis
     if provider == "anthropic":
         if _anthropic_provider is None:
             raise HTTPException(400, "the anthropic provider is unavailable -- install the `anthropic` package")
+        api_key = _resolve_api_key("anthropic")
         try:
-            client = _anthropic_provider.anthropic.Anthropic()
+            client = _anthropic_provider.anthropic.Anthropic(api_key=api_key) if api_key else _anthropic_provider.anthropic.Anthropic()
             return {"models": [m.id for m in client.models.list()]}
         except Exception as e:
             raise HTTPException(502, f"could not list Anthropic models: {e}")
+    if provider == "openai":
+        api_key = _resolve_api_key("openai")
+        if not api_key:
+            raise HTTPException(400, "no OpenAI API key configured -- set one in Settings first")
+        effective_base_url = base_url or _effective_llm_settings()["settings"]["openai"]["base_url"]
+        try:
+            return {"models": _openai_provider.list_models(effective_base_url, api_key)}
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+    if provider == "gemini":
+        api_key = _resolve_api_key("gemini")
+        if not api_key:
+            raise HTTPException(400, "no Gemini API key configured -- set one in Settings first")
+        try:
+            return {"models": _gemini_provider.list_models(_gemini_provider.DEFAULT_BASE_URL, api_key)}
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
     if provider == "stub":
         return {"models": []}
     raise HTTPException(400, f"unknown LLM provider: {provider}")
