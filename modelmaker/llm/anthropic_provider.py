@@ -44,11 +44,12 @@ class _ParamsDraft(BaseModel):
 @register_provider("anthropic")
 class AnthropicProvider(LLMProvider):
     """Calls the Anthropic Messages API directly via the `anthropic` SDK.
-    Requires an API key (ANTHROPIC_API_KEY or an `ant auth login` profile)."""
+    Requires an API key -- from the Settings panel, ANTHROPIC_API_KEY, or an
+    `ant auth login` profile, in that order."""
 
-    def __init__(self, model: str | None = None):
+    def __init__(self, model: str | None = None, api_key: str | None = None):
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL", DEFAULT_MODEL)
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
 
     def draft(self, ctx: DraftContext) -> DraftResult:
         if ctx.mode == "params_only":

@@ -116,6 +116,10 @@ export interface DraftOut {
 export interface LLMProviderSettings {
   model?: string | null
   base_url?: string
+  // Whether an API key is currently configured for this provider, and
+  // where it came from -- the key's value is never sent to the client.
+  api_key_set?: boolean
+  api_key_source?: 'override' | 'env' | null
 }
 
 export interface LLMSettingsOut {
