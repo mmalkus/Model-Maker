@@ -172,6 +172,11 @@ Current set (KS, AUC/Gini, PSI) covers discrimination and stability
 
 ## 2. Credit risk & IFRS 9
 
+Covers the account/obligor-level estimation stack. **Portfolio-level credit
+risk — economic capital, concentration, risk contributions — is in §3.2**,
+because it shares its machinery with insurance capital rather than with
+scorecard development.
+
 ### 2.1 PD
 
 - Rating/grade assignment block (score → masterscale bands, with a grade
@@ -262,14 +267,170 @@ unauditable spreadsheets.
 
 ---
 
-## 3. Insurance internal models
+## 3. Stochastic modelling — economic capital and insurance internal models
 
-The shape of the work is different enough from credit that some engine
-changes (§7) are prerequisites rather than nice-to-haves. Worth deciding
-early whether insurance is a *target* or a *maybe*, because the
-"distribution + simulation + aggregation" axis is a real build.
+**These are one build, not two.** Bank economic capital and an insurance
+internal model are the same machine pointed at different portfolios: fit
+distributions, impose a dependency structure, simulate, read a quantile off
+the loss distribution, allocate it back. The regulatory vocabulary differs
+(EC/ICAAP vs. SCR), the confidence level differs (99.9% vs. 99.5%), and the
+granularity differs by four orders of magnitude — but the primitives are
+identical.
 
-### 3.1 Pricing / underwriting
+That materially changes the cost case. Building the stochastic core is not
+"the price of entering insurance"; it is a capability banking needs anyway
+for EC, ICAAP, op risk, concentration risk and stress testing, and which
+also pays for bootstrap confidence intervals and IFRS 9 scenario expansion
+in the credit work we already have. Once it exists, insurance is mostly
+*blocks* (triangles, LoB structures, risk margin) rather than engine work.
+
+### 3.1 The shared spine
+
+What "we support Monte Carlo" actually decomposes into:
+
+1. **Fan-out / collect** — run a sub-graph N times with a varying input
+   (seed, scenario, fold, bootstrap resample) and gather the results. The
+   §7.2 engine change; everything else here depends on it.
+2. **RNG and seed hierarchy** — a project seed that spawns independent,
+   reproducible sub-streams per iteration (`numpy.random.SeedSequence.spawn`
+   / Philox counter-based streams), so results are identical regardless of
+   execution order or parallelism. Non-negotiable: an unreproducible capital
+   number is an audit finding.
+3. **Distribution objects as a port type** — fit (MLE/MoM across candidate
+   families), inspect, sample, and pass over a wire. Includes EVT/GPD tail
+   fitting and spliced body-tail distributions.
+4. **Goodness-of-fit battery** — KS, Anderson–Darling (tail-weighted, which
+   is what you actually want here), chi-square, QQ/PP plots, and a
+   candidate-comparison table with AIC/BIC.
+5. **Dependency layer** — correlation matrices (with PSD repair /
+   nearest-correlation), Cholesky, Gaussian and t copulas, Archimedean
+   (Clayton/Gumbel) for asymmetric tail dependence, and tail-dependence
+   diagnostics. The dependency assumption drives the answer more than the
+   marginals do, so it needs to be visible and documented, not buried.
+6. **Simulation execution** — N draws, chunked/streaming accumulation,
+   parallel across cores, progress and cancellation (the runner already has
+   process isolation and cancellation, which helps).
+7. **Variance reduction** — antithetic variates, control variates,
+   stratification / Latin hypercube, quasi-MC (Sobol), and importance
+   sampling. Not a luxury: naive MC at 99.9% wastes almost all its paths,
+   and importance sampling on the systematic factor is the standard trick in
+   credit portfolio models.
+8. **Convergence diagnostics** — standard error of the quantile estimator,
+   bootstrap CI on the reported VaR/TVaR, running-estimate plots vs. N. A
+   capital number quoted without its simulation error is a finding waiting
+   to happen, and "how many paths is enough" is the first question a
+   validator asks.
+9. **Risk measures on a loss distribution** — VaR and TVaR/ES at arbitrary
+   confidence, expected loss, unexpected loss, full quantile table,
+   with CIs from (8).
+10. **Aggregation and allocation** — combine risk modules / sub-portfolios,
+    quantify the diversification benefit, and allocate the total back to
+    components (Euler / expected-shortfall contributions, Shapley). This is
+    the shared answer to both "capital by business line and RAROC" and
+    "diversification by risk module".
+
+### 3.2 Consumer: bank economic capital / credit portfolio model
+
+Missing from §2 entirely today, and arguably as valuable as the IFRS 9 work:
+
+- Factor models: single-factor ASRF (closed form — useful as a benchmark to
+  validate the simulation against), multi-factor Merton/CreditMetrics-style
+  latent-variable simulation, CreditRisk+ style actuarial variant.
+- Asset correlation calibration and sector/region factor structure.
+- Obligor-level simulation → portfolio loss distribution → EC as
+  VaR(α) − EL, with α set by the target rating (99.9% Basel-aligned, or
+  99.95–99.97% for a AA-equivalent target).
+- Risk contributions per obligor / sector / business line (ES contributions
+  are far more stable than VaR contributions at these N — worth defaulting
+  to them).
+- Concentration risk: single-name and sector, HHI, granularity adjustment,
+  and the "what does my largest exposure cost me in capital" question.
+- Migration-based (mark-to-model) as well as default-only loss definitions.
+- Stress and reverse stress on the factor draws; linking EC output to risk
+  appetite thresholds.
+
+### 3.3 Other consumers of the same spine
+
+Each of these is mostly *configuration* of §3.1 rather than a new build,
+which is what makes the core worth paying for:
+
+- **Operational risk LDA** — compound Poisson frequency × spliced
+  lognormal/GPD severity, aggregated by MC to 99.9%. No longer regulatory
+  capital under the standardised approach, but alive and well in ICAAP and
+  EC, and it exists in both banks and insurers.
+- **Market risk / ALM** — MC and historical VaR, ES at 97.5%, backtesting
+  exceptions, IRRBB scenario grids.
+- **Reserving bootstrap** — ODP bootstrap and Mack are literally fan-out +
+  quantiles (§3.7).
+- **IFRS 9 macro scenarios** (§2.4) — the same fan-out at N=3 instead of
+  N=1,000,000, with probability weights instead of equal weights.
+- **Validation** — k-fold CV, bootstrap CIs on Gini and on coefficients
+  (§1.4) are fan-out + collect with a different iterator.
+- **Sensitivity / stress testing** generally — sweep a parameter, collect the
+  output curve. Also gives us reverse stress testing: search the input space
+  for scenarios producing a given adverse outcome.
+
+### 3.4 Where the overlap actually stops
+
+Worth being honest about, because it affects the design rather than just the
+sales pitch:
+
+- **Tail depth.** 99.5% (SII) vs. 99.9%–99.97% (EC). Deeper tail → more
+  paths, or mandatory variance reduction. The API should make the confidence
+  level a parameter and the path count a consequence, with convergence
+  checked automatically.
+- **Dimensionality and compute profile.** Credit EC simulates hundreds of
+  thousands of obligors × ~1M paths — matrix-heavy, memory-bound, needs
+  vectorised NumPy (not Polars, not a per-iteration graph fan-out). An
+  insurance internal model aggregates ~20–100 risk nodes with a rich
+  dependency structure — trivial compute, complex structure. Same API, wildly
+  different execution strategy underneath; see §3.5.
+- **Nested stochastic.** Insurance's one-year view of a multi-year liability
+  is a stochastic-within-stochastic problem, normally dodged via LSMC
+  (least-squares Monte Carlo), replicating portfolios or curve-fitting.
+  Credit EC has no real equivalent. This is the one genuinely
+  insurance-specific piece of machinery, and it's a big one — likely a
+  "later, if at all" item.
+- **Benchmarks.** Credit has closed-form ASRF to sanity-check against;
+  insurance has the standard formula as a rough comparator but no analytic
+  truth. Affects how much validation tooling each needs.
+- **Allocation vs. attribution.** Banks want capital allocation and RAROC;
+  insurers additionally need P&L attribution as a standing regulatory test.
+  Related but not the same computation.
+
+### 3.5 Two execution shapes (an early design decision)
+
+Monte Carlo shows up in the tool in two forms that should not be conflated:
+
+- **(a) Graph fan-out** — run a sub-graph N times. General, visible on the
+  canvas, works for scenarios, folds, bootstrap, sensitivity sweeps.
+  Practical to roughly N ≈ 10³–10⁴; each iteration carries graph overhead.
+- **(b) Vectorised simulation block** — one block internally draws an
+  (N × k) array with N ≥ 10⁶. The only workable shape for credit portfolio
+  EC. This is mostly a *block-authoring* concern, but it needs array-shaped
+  packets (§7.1) and a memory strategy, not the fan-out engine.
+
+Both are probably needed, and they have different costs. Related decisions:
+
+- **Caching.** A million-path result is not something to hash and stash like
+  a dataframe. Proposal: cache the *distilled* output (quantile table,
+  moments, convergence stats, allocation vector) in the normal cache, and
+  persist raw paths to disk (parquet/npy) only on request, referenced by
+  handle. Otherwise the cache design that makes the tool pleasant becomes
+  the thing that makes it fall over.
+- **Memory.** Don't materialise obligor × path. Accumulate portfolio loss per
+  path in chunks; keep per-obligor detail only where allocation needs it, or
+  derive contributions from conditional expectations.
+- **Canvas UX.** How do you draw a loop in a DAG tool? Options: a container
+  /"fan-out lane" that visually encloses the iterated sub-graph; an explicit
+  `iterate` block paired with a `collect` block; or marking a wire as
+  carrying N replicates with a badge. Worth prototyping on paper before
+  committing — this is the part users will either immediately understand or
+  never trust.
+- **Determinism under parallelism** — see §3.1(2); it has to hold whether
+  the run is serial, threaded or across processes.
+
+### 3.6 Insurance pricing / underwriting
 
 - Frequency–severity structure: Poisson/NB frequency with exposure offset ×
   Gamma/Lognormal/Tweedie severity, combined to pure premium.
@@ -284,7 +445,7 @@ early whether insurance is a *target* or a *maybe*, because the
   which is not the same construction as credit Gini).
 - One-way vs. multi-way analysis views.
 
-### 3.2 Reserving
+### 3.7 Insurance reserving
 
 - Claims triangle construction from transactional data (accident/underwriting
   period × development period), incremental and cumulative.
@@ -301,19 +462,21 @@ early whether insurance is a *target* or a *maybe*, because the
   same feature as the IFRS 9 overlay register (§2.4): a block whose params
   are human judgements carrying a justification and an approver.
 
-### 3.3 Capital / internal model specifics (Solvency II flavour)
+### 3.8 Insurance capital specifics, on top of the shared spine
 
-- Distribution fitting block (MLE across candidate distributions, GoF tests:
-  KS, AD, chi-square, QQ plots, and a comparison table) — including EVT /
-  GPD tail fitting.
-- Dependency structure: correlation matrices, copulas (Gaussian, t, Clayton,
-  Gumbel), tail-dependence diagnostics.
-- Monte Carlo simulation engine block: N simulations, seed, antithetic /
-  variance reduction, convergence diagnostics.
-- Aggregation: risk-module aggregation with correlation matrix, diversification
-  benefit calculation and allocation back to modules/LoBs (Euler, Shapley).
-- Risk measures: VaR 99.5%, TVaR, with simulation error / confidence bands.
-- Loss-absorbing capacity, risk-margin calculation.
+Distribution fitting, copulas, the simulation engine, risk measures and
+aggregation/allocation all come from §3.1 — they are *not* insurance line
+items. What's genuinely additional here:
+
+- Risk-module structure and the SCR as a 99.5% VaR of the one-year change in
+  basic own funds (vs. EC's loss-distribution framing — same quantile
+  machinery, different definition of the random variable, and that definition
+  needs to be an explicit, documented modelling choice).
+- Loss-absorbing capacity of technical provisions and deferred taxes.
+- Risk margin (cost-of-capital on projected future SCRs) — which needs the
+  SCR projected forward, i.e. the nested problem from §3.4.
+- Standard-formula comparison as a benchmark/sanity view alongside the
+  internal model result.
 - **P&L attribution** — mandatory annual test: attribute realised P&L to the
   risk drivers in the model. Again a DAG of decompositions.
 - **Validation tests required by the regime**: statistical quality test, use
@@ -326,21 +489,24 @@ early whether insurance is a *target* or a *maybe*, because the
   change-log entry. This is the insurance twin of §4's change-materiality
   feature and the same machinery serves both.
 
-### 3.4 IFRS 17 adjacency (probably out of scope, worth naming)
+### 3.9 IFRS 17 adjacency (probably out of scope, worth naming)
 
 Building blocks for fulfilment cash flows, risk adjustment (confidence-level
 or cost-of-capital), CSM roll-forward, and cohort/grouping. Very large scope;
 mention only so we can explicitly say "not now".
 
-### 3.5 What the engine lacks for this work
+### 3.10 What the engine lacks for any of §3
 
 - No `model` / `distribution` / `simulation` port type flowing over a wire
   with the same richness as `DataFramePacket` (there's a typed-port notion in
-  the plan, but the packet is dataframe-shaped).
+  the plan, but the packet is dataframe-shaped — and simulation wants NumPy
+  arrays, not Polars frames).
 - No way to run a sub-graph N times (scenarios, simulations, bootstrap folds)
   — see §7.2. Without it, every stochastic method is a hand-written block.
-- Memory model: simulation output is wide/long and may exceed RAM; today
-  everything is an in-memory Polars frame.
+- No project-level RNG/seed discipline (§3.1(2), §1.5).
+- Cache and memory model assume a materialisable in-memory frame (§3.5).
+- No convergence/simulation-error concept anywhere, so nothing would stop a
+  user quoting a capital number from 1,000 paths.
 
 ---
 
@@ -372,7 +538,7 @@ all, and it's largely orthogonal to the modelling blocks.
   blocks need the equivalent. Every model doc has this section and it's
   always reconstructed from memory at the end.
 - **Expert judgement / override log** — shared mechanism with §2.4 overlays
-  and §3.2 actuarial selections.
+  and §3.7 actuarial selections.
 - **Data lineage back to source systems** — `lineage` currently lists block
   ids. Extend to: source system, extract date, query/file, owner. The
   question "where did this field come from" must be answerable end to end.
@@ -524,15 +690,18 @@ Things that would need to change under the hood for a lot of the above.
 These are the decisions with the longest lead time, so worth settling early.
 
 1. **Non-dataframe packets as first-class citizens** — fitted model objects,
-   distributions, simulation results, metric bundles. Currently the packet is
-   dataframe-shaped; ports are typed in the plan but the richness (metadata,
-   caching, preview, compilation) is dataframe-specific.
+   distributions, simulation results (NumPy arrays, not frames), metric
+   bundles. Currently the packet is dataframe-shaped; ports are typed in the
+   plan but the richness (metadata, caching, preview, compilation) is
+   dataframe-specific. Prerequisite for all of §3.
 2. **Sub-graph iteration** — run a branch once per scenario / per fold / per
    simulation / per segment, then collect. Needed for macro scenarios (§2.4),
-   CV and bootstrap (§1.4), simulation (§3.3), and per-segment models. This
-   is the single biggest structural gap and it has knock-on effects on the
-   cache key, the compiler, and the UI (how do you draw a loop on a canvas?).
-   Worth a design note of its own.
+   CV and bootstrap (§1.4), the whole of §3, and per-segment models. This
+   is the single biggest structural gap: it has knock-on effects on the cache
+   key, the compiler, and the UI (how do you draw a loop on a canvas?), and
+   it is the one item that unlocks capability in *both* domains at once.
+   Worth a design note of its own — see §3.5 for the fan-out vs. vectorised
+   split, which should be settled in the same pass.
 3. **Run history / result store** — persist run results (metrics, not full
    frames) with timestamp, graph version, data fingerprint. Prerequisite for
    monitoring trends (§2.5), change materiality (§4), version comparison
@@ -607,27 +776,48 @@ Not a plan, just my read on where the value/effort ratio sits.
 - Parquet + SQL connectors (§7.5)
 
 **High value, high effort — needs a design decision first**
-- Sub-graph iteration / scenario loops (§7.2) → unlocks IFRS 9 macro
-  scenarios, CV, bootstrap, simulation, per-segment models
+- **The stochastic core** (§3.1 + §7.1 + §7.2): non-dataframe packets,
+  sub-graph iteration, seed discipline, distributions, copulas, risk
+  measures. One build that serves bank EC, insurance SCR, op risk, reserving
+  bootstrap, IFRS 9 scenarios, CV and bootstrap CIs, and stress testing.
+  Because it is shared, it should be costed as core infrastructure rather
+  than as a domain feature — the per-domain work on top is comparatively
+  thin.
 - Full IFRS 9 chain: lifetime PD → staging → ECL → attribution (§2.4)
-- Non-dataframe packet types (§7.1) → prerequisite for most of insurance
 - Lazy/streaming or DuckDB execution (§7.4)
 
 **Explicit "decide whether we care" list**
-- Insurance internal models as a target at all (§3) — big, and the engine
-  work is real
-- IFRS 17 (§3.4) — recommend no, for now
+- Nested stochastic / LSMC (§3.4) — the one genuinely insurance-only piece
+  of heavy machinery; recommend deferring
+- IFRS 17 (§3.9) — recommend no, for now
 - Multi-user / access control / server deployment (§4)
 - Fairness testing and EU AI Act positioning (§1.4, §4)
 
+**Sequencing note.** Given the overlap, the natural order is: (1) build the
+spine, (2) land bank credit EC on it — it's the domain we already have data
+and vocabulary for, and closed-form ASRF gives a benchmark to validate the
+simulation against, (3) reuse it for IFRS 9 scenarios and bootstrap CIs,
+which is nearly free once (1) exists, (4) add insurance structures
+(triangles, risk modules, LoBs, risk margin) as blocks. Insurance stops
+being a separate programme and becomes an increment.
+
 **Open questions for you**
-1. Primary audience: credit-risk-first with insurance later, or both from
-   the start? It changes §7.1/§7.2 priority a lot.
-2. Is the tool for *development* only, or also for *production/monitoring
+1. ~~Credit-first or insurance too?~~ Largely dissolved: the shared spine
+   means the real question is **do we do stochastic capital work at all?**
+   If yes, the build is common and the domain order is a sequencing choice,
+   not an architectural fork. If no, §3 collapses and §7.1/§7.2 drop down
+   the list (though §7.2 still earns its place for CV, bootstrap and IFRS 9
+   scenarios alone).
+2. Which capital use case pays first — bank EC/ICAAP, or an insurance
+   internal model? Same spine, but it decides which set of blocks and which
+   validation benchmarks get built alongside it.
+3. Is the tool for *development* only, or also for *production/monitoring
    runs*? Monitoring implies scheduling, result stores and connectors.
-3. Single-user local tool, or shared/server? Governance features (§4) only
+4. Single-user local tool, or shared/server? Governance features (§4) only
    half-make-sense locally.
-4. Is the compiled `.py` the deliverable handed to an implementation team,
-   or is Model-Maker itself meant to be the production runtime?
-5. How much does the documentation output need to match a specific existing
+5. Is the compiled `.py` the deliverable handed to an implementation team,
+   or is Model-Maker itself meant to be the production runtime? Note this
+   gets harder with §3: compiling a reproducible simulation to a standalone
+   script means the seed hierarchy has to compile out too.
+6. How much does the documentation output need to match a specific existing
    house template — i.e. is template configurability a v1 requirement?
