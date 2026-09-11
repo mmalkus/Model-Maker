@@ -6,8 +6,10 @@ from modelmaker.session import ProjectSession
 
 
 @pytest.fixture
-def client():
-    api_module.SESSION = ProjectSession()
+def client(tmp_path):
+    # Recovery snapshots go to a temp path so a test run never writes one
+    # into the working directory (see ProjectSession._write_recovery).
+    api_module.SESSION = ProjectSession(recovery_path=tmp_path / "recovery.json")
     return TestClient(api_module.app)
 
 
@@ -513,3 +515,89 @@ def test_logistic_regression_predictions_are_tagged_predicted_role(client, tmp_p
     assert roles["predicted_proba"] == "predicted"
     assert roles["predicted_class"] == "feature"
     assert roles["y"] == "target"
+
+
+def test_undo_and_redo_endpoints_round_trip_a_block(client):
+    block = client.post("/api/blocks", json={"category": "filter", "params": {"expr": "a > 1"}}).json()
+    graph = client.get("/api/graph").json()
+    assert graph["can_undo"] is True and graph["can_redo"] is False
+    assert graph["dirty"] is True
+
+    graph = client.post("/api/undo").json()
+    assert block["id"] not in graph["blocks"]
+    assert graph["can_redo"] is True
+
+    graph = client.post("/api/redo").json()
+    assert block["id"] in graph["blocks"]
+
+
+def test_undo_with_nothing_to_undo_is_a_conflict_not_a_crash(client):
+    assert client.post("/api/undo").status_code == 409
+    assert client.post("/api/redo").status_code == 409
+
+
+def test_dirty_clears_once_the_project_is_saved(client, tmp_path):
+    client.post("/api/blocks", json={"category": "filter", "params": {"expr": "a > 1"}})
+    assert client.get("/api/graph").json()["dirty"] is True
+
+    client.post("/api/project/save", json={"path": str(tmp_path / "proj.json")})
+    assert client.get("/api/graph").json()["dirty"] is False
+
+
+def test_sample_mode_turns_a_green_block_orange_with_a_reason(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n" + "".join(f"{i}\n" for i in range(1, 21)))
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    select = client.post("/api/blocks", json={"category": "select", "params": {"cols": ["a"]}, "x": 200}).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": read["id"], "from_port": "out", "to_block": select["id"], "to_port": "df"},
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    client.post(f"/api/blocks/{select['id']}/run")
+    assert client.get("/api/graph").json()["blocks"][select["id"]]["status"] == "green"
+
+    graph = client.put("/api/sample_mode", json={"rows": 5}).json()
+    assert graph["sample_rows"] == 5
+    stale = graph["blocks"][select["id"]]
+    assert stale["status"] == "orange"
+    assert "sample mode" in stale["stale_reason"]
+
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    client.post(f"/api/blocks/{select['id']}/run")
+    assert client.get(f"/api/blocks/{select['id']}/preview").json()["row_count"] == 5
+
+    # Turning it off goes stale again -- the source has been re-read since
+    # the full-data run, so those cached results are genuinely not current --
+    # and re-running gives the whole dataset back.
+    graph = client.put("/api/sample_mode", json={"rows": None}).json()
+    assert graph["blocks"][select["id"]]["status"] == "orange"
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    client.post(f"/api/blocks/{select['id']}/run")
+    assert client.get(f"/api/blocks/{select['id']}/preview").json()["row_count"] == 20
+
+
+def test_sample_mode_rejects_a_nonsense_row_count(client):
+    assert client.put("/api/sample_mode", json={"rows": 0}).status_code == 400
+
+
+def test_stale_reason_is_absent_for_green_and_grey_blocks(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n1\n2\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    assert read["stale_reason"] is None  # grey
+
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    assert client.get("/api/graph").json()["blocks"][read["id"]]["stale_reason"] is None  # green
+
+
+def test_recovery_is_offered_after_edits_and_rebuilds_the_graph(client, tmp_path):
+    client.post("/api/blocks", json={"category": "filter", "params": {"expr": "a > 1"}})
+    info = client.get("/api/project/recovery").json()["recovery"]
+    assert info["block_count"] == 1
+
+    # A fresh session (as after a restart) can pick that work back up.
+    api_module.SESSION = ProjectSession(recovery_path=tmp_path / "recovery.json")
+    assert client.get("/api/graph").json()["blocks"] == {}
+    graph = client.post("/api/project/recover").json()
+    assert len(graph["blocks"]) == 1

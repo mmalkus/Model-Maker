@@ -1,20 +1,42 @@
 from __future__ import annotations
 
+import copy
+import json
 import uuid
-from dataclasses import replace
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .blocks.base import BLOCK_REGISTRY, PortSpec
 from .cache import CacheStore
 from .graph import BlockInstance, Graph, Lane, Position, Wire
 from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
-from .project import load_project, save_project
-from .runner import Runner
+from .project import graph_from_dict, graph_to_dict, load_project, save_project
+from .runner import RunState, Runner
+
+CACHE_DIR = Path(".modelmaker-cache")
+# Where the crash-recovery snapshot lives. Inside the (gitignored) cache
+# directory deliberately: it is regenerable working state, not part of the
+# versioned project.
+RECOVERY_PATH = CACHE_DIR / "recovery.json"
+# How many edits back Undo reaches.
+UNDO_LIMIT = 50
 
 
 def new_id(prefix: str = "b") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+@dataclass
+class Snapshot:
+    """One undo point: the graph as data, plus the run state that went with
+    it -- so undoing a delete brings the block back still green, rather than
+    resurrecting it as never-run."""
+
+    graph: dict[str, Any]
+    state: dict[str, RunState] = field(default_factory=dict)
 
 
 def wire_is_valid(graph: Graph, wire: Wire) -> bool:
@@ -36,17 +58,143 @@ class ProjectSession:
     it was last loaded from/saved to. One session per running server process
     -- there's no multi-project or multi-user concept yet."""
 
-    def __init__(self) -> None:
+    def __init__(self, recovery_path: Path | None = RECOVERY_PATH) -> None:
         self.graph = Graph()
-        self.runner = Runner(self.graph, CacheStore(Path(".modelmaker-cache")))
+        self.runner = Runner(self.graph, CacheStore(CACHE_DIR))
         self.project_path: Path | None = None
         self.project_name = "untitled"
+        self.recovery_path = recovery_path
+        # Bumped by every successful edit; `dirty` is simply "has anything
+        # changed since the revision we last wrote to the project file".
+        self.revision = 0
+        self.saved_revision = 0
+        self._undo: list[Snapshot] = []
+        self._redo: list[Snapshot] = []
+
+    # ---- edit bookkeeping ---------------------------------------------
+
+    @property
+    def dirty(self) -> bool:
+        return self.revision != self.saved_revision
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def _snapshot(self) -> Snapshot:
+        return Snapshot(graph=graph_to_dict(self.graph, self.project_name), state=copy.deepcopy(self.runner.state))
+
+    def _restore(self, snap: Snapshot) -> None:
+        # Swap the graph *into* the existing runner rather than building a
+        # new one: the runner owns the cache, and every cached output is
+        # still valid (keys are derived from block config, not from runner
+        # identity), so an undo should never cost a re-run.
+        self.graph = graph_from_dict(snap.graph)
+        self.runner.graph = self.graph
+        self.runner.state = copy.deepcopy(snap.state)
+
+    @contextmanager
+    def edit(self) -> Iterator[None]:
+        """Wraps one graph mutation: records an undo point and bumps the
+        revision, but only if the mutation actually succeeds -- a rejected
+        edit (a wire that would create a cycle, a duplicate role) must not
+        leave a no-op entry on the undo stack for the user to step through."""
+        before = self._snapshot()
+        yield
+        self._undo.append(before)
+        del self._undo[:-UNDO_LIMIT]
+        self._redo.clear()
+        self.revision += 1
+        self._write_recovery()
+
+    def undo(self) -> bool:
+        if not self._undo:
+            return False
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+        self.revision += 1
+        self._write_recovery()
+        return True
+
+    def redo(self) -> bool:
+        if not self._redo:
+            return False
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
+        self.revision += 1
+        self._write_recovery()
+        return True
+
+    # ---- persistence ---------------------------------------------------
+
+    def _write_recovery(self) -> None:
+        """Snapshot the graph to the recovery file after every edit.
+
+        Deliberately never writes the user's own project file: an editor
+        that silently rewrites the thing under version control turns every
+        idle session into a git diff. Save stays explicit; this exists only
+        so a crash or a closed browser can't lose work."""
+        if self.recovery_path is None:
+            return
+        try:
+            self.recovery_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "project_name": self.project_name,
+                "project_path": str(self.project_path) if self.project_path else None,
+                "graph": graph_to_dict(self.graph, self.project_name),
+            }
+            self.recovery_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError:
+            # Recovery is a safety net, not a feature the user asked for --
+            # an unwritable cache directory must not fail their edit.
+            pass
+
+    def recovery_info(self) -> dict[str, Any] | None:
+        """Metadata about an available recovery snapshot, or None. Used to
+        offer recovery on a fresh start; never auto-applied."""
+        if self.recovery_path is None or not self.recovery_path.exists():
+            return None
+        try:
+            payload = json.loads(self.recovery_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        blocks = payload.get("graph", {}).get("blocks", {})
+        if not blocks:
+            return None
+        return {
+            "saved_at": payload.get("saved_at"),
+            "project_name": payload.get("project_name"),
+            "project_path": payload.get("project_path"),
+            "block_count": len(blocks),
+        }
+
+    def recover(self) -> None:
+        if self.recovery_path is None or not self.recovery_path.exists():
+            raise ValueError("no recovery snapshot available")
+        payload = json.loads(self.recovery_path.read_text(encoding="utf-8"))
+        with self.edit():
+            self.graph = graph_from_dict(payload["graph"])
+            self.runner.graph = self.graph
+            self.runner.state = {}
+            self.project_name = payload.get("project_name") or "untitled"
+            saved_path = payload.get("project_path")
+            self.project_path = Path(saved_path) if saved_path else None
 
     def load(self, path: Path) -> None:
         self.graph = load_project(path)
-        self.runner = Runner(self.graph, CacheStore(Path(".modelmaker-cache")))
+        self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)
         self.project_path = path
         self.project_name = path.stem
+        # A different project is a different edit history.
+        self._undo.clear()
+        self._redo.clear()
+        self.revision = 0
+        self.saved_revision = 0
 
     def save(self, path: Path | None = None) -> Path:
         target = path or self.project_path
@@ -54,7 +202,16 @@ class ProjectSession:
             raise ValueError("no project path set; provide one to save")
         save_project(self.graph, target, project_name=self.project_name)
         self.project_path = target
+        self.saved_revision = self.revision
         return target
+
+    def set_sample_rows(self, rows: int | None) -> None:
+        """Sample mode is a view of the data, not part of the project, so it
+        is neither saved nor undoable -- but it does change every block's
+        cache key (see Runner._basis), so statuses shift as soon as it's set."""
+        if rows is not None and rows < 1:
+            raise ValueError("sample rows must be at least 1")
+        self.runner.sample_rows = rows
 
     def add_block(
         self,

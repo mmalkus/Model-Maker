@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from modelmaker.session import ProjectSession
+
+
+@pytest.fixture
+def session(tmp_path):
+    return ProjectSession(recovery_path=tmp_path / "recovery.json")
+
+
+def test_undo_restores_a_deleted_block_and_its_wires(session):
+    with session.edit():
+        read = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        filt = session.add_block("filter", params={"expr": "a > 1"})
+    with session.edit():
+        session.add_wire(read.id, "out", filt.id, "df")
+
+    with session.edit():
+        session.delete_block(filt.id)
+    assert filt.id not in session.graph.blocks
+    assert session.graph.wires == {}
+
+    assert session.undo() is True
+    assert filt.id in session.graph.blocks
+    assert len(session.graph.wires) == 1
+    assert session.graph.blocks[filt.id].params == {"expr": "a > 1"}
+
+
+def test_redo_reapplies_an_undone_edit(session):
+    with session.edit():
+        block = session.add_block("filter", params={"expr": "a > 1"})
+    with session.edit():
+        session.update_block(block.id, params={"expr": "a > 99"})
+
+    session.undo()
+    assert session.graph.blocks[block.id].params == {"expr": "a > 1"}
+    assert session.redo() is True
+    assert session.graph.blocks[block.id].params == {"expr": "a > 99"}
+
+
+def test_a_new_edit_clears_the_redo_stack(session):
+    with session.edit():
+        session.add_block("filter", params={"expr": "a > 1"})
+    session.undo()
+    assert session.can_redo is True
+    with session.edit():
+        session.add_block("select", params={"cols": ["a"]})
+    assert session.can_redo is False
+
+
+def test_a_rejected_edit_leaves_no_undo_point(session):
+    with session.edit():
+        a = session.add_block("read_csv", params={"path": "x.csv"})
+    with session.edit():
+        b = session.add_block("filter", params={"expr": "a > 1"})
+    with session.edit():
+        session.add_wire(a.id, "out", b.id, "df")
+    undo_depth = len(session._undo)
+
+    # A wire that would close a loop is refused -- and must not leave a
+    # do-nothing entry behind for the user to step back through.
+    with pytest.raises(ValueError):
+        with session.edit():
+            session.add_wire(b.id, "out", a.id, "df")
+    assert len(session._undo) == undo_depth
+
+
+def test_undo_keeps_cached_run_state(session, tmp_path):
+    csv = tmp_path / "data.csv"
+    csv.write_text("a\n1\n2\n")
+    with session.edit():
+        read = session.add_block("read_csv", params={"path": str(csv)})
+    session.runner.refresh(read.id)
+    assert session.runner.status(read.id) == "green"
+
+    with session.edit():
+        session.add_block("filter", params={"expr": "a > 1"})
+    session.undo()
+
+    # Undoing an unrelated edit must not cost the user a re-read.
+    assert session.runner.status(read.id) == "green"
+
+
+def test_dirty_clears_on_save_and_returns_on_the_next_edit(session, tmp_path):
+    assert session.dirty is False
+    with session.edit():
+        session.add_block("filter", params={"expr": "a > 1"})
+    assert session.dirty is True
+
+    session.save(tmp_path / "proj.json")
+    assert session.dirty is False
+
+    with session.edit():
+        session.add_block("select", params={"cols": ["a"]})
+    assert session.dirty is True
+
+
+def test_recovery_snapshot_is_written_on_every_edit_but_never_the_project_file(session, tmp_path):
+    project = tmp_path / "proj.json"
+    with session.edit():
+        session.add_block("filter", params={"expr": "a > 1"})
+    session.save(project)
+    before = project.read_text(encoding="utf-8")
+
+    with session.edit():
+        session.add_block("select", params={"cols": ["a"]})
+
+    # The edit lands in the recovery snapshot...
+    info = session.recovery_info()
+    assert info is not None and info["block_count"] == 2
+    # ...and emphatically not in the user's versioned project file.
+    assert project.read_text(encoding="utf-8") == before
+
+
+def test_recover_rebuilds_the_graph_from_the_snapshot(session, tmp_path):
+    with session.edit():
+        session.add_block("filter", params={"expr": "a > 1"})
+    saved = json.loads((tmp_path / "recovery.json").read_text(encoding="utf-8"))
+    assert len(saved["graph"]["blocks"]) == 1
+
+    fresh = ProjectSession(recovery_path=tmp_path / "recovery.json")
+    assert fresh.graph.blocks == {}
+    fresh.recover()
+    assert len(fresh.graph.blocks) == 1
+
+
+def test_recovery_info_is_none_when_there_is_nothing_worth_recovering(tmp_path):
+    assert ProjectSession(recovery_path=tmp_path / "nope.json").recovery_info() is None
+
+
+def test_group_by_survives_a_save_load_round_trip(session, tmp_path):
+    with session.edit():
+        block = session.add_block("filter", params={"expr": "a > 1"})
+        session.update_block(block.id, group_by="region", max_workers=3)
+    path = tmp_path / "proj.json"
+    session.save(path)
+
+    reloaded = ProjectSession(recovery_path=None)
+    reloaded.load(path)
+    assert reloaded.graph.blocks[block.id].group_by == "region"
+    assert reloaded.graph.blocks[block.id].max_workers == 3

@@ -466,3 +466,108 @@ def test_two_upstream_branches_tagging_the_same_role_collide_only_once_joined(tm
 
     assert runner.run_block("b_join") == "red"
     assert "target" in runner.state["b_join"].last_error.lower()
+
+
+def test_sample_mode_truncates_at_the_source_and_flows_downstream(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n" + "".join(f"{i},{i * 10}\n" for i in range(1, 51)))
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    select = make_block("b_select", "select", params={"cols": ["a"]}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_select": select},
+        wires={"w1": Wire("w1", "b_read", "out", "b_select", "df")},
+    )
+    runner = Runner(graph, CacheStore(), sample_rows=5)
+    runner.refresh("b_read")
+    runner.run_block("b_select")
+
+    out = runner.cache.get(runner.state["b_select"].last_successful_key).outputs["out"]
+    assert out.data.height == 5
+
+
+def test_toggling_sample_mode_invalidates_the_graph_and_returns_to_the_full_key(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_block("b_filter")
+    full_key = runner.compute_key("b_filter")
+    assert runner.status("b_filter") == "green"
+
+    runner.sample_rows = 2
+    assert runner.status("b_filter") == "orange"
+    assert runner.compute_key("b_filter") != full_key
+
+    # Switching back lands on exactly the key the full-data run already
+    # cached, so the earlier results are still there rather than re-run.
+    runner.sample_rows = None
+    assert runner.compute_key("b_filter") == full_key
+    assert runner.status("b_filter") == "green"
+
+
+def test_stale_reason_names_the_changed_param(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_block("b_filter")
+    assert runner.stale_reason("b_filter") is None
+
+    graph.blocks["b_filter"].params = {"expr": "a > 2"}
+    assert runner.status("b_filter") == "orange"
+    reason = runner.stale_reason("b_filter")
+    assert "expr" in reason and "a > 1" in reason and "a > 2" in reason
+
+
+def test_stale_reason_follows_a_cascade_to_the_block_that_caused_it(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    select = make_block("b_select", "select", params={"cols": ["a"]}, x=2)
+    graph.blocks["b_select"] = select
+    graph.wires["w2"] = Wire("w2", "b_filter", "out", "b_select", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_block("b_filter")
+    runner.run_block("b_select")
+
+    graph.blocks["b_filter"].params = {"expr": "a > 2"}
+
+    # The block two hops downstream should point at the edit itself, not
+    # just shrug at its immediate neighbour.
+    reason = runner.stale_reason("b_select")
+    assert "b_filter" in reason and "expr" in reason
+
+
+def test_stale_reason_reports_a_code_edit_and_a_source_re_read(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_block("b_filter")
+
+    # An input block that has been re-read explains itself...
+    runner.state["b_read"].read_counter += 1
+    assert runner.stale_reason("b_read") == "its source was re-read"
+    # ...and once it has actually re-run there's no local difference left to
+    # report, so its downstream just knows the input beneath it moved on.
+    runner.refresh("b_read")
+    assert runner.stale_reason("b_filter") == "upstream 'b_read' changed"
+
+    custom = make_block(
+        "b_custom",
+        "my_block",
+        block_type="standard",
+        code="def my_block(df):\n    return df\n",
+        inputs=list(graph.blocks["b_filter"].inputs),
+        outputs=list(graph.blocks["b_filter"].outputs),
+        metadata_transform={"kind": "passthrough"},
+        x=3,
+    )
+    graph.blocks["b_custom"] = custom
+    graph.wires["w3"] = Wire("w3", "b_read", "out", "b_custom", "df")
+    runner.run_block("b_custom")
+    custom.code = "def my_block(df):\n    return df.head(1)\n"
+    custom.code_version += 1
+    assert runner.stale_reason("b_custom") == "its code changed"
+
+
+def test_stale_reason_is_none_for_a_block_that_has_never_run(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    assert runner.stale_reason("b_filter") is None

@@ -59,6 +59,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _short(value: Any, limit: int = 24) -> str:
+    """A param value rendered small enough to sit inside a one-line staleness
+    message (see Runner._describe_local_change)."""
+    text = json.dumps(value, default=str) if not isinstance(value, str) else value
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
 @dataclass
 class RunState:
     last_successful_key: str | None = None
@@ -69,6 +76,12 @@ class RunState:
     last_error: str | None = None
     read_counter: int = 0  # bumped by Refresh; part of an input block's key
     last_probe_value: Any = None
+    # The full key basis (see Runner._basis) as it stood at the last
+    # successful run, kept so staleness can be *explained* rather than just
+    # detected: the key alone is a hash, so comparing it to the current one
+    # says that something changed but never what. Diffed against the current
+    # basis by Runner.stale_reason.
+    last_successful_basis: dict[str, Any] | None = None
 
 
 class Runner:
@@ -82,10 +95,22 @@ class Runner:
     # of what an individual block's max_workers asks for.
     MAX_GROUP_WORKERS = 8
 
-    def __init__(self, graph: Graph, cache: CacheStore | None = None, output_dir: str = "./output"):
+    def __init__(
+        self,
+        graph: Graph,
+        cache: CacheStore | None = None,
+        output_dir: str = "./output",
+        sample_rows: int | None = None,
+    ):
         self.graph = graph
         self.cache = cache or CacheStore()
         self.output_dir = output_dir
+        # Sample mode: when set, every input block's dataframe outputs are
+        # truncated to this many rows, so the whole pipeline can be iterated
+        # on cheaply. Folded into input blocks' key basis (see _basis), so
+        # toggling it invalidates the graph the same way any other change
+        # does -- sampled and full results are never mixed in one cache.
+        self.sample_rows = sample_rows
         self.state: dict[str, RunState] = {}
         # block_id -> {"cancel_event": ...} for whichever block is currently
         # mid-dispatch (see _dispatch) -- read by status()/is_running(), and
@@ -125,10 +150,11 @@ class Runner:
             h["cancel_event"].set()
         return bool(handles)
 
-    def compute_key(self, block_id: str, _stack: frozenset[str] = frozenset()) -> str:
-        """Lineage-based cache key: hashes block identity/config plus the
-        upstream blocks' *keys*, never the underlying DataFrame content, so
-        computing it is cheap no matter how large the data is.
+    def _basis(self, block_id: str, _stack: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """Everything a block's cache key is derived from, as a plain dict --
+        hashed into the key by compute_key, and kept verbatim on a successful
+        run (RunState.last_successful_basis) so stale_reason can diff it and
+        say *what* changed.
 
         `_stack` guards against a cyclic graph recursing forever (and
         crashing the process with a RecursionError): wires that would
@@ -141,20 +167,26 @@ class Runner:
             raise RuntimeError(f"cycle detected in graph at block '{block_id}'")
         block = self.graph.blocks[block_id]
         if block.block_type == "input":
-            basis = {
+            basis: dict[str, Any] = {
                 "category": block.category,
                 "code_version": block.code_version,
                 "params": block.params,
                 "column_role_overrides": block.column_role_overrides,
                 "read_counter": self._st(block_id).read_counter,
             }
-            return _hash(basis)
+            # Only present when sample mode is actually on, so ordinary
+            # full-data keys are exactly what they were before sample mode
+            # existed -- a cache built by an older version stays valid, and
+            # turning sample mode on and back off returns to those same keys.
+            if self.sample_rows is not None:
+                basis["sample_rows"] = self.sample_rows
+            return basis
         next_stack = _stack | {block_id}
         upstream = {
             port: f"{self.compute_key(wire.from_block, next_stack)}:{wire.from_port}"
             for port, wire in sorted(self.graph.input_wires(block_id).items())
         }
-        basis = {
+        return {
             "category": block.category,
             "code_version": block.code_version,
             "params": block.params,
@@ -164,7 +196,12 @@ class Runner:
             "group_by": block.group_by,
             "max_workers": block.max_workers,
         }
-        return _hash(basis)
+
+    def compute_key(self, block_id: str, _stack: frozenset[str] = frozenset()) -> str:
+        """Lineage-based cache key: hashes block identity/config plus the
+        upstream blocks' *keys*, never the underlying DataFrame content, so
+        computing it is cheap no matter how large the data is."""
+        return _hash(self._basis(block_id, _stack))
 
     def status(self, block_id: str) -> Status:
         if self.is_running(block_id):
@@ -187,6 +224,100 @@ class Runner:
             return "orange"
         return "grey"
 
+    def stale_reason(self, block_id: str) -> str | None:
+        """Why this block's cached output is no longer current, in one short
+        phrase -- the answer to "why did this go orange?", which the key on
+        its own can't give (it's a hash: it says *that* something changed,
+        never what). None when there's nothing to explain (never run, or
+        still current).
+
+        Local changes are reported in preference to upstream ones, and an
+        upstream change is followed to the block that actually caused it, so
+        a long cascade names its origin rather than just "the block before
+        me changed"."""
+        st = self._st(block_id)
+        if st.last_successful_basis is None:
+            return None
+        try:
+            current = self._basis(block_id)
+        except RuntimeError:
+            return None
+        if current == st.last_successful_basis:
+            return None
+        return self._describe_change(block_id, st.last_successful_basis, current)
+
+    def _describe_change(self, block_id: str, old: dict[str, Any], new: dict[str, Any], depth: int = 0) -> str | None:
+        local = self._describe_local_change(old, new)
+        if local:
+            return "; ".join(local)
+
+        old_up: dict[str, str] = old.get("upstream", {})
+        new_up: dict[str, str] = new.get("upstream", {})
+        wires = self.graph.input_wires(block_id)
+        reasons: list[str] = []
+        for port in sorted(set(old_up) | set(new_up)):
+            if old_up.get(port) == new_up.get(port):
+                continue
+            if port not in old_up:
+                reasons.append(f"input '{port}' was connected")
+                continue
+            wire = wires.get(port)
+            if wire is None or port not in new_up:
+                reasons.append(f"input '{port}' was disconnected")
+                continue
+            # Values are "<upstream key>:<upstream port>" -- a differing port
+            # with an identical key means the wire was moved to a different
+            # output of the same block, which is a rewire, not a re-run.
+            if old_up[port].split(":", 1)[0] == new_up[port].split(":", 1)[0]:
+                reasons.append(f"input '{port}' was rewired to another output of '{self._block_name(wire.from_block)}'")
+                continue
+            reasons.append(self._describe_upstream(wire.from_block, depth))
+        return "; ".join(r for r in reasons if r) or None
+
+    @staticmethod
+    def _describe_local_change(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+        reasons: list[str] = []
+        if old.get("category") != new.get("category"):
+            reasons.append("the block was replaced with a different kind")
+        if old.get("code_version") != new.get("code_version") or old.get("code") != new.get("code"):
+            reasons.append("its code changed")
+        old_params, new_params = old.get("params", {}) or {}, new.get("params", {}) or {}
+        if old_params != new_params:
+            changed = sorted(k for k in set(old_params) | set(new_params) if old_params.get(k) != new_params.get(k))
+            shown = ", ".join(f"'{k}'" for k in changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
+            if len(changed) == 1:
+                k = changed[0]
+                reasons.append(f"param {shown} changed ({_short(old_params.get(k))} → {_short(new_params.get(k))})")
+            else:
+                reasons.append(f"params {shown} changed")
+        if old.get("column_role_overrides") != new.get("column_role_overrides"):
+            reasons.append("a column role was retagged")
+        if old.get("group_by") != new.get("group_by") or old.get("max_workers") != new.get("max_workers"):
+            reasons.append("its grouping changed")
+        if old.get("read_counter") != new.get("read_counter"):
+            reasons.append("its source was re-read")
+        if old.get("sample_rows") != new.get("sample_rows"):
+            reasons.append("sample mode changed")
+        return reasons
+
+    def _describe_upstream(self, up_id: str, depth: int) -> str:
+        """Why an upstream block's output differs, phrased from this block's
+        point of view. Recurses (bounded) so a cascade points at its origin."""
+        name = self._block_name(up_id)
+        up_st = self._st(up_id)
+        if depth < 3 and up_st.last_successful_basis is not None:
+            try:
+                sub = self._describe_change(up_id, up_st.last_successful_basis, self._basis(up_id), depth + 1)
+            except RuntimeError:
+                sub = None
+            if sub:
+                return f"upstream '{name}' changed: {sub}"
+        return f"upstream '{name}' changed"
+
+    def _block_name(self, block_id: str) -> str:
+        block = self.graph.blocks.get(block_id)
+        return block.name if block else block_id
+
     def _gather_inputs(self, block_id: str) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for port, wire in self.graph.input_wires(block_id).items():
@@ -203,7 +334,8 @@ class Runner:
         """Requires all of this block's inputs to currently be green."""
         block = self.graph.blocks[block_id]
         st = self._st(block_id)
-        key = self.compute_key(block_id)
+        basis = self._basis(block_id)
+        key = _hash(basis)
         st.last_attempt_key = key
         st.last_attempt_at = _now()
         try:
@@ -247,6 +379,14 @@ class Runner:
                 raw_outputs = {out_names[0]: raw}
             else:
                 raw_outputs = dict(zip(out_names, raw))
+
+            if block.block_type == "input" and self.sample_rows is not None:
+                # Sample mode truncates at the source, so every downstream
+                # block sees the sample without needing to know it exists.
+                raw_outputs = {
+                    k: (v.head(self.sample_rows) if isinstance(v, pl.DataFrame) else v)
+                    for k, v in raw_outputs.items()
+                }
 
             data_outputs = {k: v for k, v in raw_outputs.items() if isinstance(v, pl.DataFrame)}
             transform = block.resolved_metadata_transform()
@@ -304,6 +444,7 @@ class Runner:
 
             self.cache.set(key, packets)
             st.last_successful_key = key
+            st.last_successful_basis = basis
             st.failed = False
             st.last_error = None
             if block.block_type == "input":
