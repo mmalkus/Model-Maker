@@ -54,6 +54,14 @@ directly by the engine -- do not reference anything outside the function \
 arguments.
 - Only reference columns that are listed in the provided input schema. If the \
 instruction implies a new column, add it with `.with_columns(...)`.
+- Never hardcode an *existing* input column's name as a string literal in the \
+function body. For each existing column your logic reads, add a `str` \
+parameter named `<descriptive_name>_col`, defaulting to that column's real \
+name from the input schema, and reference the parameter (e.g. \
+`pl.col(income_col)`) instead of the literal -- this lets the tool re-point \
+the block at a differently-named upstream column later without touching the \
+code. Columns you are newly creating still get fixed, literal names via \
+`.alias(...)`; only pre-existing columns you read need a `_col` parameter.
 - Also produce a `metadata_transform` describing how the function changes the \
 column set, so the tool can track column roles/types without re-executing \
 your code:
@@ -124,12 +132,16 @@ parenthesized: `df.filter((pl.col("a") > 1) & (pl.col("b") < 5))`.
 
 Worked example -- instruction: "flag rows where income > 50000 as high_income"
 ```python
-def bucket_income(df: pl.DataFrame) -> pl.DataFrame:
+def bucket_income(df: pl.DataFrame, income_col: str = "income") -> pl.DataFrame:
     return df.with_columns(
-        (pl.col("income") > 50000).alias("high_income")
+        (pl.col(income_col) > 50000).alias("high_income")
     )
 ```
-This adds one boolean column, so `metadata_transform` would be \
+`income` is an existing column being read, so it becomes the `income_col` \
+parameter (defaulted to its real name) instead of a literal; `high_income` is \
+a new column, so it keeps a fixed, literal name via `.alias(...)`. `params` \
+would be `{"income_col": "income"}`, and this adds one boolean column, so \
+`metadata_transform` would be \
 `{"kind": "declared", "base": "df", "drops": [], "adds": [{"name": "high_income", "dtype": "Boolean", "role": "feature"}]}`.
 """
 

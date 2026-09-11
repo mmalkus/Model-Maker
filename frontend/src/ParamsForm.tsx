@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import type { SchemaColumn } from './types'
 
-type FieldSpec =
+export type FieldSpec =
   | { key: string; label: string; kind: 'text'; placeholder?: string }
   | { key: string; label: string; kind: 'number'; step?: number }
   | { key: string; label: string; kind: 'select'; options: string[] }
@@ -67,6 +67,28 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'col', label: 'Column to compare', kind: 'column' },
     { key: 'bins', label: 'Bins', kind: 'number' },
   ],
+}
+
+function prettifyColumnParamLabel(key: string): string {
+  const base = key.replace(/_col$/, '').replace(/_/g, ' ')
+  return `${base.charAt(0).toUpperCase()}${base.slice(1)} column`
+}
+
+// AI-drafted (custom) blocks name every existing input column they read as a
+// `<name>_col` string parameter defaulting to that column's real name (see
+// llm/prompts.CONTRACT) instead of hardcoding it into the function body --
+// that's what lets a block get re-pointed at a differently-named upstream
+// column without touching generated code. Turn each such param into a
+// `column` field (a dropdown of the block's real input columns) instead of
+// leaving it in the raw JSON textarea, so re-wiring it is a pick from a list
+// rather than free-text guesswork -- and a stale value (e.g. after an
+// upstream rename) shows up as an extra, clearly-off option rather than
+// silently failing at run time.
+export function deriveColumnFieldSpecs(params: Record<string, unknown>): FieldSpec[] {
+  return Object.keys(params)
+    .filter((key) => key.endsWith('_col') && (params[key] === null || typeof params[key] === 'string'))
+    .sort()
+    .map((key) => ({ key, label: prettifyColumnParamLabel(key), kind: 'column' as const }))
 }
 
 export function ParamsForm({
