@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
+import { CodeEditor } from './CodeEditor'
 import { FileBrowser } from './FileBrowser'
 import { SettingsPanel } from './SettingsPanel'
 import type { LLMSettingsOut } from './types'
@@ -13,12 +14,23 @@ function splitPath(path: string): { dir: string; name: string } {
   return idx === -1 ? { dir: '', name: path } : { dir: path.slice(0, idx), name: path.slice(idx + 1) }
 }
 
+// Default cap offered when sample mode is switched on -- small enough that
+// a pipeline over millions of rows becomes interactive, large enough that a
+// train/test split or a grouped metric still has something to work with.
+const DEFAULT_SAMPLE_ROWS = 1000
+
 export function Toolbar({
   onChanged,
   projectPath,
   llmSettings,
   onLlmSettingsChange,
   running,
+  dirty,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  sampleRows,
 }: {
   onChanged: () => void
   projectPath: string | null
@@ -30,6 +42,12 @@ export function Toolbar({
   // fetch (a run's own POST resolves quickly now that runs execute in the
   // background; `running` is what stays true for the run's actual duration).
   running: boolean
+  dirty: boolean
+  canUndo: boolean
+  canRedo: boolean
+  onUndo: () => void
+  onRedo: () => void
+  sampleRows: number | null
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
@@ -134,14 +152,52 @@ export function Toolbar({
       <button disabled={busy} onClick={doCompile}>
         Compile
       </button>
+
+      <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(11,35,64,0.15)', margin: '0 2px' }} />
+      <button disabled={busy || !canUndo} onClick={onUndo} title="Undo the last graph edit (Ctrl/Cmd-Z)">
+        ↶
+      </button>
+      <button disabled={busy || !canRedo} onClick={onRedo} title="Redo (Ctrl/Cmd-Shift-Z)">
+        ↷
+      </button>
+
+      <label
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--brand-charcoal)' }}
+        title="Run the whole pipeline on the first N rows of every source, for fast iteration. Sources need re-reading when this changes."
+      >
+        <input
+          type="checkbox"
+          checked={sampleRows != null}
+          disabled={busy || running}
+          onChange={(e) => run(() => api.setSampleMode(e.target.checked ? DEFAULT_SAMPLE_ROWS : null))}
+        />
+        Sample
+        {sampleRows != null && (
+          <input
+            type="number"
+            min={1}
+            value={sampleRows}
+            disabled={busy || running}
+            onChange={(e) => {
+              const rows = Number(e.target.value)
+              if (Number.isFinite(rows) && rows >= 1) run(() => api.setSampleMode(rows))
+            }}
+            style={{ width: 72, fontSize: 11 }}
+          />
+        )}
+      </label>
+
       <span style={{ flex: 1 }} />
       <button disabled={busy} onClick={() => setShowSave(true)}>
-        Save
+        Save{dirty ? ' •' : ''}
       </button>
       <button disabled={busy} onClick={() => setShowLoad(true)}>
         Load
       </button>
-      <span style={{ fontSize: 12, color: '#6b7280' }}>{projectPath ?? '(unsaved)'}</span>
+      <span style={{ fontSize: 12, color: dirty ? '#92400e' : '#6b7280' }}>
+        {projectPath ?? '(unsaved)'}
+        {dirty && <span title="Edits not yet written to the project file (they are snapshotted for recovery)"> · unsaved changes</span>}
+      </span>
 
       <div style={{ position: 'relative' }}>
         <button onClick={() => setShowSettings((s) => !s)}>Settings</button>
@@ -169,9 +225,9 @@ export function Toolbar({
             <strong>Compiled script</strong>
             <button onClick={() => setCompiled(null)}>Close</button>
           </div>
-          <pre style={{ overflow: 'auto', flex: 1, fontSize: 12, background: '#f9fafb', padding: 12, margin: 0 }}>
-            {compiled}
-          </pre>
+          <div style={{ overflow: 'auto', flex: 1 }}>
+            <CodeEditor value={compiled} readOnly maxHeight={10_000} />
+          </div>
         </div>
       )}
 

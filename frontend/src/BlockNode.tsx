@@ -43,6 +43,10 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         borderRadius: 8,
         background: '#fff',
         minWidth: 160,
+        // Without a ceiling, a long status line (a staleness reason naming
+        // the upstream edit that caused it) stretches the card right across
+        // the canvas instead of wrapping inside it.
+        maxWidth: 280,
         boxShadow: selected ? '0 0 0 2px var(--brand)' : '0 1px 3px rgba(0,0,0,0.15)',
         fontSize: 12,
       }}
@@ -135,6 +139,22 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                 </button>
               )
             })}
+          </div>
+        )}
+
+        {block.status === 'orange' && block.stale_reason && (
+          <div
+            title={`Stale: ${block.stale_reason}`}
+            style={{
+              color: '#b45309',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+            }}
+          >
+            stale — {block.stale_reason}
           </div>
         )}
 

@@ -7,6 +7,7 @@ import type {
   InputSchemaOut,
   LLMSettingsOut,
   PreviewOut,
+  RecoveryInfo,
   RegistryEntry,
 } from './types'
 
@@ -97,6 +98,15 @@ export const api = {
 
   compile: (output_blocks?: string[]) =>
     request<{ source: string }>('/compile', { method: 'POST', body: JSON.stringify({ output_blocks }) }),
+
+  undo: () => request<GraphOut>('/undo', { method: 'POST' }),
+  redo: () => request<GraphOut>('/redo', { method: 'POST' }),
+
+  setSampleMode: (rows: number | null) =>
+    request<GraphOut>('/sample_mode', { method: 'PUT', body: JSON.stringify({ rows }) }),
+
+  recoveryInfo: () => request<{ recovery: RecoveryInfo | null }>('/project/recovery'),
+  recover: () => request<GraphOut>('/project/recover', { method: 'POST' }),
 
   save: (path?: string) => request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }),
   load: (path: string) => request<GraphOut>('/project/load', { method: 'POST', body: JSON.stringify({ path }) }),

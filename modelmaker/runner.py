@@ -272,7 +272,9 @@ class Runner:
                 reasons.append(f"input '{port}' was rewired to another output of '{self._block_name(wire.from_block)}'")
                 continue
             reasons.append(self._describe_upstream(wire.from_block, depth))
-        return "; ".join(r for r in reasons if r) or None
+        # Two inputs fed by the same disturbance (a split block's train and
+        # test, say) would otherwise say the same thing twice.
+        return "; ".join(dict.fromkeys(r for r in reasons if r)) or None
 
     @staticmethod
     def _describe_local_change(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
@@ -300,18 +302,28 @@ class Runner:
             reasons.append("sample mode changed")
         return reasons
 
+    # How far up a chain of stale blocks to look for the edit that started
+    # it. The message doesn't grow with depth (see _describe_upstream), so
+    # this only bounds work, not readability.
+    MAX_STALE_DEPTH = 8
+
     def _describe_upstream(self, up_id: str, depth: int) -> str:
         """Why an upstream block's output differs, phrased from this block's
-        point of view. Recurses (bounded) so a cascade points at its origin."""
+        point of view. Recurses (bounded) so a cascade names the edit that
+        started it rather than just the neighbour that passed it on."""
         name = self._block_name(up_id)
         up_st = self._st(up_id)
-        if depth < 3 and up_st.last_successful_basis is not None:
+        if depth < self.MAX_STALE_DEPTH and up_st.last_successful_basis is not None:
             try:
                 sub = self._describe_change(up_id, up_st.last_successful_basis, self._basis(up_id), depth + 1)
             except RuntimeError:
                 sub = None
             if sub:
-                return f"upstream '{name}' changed: {sub}"
+                # A reason that is itself about an upstream block already
+                # names the origin -- pass it through rather than nesting
+                # another "upstream X changed:" in front of it, which is how
+                # a five-block chain turns into an unreadable sentence.
+                return sub if sub.startswith("upstream ") else f"upstream '{name}' changed: {sub}"
         return f"upstream '{name}' changed"
 
     def _block_name(self, block_id: str) -> str:

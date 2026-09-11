@@ -38,6 +38,44 @@ Double-click [`run.bat`](run.bat) (or run it from a terminal). It creates
 the frontend, and starts `modelmaker-api` at `http://127.0.0.1:8001`. Safe
 to re-run any time — it just re-syncs dependencies and rebuilds.
 
+## The demo project
+
+[`projects/demo_pd_model.json`](projects/demo_pd_model.json) is a complete,
+runnable PD pipeline over [`sample_data/pd_model_data.csv`](sample_data):
+load → clean → weight-of-evidence → train/test split → logistic regression →
+Gini, KS and PSI. Open it with **Load** (it's what the file dialog opens on),
+then **Refresh sources** followed by **Run all**.
+
+It's the quickest way to see what a finished graph looks like, and the test
+suite runs it end to end so it can't rot.
+
+## Working in the tool
+
+A few things worth knowing beyond the canvas itself.
+
+- **Sample mode** — the `Sample` toggle in the top bar caps *every* source at
+  the first N rows, so a whole pipeline stays fast to iterate on. It changes
+  every block's cache key, so sampled and full results never mix; a banner
+  keeps it obvious that what you're looking at isn't the full population.
+  Switching back off needs the sources re-read.
+- **Why a block is orange** — a stale block says what made it stale (a param
+  it names, a code edit, a re-read source, sample mode), following a cascade
+  back to the edit that started it rather than blaming its neighbour.
+- **Undo/redo** — `Ctrl`/`Cmd-Z` and `Ctrl`/`Cmd-Shift-Z`, or the arrows in
+  the top bar, over graph edits: adding, deleting, rewiring, renaming,
+  retagging and param/code changes. Text fields and the code editor keep
+  their own undo. Undo restores the graph, not what you've run: reverting a
+  param lands back on a cache key that's already computed, so results you
+  already have aren't thrown away.
+- **Unsaved work** — saving to the project file stays explicit (a `•` on the
+  Save button marks unsaved edits), but every edit is snapshotted to
+  `.modelmaker-cache/recovery.json`. After a crash or a closed browser, the
+  app offers to restore it on next start. Nothing ever writes your project
+  file behind your back.
+- **Editing block code** — custom/AI-authored blocks use a real code editor
+  (syntax highlighting, line numbers, bracket matching, `Ctrl-F` search);
+  `Ctrl`/`Cmd-S` saves.
+
 ## Install
 
 Install the backend as an editable package:

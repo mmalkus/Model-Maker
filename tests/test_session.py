@@ -144,3 +144,55 @@ def test_group_by_survives_a_save_load_round_trip(session, tmp_path):
     reloaded.load(path)
     assert reloaded.graph.blocks[block.id].group_by == "region"
     assert reloaded.graph.blocks[block.id].max_workers == 3
+
+
+def test_undo_does_not_roll_back_runs_that_happened_after_the_edit(session, tmp_path):
+    """Regression: undo used to restore a wholesale snapshot of run state,
+    so an edit made while a run was still in flight would, on undo, drop
+    every result that run had produced -- blocks that were green went back
+    to never-having-run."""
+    csv = tmp_path / "data.csv"
+    csv.write_text("a\n1\n2\n3\n")
+    with session.edit():
+        read = session.add_block("read_csv", params={"path": str(csv)})
+    with session.edit():
+        filt = session.add_block("filter", params={"expr": "a > 1"})
+    with session.edit():
+        session.add_wire(read.id, "out", filt.id, "df")
+    session.runner.refresh(read.id)
+
+    # An edit recorded before the downstream block has ever run...
+    with session.edit():
+        session.update_block(filt.id, params={"expr": "a > 2"})
+    # ...and the run lands afterwards.
+    session.runner.run_block(filt.id)
+    assert session.runner.status(filt.id) == "green"
+
+    session.undo()
+    # The params are back, and because status derives from the cache key,
+    # that is enough: the block is not stranded as never-run.
+    assert session.graph.blocks[filt.id].params == {"expr": "a > 1"}
+    assert session.runner.status(filt.id) != "grey"
+    session.runner.run_block(filt.id)
+    assert session.runner.status(filt.id) == "green"
+
+
+def test_undoing_a_param_edit_returns_the_block_to_green(session, tmp_path):
+    csv = tmp_path / "data.csv"
+    csv.write_text("a\n1\n2\n3\n")
+    with session.edit():
+        read = session.add_block("read_csv", params={"path": str(csv)})
+    with session.edit():
+        filt = session.add_block("filter", params={"expr": "a > 1"})
+    with session.edit():
+        session.add_wire(read.id, "out", filt.id, "df")
+    session.runner.refresh(read.id)
+    session.runner.run_block(filt.id)
+
+    with session.edit():
+        session.update_block(filt.id, params={"expr": "a > 2"})
+    assert session.runner.status(filt.id) == "orange"
+
+    # Reverting the config reaches the key that was already run and cached.
+    session.undo()
+    assert session.runner.status(filt.id) == "green"

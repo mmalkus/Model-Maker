@@ -43,6 +43,10 @@ export interface BlockOut {
   last_error: string | null
   last_successful_read_at: string | null
   last_attempt_at: string | null
+  // Why an orange block's cached output is no longer current, in one phrase
+  // (see Runner.stale_reason) -- null for every other status, since grey has
+  // never run and red carries its error instead.
+  stale_reason: string | null
 }
 
 export interface WireOut {
@@ -59,9 +63,24 @@ export interface LaneOut {
   height: number
 }
 
+export interface RecoveryInfo {
+  saved_at: string | null
+  project_name: string | null
+  project_path: string | null
+  block_count: number
+}
+
 export interface GraphOut {
   project_name: string
   project_path: string | null
+  // Whether there are edits the project file doesn't have yet. Edits are
+  // always snapshotted for crash recovery, but saving stays explicit.
+  dirty: boolean
+  can_undo: boolean
+  can_redo: boolean
+  // Row cap applied to every input block, or null when off (see
+  // Runner.sample_rows).
+  sample_rows: number | null
   lanes: Record<string, LaneOut>
   blocks: Record<string, BlockOut>
   // A precondition failure from the most recently *started* run (e.g. "Run"

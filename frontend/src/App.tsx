@@ -19,7 +19,7 @@ import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut, LaneOut, LLMSettingsOut, PortType } from './types'
+import type { BlockOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -69,6 +69,7 @@ function AppInner() {
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [llmSettings, setLlmSettings] = useState<LLMSettingsOut | null>(null)
+  const [recovery, setRecovery] = useState<RecoveryInfo | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
@@ -106,8 +107,57 @@ function AppInner() {
 
   useEffect(() => {
     reload()
+    // Offer to pick up work from a snapshot only when there's nothing open
+    // to lose -- with a graph already on the canvas, a recovery prompt is
+    // just a way to overwrite the work in front of you.
+    api
+      .graph()
+      .then((g) => (Object.keys(g.blocks).length === 0 ? api.recoveryInfo() : null))
+      .then((r) => setRecovery(r?.recovery ?? null))
+      .catch(() => setRecovery(null))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const undo = useCallback(() => api.undo().then(reload).catch(() => {}), [reload])
+  const redo = useCallback(() => api.redo().then(reload).catch(() => {}), [reload])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey && !e.ctrlKey) return
+      const key = e.key.toLowerCase()
+      const isUndo = key === 'z' && !e.shiftKey
+      const isRedo = (key === 'z' && e.shiftKey) || key === 'y'
+      if (!isUndo && !isRedo) return
+      // Text fields and the code editor have their own undo stacks; taking
+      // Ctrl-Z away from someone mid-sentence would be worse than not having
+      // graph undo at all.
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.closest('.cm-editor'))
+      ) {
+        return
+      }
+      e.preventDefault()
+      if (isUndo) undo()
+      else redo()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undo, redo])
+
+  // Edits are always snapshotted server-side for crash recovery, but the
+  // project file is only written when the user saves -- so leaving with
+  // unsaved edits is worth one confirmation.
+  useEffect(() => {
+    if (!graph?.dirty) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault()
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [graph?.dirty])
 
   // Runs (a single block, a cascade, or a full sweep) execute on the server
   // in the background -- see api.py -- so a block that's still "running"
@@ -345,7 +395,69 @@ function AppInner() {
         llmSettings={llmSettings}
         onLlmSettingsChange={setLlmSettings}
         running={anyRunning}
+        dirty={graph?.dirty ?? false}
+        canUndo={graph?.can_undo ?? false}
+        canRedo={graph?.can_redo ?? false}
+        onUndo={undo}
+        onRedo={redo}
+        sampleRows={graph?.sample_rows ?? null}
       />
+      {graph?.sample_rows != null && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '5px 12px',
+            background: '#fef3c7',
+            borderBottom: '1px solid #fde68a',
+            color: '#92400e',
+            fontSize: 12,
+          }}
+        >
+          <strong>Sample mode</strong>
+          <span>
+            every source is capped at the first {graph.sample_rows.toLocaleString()} rows — results are for
+            iterating on, not for reporting.
+          </span>
+          <span style={{ flex: 1 }} />
+          <button onClick={() => api.setSampleMode(null).then(reload)}>Use full data</button>
+        </div>
+      )}
+      {recovery && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '5px 12px',
+            background: 'var(--brand-light)',
+            borderBottom: '1px solid var(--brand-border)',
+            fontSize: 12,
+          }}
+        >
+          <strong>Unsaved work found</strong>
+          <span>
+            {recovery.block_count} block{recovery.block_count === 1 ? '' : 's'}
+            {recovery.project_name ? ` from "${recovery.project_name}"` : ''}
+            {recovery.saved_at ? `, last changed ${new Date(recovery.saved_at).toLocaleString()}` : ''}.
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            className="brand-primary"
+            onClick={() => {
+              api
+                .recover()
+                .then(reload)
+                .then(() => setRecovery(null))
+                .catch((e) => alert(e.message))
+            }}
+          >
+            Restore
+          </button>
+          <button onClick={() => setRecovery(null)}>Dismiss</button>
+        </div>
+      )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>

@@ -95,7 +95,18 @@ class ProjectSession:
         # identity), so an undo should never cost a re-run.
         self.graph = graph_from_dict(snap.graph)
         self.runner.graph = self.graph
-        self.runner.state = copy.deepcopy(snap.state)
+        # Run state is merged, never rolled back wholesale. Undo is about the
+        # graph; what has been *run* is not part of the edit, and restoring
+        # old statuses would throw away results produced since -- including
+        # results from a run still in flight when the edit was made. Putting
+        # the config back is enough on its own, because a status is derived
+        # from the cache key: revert the params and the old key (and its
+        # green status) comes back by itself. The one thing that can't
+        # re-derive is state for a block the undo brings back from the dead,
+        # since deleting it dropped its entry -- so fill only those in.
+        for block_id, run_state in snap.state.items():
+            if block_id in self.graph.blocks and block_id not in self.runner.state:
+                self.runner.state[block_id] = copy.deepcopy(run_state)
 
     @contextmanager
     def edit(self) -> Iterator[None]:
