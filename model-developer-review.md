@@ -846,23 +846,174 @@ These are the decisions with the longest lead time, so worth settling early.
 
 ---
 
-## 8. Smaller developer-experience items
+## 8. Quality of life
 
-- Search / palette over blocks on a large canvas; go-to-block by name.
-- Copy/paste and duplicate blocks; group a selection into a reusable
-  **composite block** (huge for "our standard validation battery").
-- **Reusable block library / templates** shared across projects — a
-  "standard IFRS 9 skeleton" or "standard PD dev pipeline" project template
-  is a strong onboarding story.
-- Notes/annotations on the canvas (sticky notes for reviewers).
-- Undo/redo across graph edits.
-- Diff view for a block's code between versions.
-- Better error surfaces: the failing row/column, not just the traceback.
-- Data preview improvements: filter/sort in the preview, value distribution
-  sparkline per column, quick chart from the preview.
-- Column-role bulk tagging (tag 40 features without 40 clicks) and role
-  inference suggestions from names/dtypes.
-- Export the canvas as an image for documents (needed by §5 anyway).
+Sorted by the moment in the workflow where the friction actually bites,
+rather than as a flat list. These are cheap relative to §3 and they are what
+decides whether someone reaches for this tool or goes back to a notebook —
+a model developer spends far more hours in the inner loop than in the parts
+§1–§3 are about. ⭐ marks the ones I'd argue hardest for.
+
+### 8.1 The inner loop: edit → run → look → fix
+
+- ⭐ **Sample mode.** One global toggle that runs the whole pipeline on the
+  first N rows / an X% sample, then a switch back to full. This is the single
+  biggest time saver in any data pipeline tool — it's what `obs=` is to SAS
+  users — and right now every iteration on a tiny code change pays full data
+  cost. Needs care in one respect: sample mode must be unmistakable in the UI
+  and must never be what a compile or a documented run is based on.
+- ⭐ **"Why is this orange?"** A stale block should say what staled it:
+  *your code changed*, *param `bins` changed*, *upstream `b_003` re-ran*.
+  The runner already knows — it's a cache-key comparison — it just isn't
+  surfaced, and without it a big orange cascade is a mystery.
+- ⭐ **Eject to a REPL/notebook.** "Open this block's inputs in an IPython
+  session / a scratch notebook with `inputs` bound." The one thing notebooks
+  genuinely do better is poke at an intermediate frame ad hoc; rather than
+  compete with that, give people a door. Probably the highest
+  goodwill-per-line-of-code item on this list.
+- **Error surfaces**: the failing row/column and the offending value, not
+  just a traceback; click the traceback line to jump to it in the editor.
+- **Packet diff in the inspector** — for any block, what it did to the data:
+  columns added/removed/retyped, row count delta, null-count delta per
+  column. Answers "did that join blow up my row count" without wiring a
+  display block, and it's the question you ask after every single run.
+- **Run log pane** you can scroll back through, with per-block timing and row
+  counts (§7.9), plus a browser notification when a long run finishes.
+- **Keep editing during a run** — long runs shouldn't freeze the canvas.
+
+### 8.2 The code editor
+
+Block code is currently a plain `<textarea>`. For a tool whose whole premise
+is "blocks contain real Python", that's the weakest link in the experience.
+
+- ⭐ Swap in CodeMirror or Monaco: syntax highlighting, bracket matching,
+  auto-indent, find/replace, and a sane tab/indent story.
+- Autocomplete against `pl.` and the packet/`ColumnMeta` API — even a static
+  stub list helps enormously, and it doubles as the fastest way to teach
+  Polars to someone who only knows pandas.
+- **Column-name autocomplete from the actual upstream packet** — the tool
+  knows the incoming schema, so offer it. Kills the most common typo class.
+- Lint/format on save (ruff), and flag a syntax error *before* a run rather
+  than surfacing it as a red block.
+- Error line markers from the last traceback, in the gutter.
+- Diff view: against the previous version of the block, and against an AI
+  suggestion (§8.8).
+
+### 8.3 Not losing work
+
+There is currently no autosave, no dirty indicator, no `beforeunload` guard
+and no undo — and the delete-block dialog literally says "this can't be
+undone". That combination will eventually cost someone an afternoon.
+
+- ⭐ **Autosave + crash recovery**, with a visible saved/unsaved indicator
+  and a warning on navigating away dirty.
+- ⭐ **Undo/redo across graph edits** (add/delete/move/rewire/param change).
+- **Delete guard that shows the blast radius** — "3 downstream blocks will
+  lose an input", listing them, instead of a generic confirm.
+- **Preserve in-progress AI drafts** and unsaved code edits across a reload;
+  losing a half-reviewed LLM draft is infuriating.
+
+### 8.4 Canvas at scale
+
+Fine at 10 blocks; a real PD pipeline is 40–80 and an IFRS 9 chain more.
+
+- ⭐ **Dim-to-path highlight** — select a block, dim everything that isn't
+  upstream or downstream of it. The fastest way to comprehend someone else's
+  graph, and it directly serves the validator's "what feeds this number"
+  question (§6B).
+- Search / command palette (Cmd-K) over blocks, params and columns;
+  go-to-block by name.
+- Minimap — React Flow ships one and it isn't enabled today.
+- Auto-layout / tidy, snap to grid, align and distribute.
+- Follow-a-wire: click a long wire to highlight both ends and jump between
+  them.
+- Zoom to fit / zoom to selection; named views or bookmarks on big graphs.
+- Lane collapse, and **group a selection into a reusable composite block**
+  (huge for "our standard validation battery").
+- Copy/paste and duplicate blocks, including across projects.
+- Colour/tag blocks; sticky notes for reviewers (§4 review workflow).
+
+### 8.5 Params and configuration
+
+- Column pickers filtered by role and dtype instead of free-text names
+  (§7.6), with multi-select for feature lists.
+- Expression fields (`filter`'s `expr` especially) with column autocomplete
+  and validate-as-you-type rather than failing at run time.
+- ⭐ **Effect preview before running** — "this filter drops 1,243 rows
+  (4.2%)", "this join matches 98.7% of left rows". Cheap to compute on a
+  sample, and it catches the errors that otherwise survive to validation.
+  It also happens to be exactly the content the exclusion waterfall (§1.1)
+  and the join-quality diagnostics need, so the work is shared.
+- Param presets — save a configured block as a named preset to reuse.
+- Show which params were auto-filled by role inference vs. set by hand.
+
+### 8.6 Data preview
+
+- Sort, filter and search within the preview; pin/reorder/resize columns.
+- ⭐ **Render null distinctly from empty string and from `NaN`.** Sounds
+  trivial; it is a genuine and recurring source of silent modelling errors.
+- Sensible formatting: thousands separators, aligned decimals, readable
+  dates, monospaced numerics, and full precision on demand.
+- Per-column mini-histogram/sparkline and fill-rate in the header.
+- Copy selection as TSV/markdown/Excel; export the visible view.
+- Row count with "showing X of N", and jump-to-row.
+- Quick chart from the preview without wiring a plot block.
+
+### 8.7 Roles and metadata ergonomics
+
+- ⭐ **Do role tags survive a source refresh or schema change?** If tagging
+  40 features is lost whenever a CSV gains a column, nobody will tag
+  anything. Worth treating as correctness, not polish.
+- Bulk tagging: multi-select columns, tag in one action; tag by pattern
+  (`*_ratio` → feature).
+- Role inference suggestions from names, dtypes and sample values, offered
+  as a reviewable batch rather than silently applied.
+- A project-wide metadata table: every column, role, description, where it
+  was created — editable in one place instead of block by block. Doubles as
+  the feature dictionary export (§1.2).
+
+### 8.8 The AI loop
+
+It's a differentiator, so its ergonomics matter more than average.
+
+- ⭐ **Show the prompt that will be sent**, and let it be edited before
+  sending. Trust, debuggability, and it's how people learn to get good
+  results.
+- Stream the response — a local model with no feedback for 40 seconds reads
+  as a hang.
+- **Conversational iteration on a draft** rather than one-shot: "good, but
+  use Polars expressions instead of `map_elements`". Currently a reject and
+  a full retry.
+- Diff + per-hunk accept/reject on a suggested fix, not all-or-nothing.
+- **"Explain this block"** — for inherited projects and for reviewers, and
+  it feeds §5.3's documentation drafting from the same plumbing.
+- Token/cost and latency indicator per call; a running total per session.
+
+### 8.9 Onboarding and reuse
+
+- ⭐ **A demo project that actually runs**, shipped against `sample_data/`.
+  The repo has the CSVs but no project JSON — so the first-run experience is
+  an empty canvas, which is the hardest possible start.
+- **Project templates** — "standard PD development", "IFRS 9 skeleton" — as
+  both onboarding and house-standard enforcement.
+- Recent files list; drag-and-drop a CSV onto the canvas to create a read
+  block pre-configured.
+- Empty-state guidance on the canvas and in the inspector.
+
+### 8.10 Output and handoff
+
+- Copy the compiled script to clipboard; syntax-highlight it; diff it
+  against the last compile.
+- ⭐ Export the canvas as an image (needed by §5 anyway, so it pays twice).
+- Copy any result table as markdown for pasting into a review comment or a
+  document.
+
+### If I had to pick five
+
+Sample mode (§8.1), autosave + undo (§8.3), a real code editor (§8.2),
+"why is this orange" (§8.1), and a runnable demo project (§8.9). Together
+they're a fraction of the cost of one item in §3 and they change how the
+tool feels to use every single day.
 
 ---
 
@@ -880,6 +1031,10 @@ Not a plan, just my read on where the value/effort ratio sits.
 - Block-level assumption/rationale metadata fields (§4) — cheap now,
   expensive to retrofit once projects exist
 - Static HTML dashboard export (§6, option 2)
+- **The five at the end of §8** — sample mode, autosave + undo, a real code editor,
+  "why is this orange", a runnable demo project. Cheapest items on this
+  whole list per unit of daily benefit, and two of them (autosave, undo)
+  are really defect-prevention rather than polish
 
 **High value, medium effort**
 - Auto-generated model development document (§5.2) + LLM narrative with
