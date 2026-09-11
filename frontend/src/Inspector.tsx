@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
-import { PARAM_SPECS, ParamsForm } from './ParamsForm'
+import { PARAM_SPECS, ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
 
 export function Inspector({
@@ -164,6 +164,14 @@ export function Inspector({
   }
 
   const dataframePort = block.outputs.find((p) => p.type === 'dataframe' || dynamicDataframePorts.has(p.name))?.name
+
+  let currentParams: Record<string, unknown> = {}
+  try {
+    currentParams = JSON.parse(paramsText || '{}')
+  } catch {
+    currentParams = {}
+  }
+  const columnFieldSpecs = block.is_custom ? deriveColumnFieldSpecs(currentParams) : []
 
   const viewData = () =>
     run(async () => {
@@ -361,12 +369,26 @@ export function Inspector({
               disabled={busy}
             />
           ) : (
-            <textarea
-              value={paramsText}
-              onChange={(e) => setParamsText(e.target.value)}
-              rows={8}
-              style={{ width: '100%', fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
-            />
+            <>
+              {columnFieldSpecs.length > 0 && (
+                <ParamsForm
+                  spec={columnFieldSpecs}
+                  paramsText={paramsText}
+                  setParamsText={setParamsText}
+                  columns={inputColumns}
+                  disabled={busy}
+                />
+              )}
+              {columnFieldSpecs.length > 0 && (
+                <div style={{ color: '#9ca3af', margin: '8px 0 2px' }}>Other params (JSON)</div>
+              )}
+              <textarea
+                value={paramsText}
+                onChange={(e) => setParamsText(e.target.value)}
+                rows={8}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
+              />
+            </>
           )}
           {paramsError && <div style={{ color: '#b91c1c' }}>{paramsError}</div>}
           <button disabled={busy} onClick={saveParams} style={{ marginTop: 4 }}>

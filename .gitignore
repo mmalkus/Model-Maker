@@ -7,3 +7,4 @@ output/
 *.egg-info/
 modelmaker/static/
 build/
+.env
