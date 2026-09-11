@@ -190,6 +190,12 @@ class LaneUpsert(BaseModel):
     height: float | None = None
 
 
+class SampleModeUpdate(BaseModel):
+    # None turns sample mode off; an int is the row cap applied to every
+    # input block's output (see Runner.sample_rows).
+    rows: int | None = None
+
+
 class LoadRequest(BaseModel):
     path: str
 
@@ -254,7 +260,12 @@ def _source_for_block(block) -> str | None:
 def _block_out(block_id: str) -> dict[str, Any]:
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
+    status = SESSION.runner.status(block_id)
     return {
+        # Why a stale block is stale (see Runner.stale_reason) -- only ever
+        # asked for an orange block, since that's the state whose cause isn't
+        # self-evident: grey has never run and red carries its error.
+        "stale_reason": SESSION.runner.stale_reason(block_id) if status == "orange" else None,
         "id": block.id,
         "block_type": block.block_type,
         "is_custom": block.is_custom,
@@ -272,7 +283,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "port_names": block.port_names,
         "group_by": block.group_by,
         "max_workers": block.max_workers,
-        "status": SESSION.runner.status(block_id),
+        "status": status,
         "last_error": st.last_error if st else None,
         "last_successful_read_at": st.last_successful_read_at if st else None,
         "last_attempt_at": st.last_attempt_at if st else None,
@@ -285,6 +296,10 @@ def _graph_out() -> dict[str, Any]:
     return {
         "project_name": SESSION.project_name,
         "project_path": str(SESSION.project_path) if SESSION.project_path else None,
+        "dirty": SESSION.dirty,
+        "can_undo": SESSION.can_undo,
+        "can_redo": SESSION.can_redo,
+        "sample_rows": SESSION.runner.sample_rows,
         "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in SESSION.graph.lanes.items()},
         "blocks": {bid: _block_out(bid) for bid in SESSION.graph.blocks},
         "run_error": run_error,
@@ -443,22 +458,66 @@ def save_project_ep(req: SaveRequest) -> dict[str, Any]:
     return {"path": str(path)}
 
 
+@app.get("/api/project/recovery")
+def recovery_info_ep() -> dict[str, Any]:
+    """Metadata about the crash-recovery snapshot, if there is one. Offered
+    to the user on a fresh start; never applied on its own."""
+    return {"recovery": SESSION.recovery_info()}
+
+
+@app.post("/api/project/recover")
+def recover_ep() -> dict[str, Any]:
+    try:
+        SESSION.recover()
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return _graph_out()
+
+
+@app.post("/api/undo")
+def undo_ep() -> dict[str, Any]:
+    if not SESSION.undo():
+        raise HTTPException(409, "nothing to undo")
+    return _graph_out()
+
+
+@app.post("/api/redo")
+def redo_ep() -> dict[str, Any]:
+    if not SESSION.redo():
+        raise HTTPException(409, "nothing to redo")
+    return _graph_out()
+
+
+@app.put("/api/sample_mode")
+def set_sample_mode(req: SampleModeUpdate) -> dict[str, Any]:
+    """Turn sample mode on (rows=N) or off (rows=null). Changes every
+    block's cache key, so statuses shift immediately -- nothing re-runs
+    until asked. Safe mid-run: a run in flight is pinned to the sample
+    setting it started with (see Runner.pin)."""
+    try:
+        SESSION.set_sample_rows(req.rows)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _graph_out()
+
+
 @app.post("/api/blocks")
 def create_block(req: BlockCreate) -> dict[str, Any]:
     try:
-        block = SESSION.add_block(
-            category=req.category,
-            block_type=req.block_type,
-            name=req.name,
-            lane=req.lane,
-            x=req.x,
-            y=req.y,
-            params=req.params,
-            code=req.code,
-            inputs=req.inputs,
-            outputs=req.outputs,
-            metadata_transform=req.metadata_transform,
-        )
+        with SESSION.edit():
+            block = SESSION.add_block(
+                category=req.category,
+                block_type=req.block_type,
+                name=req.name,
+                lane=req.lane,
+                x=req.x,
+                y=req.y,
+                params=req.params,
+                code=req.code,
+                inputs=req.inputs,
+                outputs=req.outputs,
+                metadata_transform=req.metadata_transform,
+            )
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _block_out(block.id)
@@ -468,7 +527,8 @@ def create_block(req: BlockCreate) -> dict[str, Any]:
 def update_block(block_id: str, req: BlockUpdate) -> dict[str, Any]:
     if block_id not in SESSION.graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
-    SESSION.update_block(block_id, **req.model_dump(exclude_unset=True))
+    with SESSION.edit():
+        SESSION.update_block(block_id, **req.model_dump(exclude_unset=True))
     return _block_out(block_id)
 
 
@@ -482,7 +542,8 @@ def set_column_role(block_id: str, req: ColumnRoleUpdate) -> dict[str, Any]:
     invalidation."""
     _require_block(block_id)
     try:
-        SESSION.set_column_role(block_id, req.column, req.role)
+        with SESSION.edit():
+            SESSION.set_column_role(block_id, req.column, req.role)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _block_out(block_id)
@@ -499,7 +560,8 @@ def input_schema_ep(block_id: str) -> dict[str, list[dict[str, str]]]:
 
 @app.delete("/api/blocks/{block_id}")
 def delete_block(block_id: str) -> dict[str, str]:
-    SESSION.delete_block(block_id)
+    with SESSION.edit():
+        SESSION.delete_block(block_id)
     return {"deleted": block_id}
 
 
@@ -561,7 +623,8 @@ def create_wire(req: WireCreate) -> dict[str, Any]:
         if bid not in SESSION.graph.blocks:
             raise HTTPException(404, f"no such block: {bid}")
     try:
-        wire = SESSION.add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
+        with SESSION.edit():
+            wire = SESSION.add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {
@@ -576,7 +639,8 @@ def create_wire(req: WireCreate) -> dict[str, Any]:
 
 @app.delete("/api/wires/{wire_id}")
 def delete_wire(wire_id: str) -> dict[str, str]:
-    SESSION.delete_wire(wire_id)
+    with SESSION.edit():
+        SESSION.delete_wire(wire_id)
     return {"deleted": wire_id}
 
 
@@ -588,7 +652,8 @@ def rename_port(block_id: str, req: PortNameUpdate) -> dict[str, Any]:
     variable name for it (see compiler.compile_graph)."""
     _require_block(block_id)
     try:
-        SESSION.rename_port(block_id, req.port, req.name)
+        with SESSION.edit():
+            SESSION.rename_port(block_id, req.port, req.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _block_out(block_id)
@@ -596,13 +661,15 @@ def rename_port(block_id: str, req: PortNameUpdate) -> dict[str, Any]:
 
 @app.put("/api/lanes")
 def upsert_lane(req: LaneUpsert) -> dict[str, Any]:
-    SESSION.set_lane(req.id, req.name, req.order, height=req.height)
+    with SESSION.edit():
+        SESSION.set_lane(req.id, req.name, req.order, height=req.height)
     return _graph_out()["lanes"]
 
 
 @app.delete("/api/lanes/{lane_id}")
 def delete_lane(lane_id: str) -> dict[str, Any]:
-    SESSION.delete_lane(lane_id)
+    with SESSION.edit():
+        SESSION.delete_lane(lane_id)
     return _graph_out()["lanes"]
 
 

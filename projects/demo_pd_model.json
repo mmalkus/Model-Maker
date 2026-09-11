@@ -1,0 +1,427 @@
+{
+  "blocks": {
+    "b_clean": {
+      "block_type": "standard",
+      "category": "filter",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_data_prep",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "Drop implausible records",
+      "params": {
+        "expr": "annual_income > 0 AND dti >= 0 AND credit_score > 0"
+      },
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "out",
+            "required": true,
+            "type": "dataframe"
+          }
+        ]
+      },
+      "position": {
+        "x": 300,
+        "y": 60
+      }
+    },
+    "b_fit": {
+      "block_type": "standard",
+      "category": "logistic_regression",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_estimation",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "PD model",
+      "params": {
+        "features": [
+          "credit_score",
+          "dti",
+          "revolving_utilization_woe",
+          "num_late_payments_2yr",
+          "employment_years"
+        ],
+        "max_iter": 500
+      },
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "predictions",
+            "required": true,
+            "type": "dataframe"
+          },
+          {
+            "name": "model",
+            "required": false,
+            "type": "model"
+          }
+        ]
+      },
+      "position": {
+        "x": 180,
+        "y": 600
+      }
+    },
+    "b_gini": {
+      "block_type": "output",
+      "category": "auc_gini",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_validation",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "AUC / Gini (train)",
+      "params": {},
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "metric",
+            "required": true,
+            "type": "scalar_metric"
+          }
+        ]
+      },
+      "position": {
+        "x": 40,
+        "y": 870
+      }
+    },
+    "b_ks": {
+      "block_type": "output",
+      "category": "ks_test",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_validation",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "KS (train)",
+      "params": {},
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "metric",
+            "required": true,
+            "type": "scalar_metric"
+          }
+        ]
+      },
+      "position": {
+        "x": 280,
+        "y": 870
+      }
+    },
+    "b_load": {
+      "block_type": "input",
+      "category": "read_csv",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {
+        "application_date": "date",
+        "application_id": "id",
+        "default_flag": "target"
+      },
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_data_prep",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "Load applications",
+      "params": {
+        "path": "sample_data/pd_model_data.csv"
+      },
+      "port_names": {
+        "out": "raw applications"
+      },
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "out",
+            "required": true,
+            "type": "dataframe"
+          }
+        ]
+      },
+      "position": {
+        "x": 40,
+        "y": 60
+      }
+    },
+    "b_psi": {
+      "block_type": "output",
+      "category": "psi_test",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_validation",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "PSI: credit score, train vs test",
+      "params": {
+        "bins": 10,
+        "col": "credit_score"
+      },
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "expected",
+            "required": true,
+            "type": "dataframe"
+          },
+          {
+            "name": "actual",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "metric",
+            "required": true,
+            "type": "scalar_metric"
+          }
+        ]
+      },
+      "position": {
+        "x": 500,
+        "y": 870
+      }
+    },
+    "b_split": {
+      "block_type": "standard",
+      "category": "train_test_split",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_feature_eng",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "Train / test split",
+      "params": {
+        "seed": 42,
+        "test_size": 0.3
+      },
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "train",
+            "required": true,
+            "type": "dataframe"
+          },
+          {
+            "name": "test",
+            "required": true,
+            "type": "dataframe"
+          }
+        ]
+      },
+      "position": {
+        "x": 340,
+        "y": 330
+      }
+    },
+    "b_woe": {
+      "block_type": "standard",
+      "category": "woe_transform",
+      "code_ref": null,
+      "code_version": 1,
+      "column_role_overrides": {},
+      "group_by": null,
+      "is_custom": false,
+      "lane": "lane_feature_eng",
+      "max_workers": null,
+      "metadata_transform": null,
+      "name": "WoE: revolving utilization",
+      "params": {
+        "bins": 8,
+        "col": "revolving_utilization"
+      },
+      "port_names": {},
+      "ports": {
+        "inputs": [
+          {
+            "name": "df",
+            "required": true,
+            "type": "dataframe"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "out",
+            "required": true,
+            "type": "dataframe"
+          }
+        ]
+      },
+      "position": {
+        "x": 40,
+        "y": 330
+      }
+    }
+  },
+  "lanes": {
+    "lane_data_prep": {
+      "height": 260.0,
+      "name": "Data Prep",
+      "order": 0
+    },
+    "lane_estimation": {
+      "height": 260.0,
+      "name": "Estimation",
+      "order": 2
+    },
+    "lane_feature_eng": {
+      "height": 260.0,
+      "name": "Feature Engineering",
+      "order": 1
+    },
+    "lane_validation": {
+      "height": 260.0,
+      "name": "Validation",
+      "order": 3
+    }
+  },
+  "modelmaker_version": 1,
+  "project_name": "demo_pd_model",
+  "wires": {
+    "w_01": {
+      "from": {
+        "block": "b_fit",
+        "port": "predictions"
+      },
+      "to": {
+        "block": "b_gini",
+        "port": "df"
+      }
+    },
+    "w_02": {
+      "from": {
+        "block": "b_fit",
+        "port": "predictions"
+      },
+      "to": {
+        "block": "b_ks",
+        "port": "df"
+      }
+    },
+    "w_03": {
+      "from": {
+        "block": "b_split",
+        "port": "train"
+      },
+      "to": {
+        "block": "b_fit",
+        "port": "df"
+      }
+    },
+    "w_04": {
+      "from": {
+        "block": "b_split",
+        "port": "train"
+      },
+      "to": {
+        "block": "b_psi",
+        "port": "expected"
+      }
+    },
+    "w_05": {
+      "from": {
+        "block": "b_split",
+        "port": "test"
+      },
+      "to": {
+        "block": "b_psi",
+        "port": "actual"
+      }
+    },
+    "w_06": {
+      "from": {
+        "block": "b_woe",
+        "port": "out"
+      },
+      "to": {
+        "block": "b_split",
+        "port": "df"
+      }
+    },
+    "w_07": {
+      "from": {
+        "block": "b_load",
+        "port": "out"
+      },
+      "to": {
+        "block": "b_clean",
+        "port": "df"
+      }
+    },
+    "w_08": {
+      "from": {
+        "block": "b_clean",
+        "port": "out"
+      },
+      "to": {
+        "block": "b_woe",
+        "port": "df"
+      }
+    }
+  }
+}

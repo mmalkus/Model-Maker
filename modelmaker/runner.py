@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import multiprocessing
@@ -44,6 +45,70 @@ MP_CONTEXT = multiprocessing.get_context("spawn")
 POLL_INTERVAL = 0.05
 
 
+@dataclass(frozen=True)
+class RunPlan:
+    """An immutable view of everything a block's cache key is derived from:
+    the graph, each input block's read counter, and the sample-row cap.
+
+    Runs execute against a pinned plan (see Runner.pin) while status reads
+    answer against a live one, which is what lets the graph be edited while
+    a run is in flight without the run and the canvas contradicting each
+    other."""
+
+    graph: Graph
+    read_counters: dict[str, int]
+    sample_rows: int | None
+
+    def basis(self, block_id: str, _stack: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """The key basis as a plain dict -- hashed into the key by `key`, and
+        kept verbatim on a successful run (RunState.last_successful_basis) so
+        stale_reason can diff it and say *what* changed.
+
+        `_stack` guards against a cyclic graph recursing forever (and
+        crashing the process with a RecursionError): wires that would
+        introduce a cycle are rejected at creation time (see
+        Graph.creates_cycle / session.add_wire), but a project file loaded
+        from disk could still contain one, and every read of block status
+        -- including a plain GET /api/graph -- calls this, so it must fail
+        cleanly rather than blow the stack."""
+        if block_id in _stack:
+            raise RuntimeError(f"cycle detected in graph at block '{block_id}'")
+        block = self.graph.blocks[block_id]
+        if block.block_type == "input":
+            basis: dict[str, Any] = {
+                "category": block.category,
+                "code_version": block.code_version,
+                "params": block.params,
+                "column_role_overrides": block.column_role_overrides,
+                "read_counter": self.read_counters.get(block_id, 0),
+            }
+            # Only present when sample mode is actually on, so ordinary
+            # full-data keys are exactly what they were before sample mode
+            # existed -- a cache built by an older version stays valid, and
+            # turning sample mode on and back off returns to those same keys.
+            if self.sample_rows is not None:
+                basis["sample_rows"] = self.sample_rows
+            return basis
+        next_stack = _stack | {block_id}
+        upstream = {
+            port: f"{_hash(self.basis(wire.from_block, next_stack))}:{wire.from_port}"
+            for port, wire in sorted(self.graph.input_wires(block_id).items())
+        }
+        return {
+            "category": block.category,
+            "code_version": block.code_version,
+            "params": block.params,
+            "column_role_overrides": block.column_role_overrides,
+            "code": block.code if block.is_custom else None,
+            "upstream": upstream,
+            "group_by": block.group_by,
+            "max_workers": block.max_workers,
+        }
+
+    def key(self, block_id: str) -> str:
+        return _hash(self.basis(block_id))
+
+
 class RunCancelled(RuntimeError):
     """Raised inside Runner._dispatch when the in-flight run is stopped via
     Runner.cancel() -- caught by run_block's normal exception handling, so a
@@ -59,6 +124,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _short(value: Any, limit: int = 24) -> str:
+    """A param value rendered small enough to sit inside a one-line staleness
+    message (see Runner._describe_local_change)."""
+    text = json.dumps(value, default=str) if not isinstance(value, str) else value
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
 @dataclass
 class RunState:
     last_successful_key: str | None = None
@@ -69,6 +141,12 @@ class RunState:
     last_error: str | None = None
     read_counter: int = 0  # bumped by Refresh; part of an input block's key
     last_probe_value: Any = None
+    # The full key basis (see Runner._basis) as it stood at the last
+    # successful run, kept so staleness can be *explained* rather than just
+    # detected: the key alone is a hash, so comparing it to the current one
+    # says that something changed but never what. Diffed against the current
+    # basis by Runner.stale_reason.
+    last_successful_basis: dict[str, Any] | None = None
 
 
 class Runner:
@@ -82,10 +160,22 @@ class Runner:
     # of what an individual block's max_workers asks for.
     MAX_GROUP_WORKERS = 8
 
-    def __init__(self, graph: Graph, cache: CacheStore | None = None, output_dir: str = "./output"):
+    def __init__(
+        self,
+        graph: Graph,
+        cache: CacheStore | None = None,
+        output_dir: str = "./output",
+        sample_rows: int | None = None,
+    ):
         self.graph = graph
         self.cache = cache or CacheStore()
         self.output_dir = output_dir
+        # Sample mode: when set, every input block's dataframe outputs are
+        # truncated to this many rows, so the whole pipeline can be iterated
+        # on cheaply. Folded into input blocks' key basis (see _basis), so
+        # toggling it invalidates the graph the same way any other change
+        # does -- sampled and full results are never mixed in one cache.
+        self.sample_rows = sample_rows
         self.state: dict[str, RunState] = {}
         # block_id -> {"cancel_event": ...} for whichever block is currently
         # mid-dispatch (see _dispatch) -- read by status()/is_running(), and
@@ -125,48 +215,56 @@ class Runner:
             h["cancel_event"].set()
         return bool(handles)
 
-    def compute_key(self, block_id: str, _stack: frozenset[str] = frozenset()) -> str:
-        """Lineage-based cache key: hashes block identity/config plus the
-        upstream blocks' *keys*, never the underlying DataFrame content, so
-        computing it is cheap no matter how large the data is.
+    def _live_plan(self) -> RunPlan:
+        """A view over the graph as it is *right now* -- what status reads
+        answer against, so the canvas always reflects the current graph even
+        while a run built on an older one is still executing."""
+        return RunPlan(
+            graph=self.graph,
+            read_counters={bid: st.read_counter for bid, st in self.state.items()},
+            sample_rows=self.sample_rows,
+        )
 
-        `_stack` guards against a cyclic graph recursing forever (and
-        crashing the process with a RecursionError): wires that would
-        introduce a cycle are rejected at creation time (see
-        Graph.creates_cycle / session.add_wire), but a project file loaded
-        from disk could still contain one, and every read of block status
-        -- including a plain GET /api/graph -- calls this, so it must fail
-        cleanly rather than blow the stack."""
-        if block_id in _stack:
-            raise RuntimeError(f"cycle detected in graph at block '{block_id}'")
-        block = self.graph.blocks[block_id]
-        if block.block_type == "input":
-            basis = {
-                "category": block.category,
-                "code_version": block.code_version,
-                "params": block.params,
-                "column_role_overrides": block.column_role_overrides,
-                "read_counter": self._st(block_id).read_counter,
-            }
-            return _hash(basis)
-        next_stack = _stack | {block_id}
-        upstream = {
-            port: f"{self.compute_key(wire.from_block, next_stack)}:{wire.from_port}"
-            for port, wire in sorted(self.graph.input_wires(block_id).items())
-        }
-        basis = {
-            "category": block.category,
-            "code_version": block.code_version,
-            "params": block.params,
-            "column_role_overrides": block.column_role_overrides,
-            "code": block.code if block.is_custom else None,
-            "upstream": upstream,
-            "group_by": block.group_by,
-            "max_workers": block.max_workers,
-        }
-        return _hash(basis)
+    def pin(self) -> RunPlan:
+        """Freeze everything a run's cache keys depend on, for the duration
+        of that run. The graph is deep-copied, so edits made while the run is
+        in flight -- including an undo, which replaces the graph object
+        wholesale -- can't reach the blocks being executed, and a block's
+        code and params can never be read from two different versions of it.
+
+        A run therefore always describes one coherent version of the graph.
+        Results land under that version's keys; a block edited mid-run simply
+        computes a different key afterwards and shows as stale, with
+        stale_reason naming the edit -- which is the truth, and costs no
+        extra bookkeeping because the cache is keyed by configuration
+        rather than by when it ran."""
+        return RunPlan(
+            graph=copy.deepcopy(self.graph),
+            read_counters={bid: st.read_counter for bid, st in self.state.items()},
+            sample_rows=self.sample_rows,
+        )
+
+    def _basis(self, block_id: str) -> dict[str, Any]:
+        return self._live_plan().basis(block_id)
+
+    def compute_key(self, block_id: str) -> str:
+        """Lineage-based cache key for the block as it stands now. The
+        execution path uses a pinned plan's key instead (see pin)."""
+        return self._live_plan().key(block_id)
+
+    def _is_current(self, block_id: str, plan: RunPlan) -> bool:
+        """Whether this block's cached output is the one `plan` asks for --
+        the execution path's equivalent of `status() == "green"`, asked
+        against the run's own pinned version of the graph rather than
+        against whatever the canvas currently shows."""
+        return self._st(block_id).last_successful_key == plan.key(block_id)
 
     def status(self, block_id: str) -> Status:
+        # A block can be absent from the live graph while a run pinned to an
+        # older version of it is still executing (see pin) -- it has no
+        # current status, rather than being an error to look one up.
+        if block_id not in self.graph.blocks:
+            return "grey"
         if self.is_running(block_id):
             return "running"
         st = self._st(block_id)
@@ -187,27 +285,143 @@ class Runner:
             return "orange"
         return "grey"
 
-    def _gather_inputs(self, block_id: str) -> dict[str, Any]:
+    def stale_reason(self, block_id: str) -> str | None:
+        """Why this block's cached output is no longer current, in one short
+        phrase -- the answer to "why did this go orange?", which the key on
+        its own can't give (it's a hash: it says *that* something changed,
+        never what). None when there's nothing to explain (never run, or
+        still current).
+
+        Local changes are reported in preference to upstream ones, and an
+        upstream change is followed to the block that actually caused it, so
+        a long cascade names its origin rather than just "the block before
+        me changed"."""
+        st = self._st(block_id)
+        if st.last_successful_basis is None:
+            return None
+        try:
+            current = self._basis(block_id)
+        except RuntimeError:
+            return None
+        if current == st.last_successful_basis:
+            return None
+        return self._describe_change(block_id, st.last_successful_basis, current)
+
+    def _describe_change(self, block_id: str, old: dict[str, Any], new: dict[str, Any], depth: int = 0) -> str | None:
+        local = self._describe_local_change(old, new)
+        if local:
+            return "; ".join(local)
+
+        old_up: dict[str, str] = old.get("upstream", {})
+        new_up: dict[str, str] = new.get("upstream", {})
+        wires = self.graph.input_wires(block_id)
+        reasons: list[str] = []
+        for port in sorted(set(old_up) | set(new_up)):
+            if old_up.get(port) == new_up.get(port):
+                continue
+            if port not in old_up:
+                reasons.append(f"input '{port}' was connected")
+                continue
+            wire = wires.get(port)
+            if wire is None or port not in new_up:
+                reasons.append(f"input '{port}' was disconnected")
+                continue
+            # Values are "<upstream key>:<upstream port>" -- a differing port
+            # with an identical key means the wire was moved to a different
+            # output of the same block, which is a rewire, not a re-run.
+            if old_up[port].split(":", 1)[0] == new_up[port].split(":", 1)[0]:
+                reasons.append(f"input '{port}' was rewired to another output of '{self._block_name(wire.from_block)}'")
+                continue
+            reasons.append(self._describe_upstream(wire.from_block, depth))
+        # Two inputs fed by the same disturbance (a split block's train and
+        # test, say) would otherwise say the same thing twice.
+        return "; ".join(dict.fromkeys(r for r in reasons if r)) or None
+
+    @staticmethod
+    def _describe_local_change(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+        reasons: list[str] = []
+        if old.get("category") != new.get("category"):
+            reasons.append("the block was replaced with a different kind")
+        if old.get("code_version") != new.get("code_version") or old.get("code") != new.get("code"):
+            reasons.append("its code changed")
+        old_params, new_params = old.get("params", {}) or {}, new.get("params", {}) or {}
+        if old_params != new_params:
+            changed = sorted(k for k in set(old_params) | set(new_params) if old_params.get(k) != new_params.get(k))
+            shown = ", ".join(f"'{k}'" for k in changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
+            if len(changed) == 1:
+                k = changed[0]
+                reasons.append(f"param {shown} changed ({_short(old_params.get(k))} → {_short(new_params.get(k))})")
+            else:
+                reasons.append(f"params {shown} changed")
+        if old.get("column_role_overrides") != new.get("column_role_overrides"):
+            reasons.append("a column role was retagged")
+        if old.get("group_by") != new.get("group_by") or old.get("max_workers") != new.get("max_workers"):
+            reasons.append("its grouping changed")
+        if old.get("read_counter") != new.get("read_counter"):
+            reasons.append("its source was re-read")
+        if old.get("sample_rows") != new.get("sample_rows"):
+            reasons.append("sample mode changed")
+        return reasons
+
+    # How far up a chain of stale blocks to look for the edit that started
+    # it. The message doesn't grow with depth (see _describe_upstream), so
+    # this only bounds work, not readability.
+    MAX_STALE_DEPTH = 8
+
+    def _describe_upstream(self, up_id: str, depth: int) -> str:
+        """Why an upstream block's output differs, phrased from this block's
+        point of view. Recurses (bounded) so a cascade names the edit that
+        started it rather than just the neighbour that passed it on."""
+        name = self._block_name(up_id)
+        up_st = self._st(up_id)
+        if depth < self.MAX_STALE_DEPTH and up_st.last_successful_basis is not None:
+            try:
+                sub = self._describe_change(up_id, up_st.last_successful_basis, self._basis(up_id), depth + 1)
+            except RuntimeError:
+                sub = None
+            if sub:
+                # A reason that is itself about an upstream block already
+                # names the origin -- pass it through rather than nesting
+                # another "upstream X changed:" in front of it, which is how
+                # a five-block chain turns into an unreadable sentence.
+                return sub if sub.startswith("upstream ") else f"upstream '{name}' changed: {sub}"
+        return f"upstream '{name}' changed"
+
+    def _block_name(self, block_id: str) -> str:
+        block = self.graph.blocks.get(block_id)
+        return block.name if block else block_id
+
+    def _gather_inputs(self, block_id: str, plan: RunPlan) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for port, wire in self.graph.input_wires(block_id).items():
-            if self.status(wire.from_block) != "green":
+        for port, wire in plan.graph.input_wires(block_id).items():
+            # Asked against the run's own version of the graph: an upstream
+            # block the user has edited since this run started is stale on
+            # the canvas, but the output this run computed for it is still
+            # exactly what this run should consume.
+            if not self._is_current(wire.from_block, plan):
                 raise RuntimeError(f"input block '{wire.from_block}' is not green")
-            pred_st = self._st(wire.from_block)
-            entry = self.cache.get(pred_st.last_successful_key)  # type: ignore[arg-type]
+            entry = self.cache.get(plan.key(wire.from_block))
             if entry is None:
                 raise RuntimeError(f"missing cached output for '{wire.from_block}'")
             result[port] = entry.outputs[wire.from_port]
         return result
 
-    def run_block(self, block_id: str) -> Status:
-        """Requires all of this block's inputs to currently be green."""
-        block = self.graph.blocks[block_id]
+    def run_block(self, block_id: str, plan: RunPlan | None = None) -> Status:
+        """Requires all of this block's inputs to currently be green.
+
+        Executes against `plan` -- a frozen view of the graph (see pin) --
+        so that everything this run reads about the block, from its params
+        to the code handed to the worker, comes from one coherent version of
+        it. A single-block run pins its own."""
+        plan = plan or self.pin()
+        block = plan.graph.blocks[block_id]
         st = self._st(block_id)
-        key = self.compute_key(block_id)
+        basis = plan.basis(block_id)
+        key = _hash(basis)
         st.last_attempt_key = key
         st.last_attempt_at = _now()
         try:
-            input_packets = self._gather_inputs(block_id)
+            input_packets = self._gather_inputs(block_id, plan)
             plain_inputs = {
                 port: (p.data if isinstance(p, DataFramePacket) else p) for port, p in input_packets.items()
             }
@@ -237,7 +451,7 @@ class Runner:
             if group_col:
                 raw = self._run_grouped(block_id, block, group_col, call_kwargs)
             else:
-                results = self._dispatch(block_id, {None: call_kwargs}, max_workers=1)
+                results = self._dispatch(block_id, block, {None: call_kwargs}, max_workers=1)
                 raw = results[None]
 
             out_names = [p.name for p in block.outputs]
@@ -247,6 +461,14 @@ class Runner:
                 raw_outputs = {out_names[0]: raw}
             else:
                 raw_outputs = dict(zip(out_names, raw))
+
+            if block.block_type == "input" and plan.sample_rows is not None:
+                # Sample mode truncates at the source, so every downstream
+                # block sees the sample without needing to know it exists.
+                raw_outputs = {
+                    k: (v.head(plan.sample_rows) if isinstance(v, pl.DataFrame) else v)
+                    for k, v in raw_outputs.items()
+                }
 
             data_outputs = {k: v for k, v in raw_outputs.items() if isinstance(v, pl.DataFrame)}
             transform = block.resolved_metadata_transform()
@@ -304,6 +526,7 @@ class Runner:
 
             self.cache.set(key, packets)
             st.last_successful_key = key
+            st.last_successful_basis = basis
             st.failed = False
             st.last_error = None
             if block.block_type == "input":
@@ -313,9 +536,17 @@ class Runner:
             st.last_error = f"{type(e).__name__}: {e}"
         return self.status(block_id)
 
-    def _dispatch(self, block_id: str, tasks: dict[Any, dict[str, Any]], max_workers: int) -> dict[Any, Any]:
+    def _dispatch(
+        self, block_id: str, block: BlockInstance, tasks: dict[Any, dict[str, Any]], max_workers: int
+    ) -> dict[Any, Any]:
         """Run each of `tasks` (an arbitrary key -> call kwargs) in its own
         subprocess, up to `max_workers` at a time, and return {key: result}.
+
+        `block` is the caller's pinned copy, never a fresh lookup in the live
+        graph: the kwargs were built from that same copy, and re-reading here
+        is how a code edit landing mid-run used to send *new* code to the
+        worker alongside *old* params -- producing output that matched
+        neither, cached under a key describing the old version.
         Blocks the calling thread until every task finishes, the run is
         cancelled (see cancel(), raises RunCancelled), or a worker dies
         without reporting a result -- treated as a crash (segfault, OS
@@ -325,7 +556,6 @@ class Runner:
         including a group_by fan-out with far more groups or memory use
         than expected -- happens in a child process, so it can only take
         itself down, never this one."""
-        block = self.graph.blocks[block_id]
         result_queue = MP_CONTEXT.Queue()
         cancel_event = MP_CONTEXT.Event()
         pending = list(tasks.items())
@@ -424,7 +654,7 @@ class Runner:
             tasks[gval] = gkwargs
 
         max_workers = max(1, min(block.max_workers or self.MAX_GROUP_WORKERS, self.MAX_GROUP_WORKERS, n_groups))
-        results = self._dispatch(block_id, tasks, max_workers)
+        results = self._dispatch(block_id, block, tasks, max_workers)
         return self._combine_group_results(block, group_col, group_values, results)
 
     @staticmethod
@@ -464,69 +694,63 @@ class Runner:
                 combined.append(dict(zip(group_values, values)))
         return combined[0] if len(combined) == 1 else tuple(combined)
 
-    def _ordered_ancestors(self, block_id: str) -> list[str]:
-        anc = self.graph.ancestors([block_id])
+    def _ordered_ancestors(self, block_id: str, plan: RunPlan) -> list[str]:
+        anc = plan.graph.ancestors([block_id])
         anc.discard(block_id)
-        order = self.graph.topo_order()
+        order = plan.graph.topo_order()
         return [b for b in order if b in anc]
 
     def run_to_here(self, block_id: str) -> Status:
         """Cascades: runs whatever upstream chain isn't green, then this block."""
         self._cancel_requested.clear()
-        for pred in self._ordered_ancestors(block_id):
+        plan = self.pin()
+        for pred in self._ordered_ancestors(block_id, plan):
             if self._cancel_requested.is_set():
                 return self.status(block_id)
-            if self.graph.blocks[pred].block_type == "input":
+            if plan.graph.blocks[pred].block_type == "input":
                 continue
-            if self.status(pred) != "green":
-                self.run_block(pred)
+            if not self._is_current(pred, plan):
+                self.run_block(pred, plan)
         if self._cancel_requested.is_set():
             return self.status(block_id)
-        return self.run_block(block_id)
+        return self.run_block(block_id, plan)
 
-    def _blocked_on_ungread_input(self, block_id: str) -> bool:
-        preds = self.graph.ancestors([block_id]) - {block_id}
+    def _blocked_on_unread_input(self, block_id: str, plan: RunPlan) -> bool:
+        preds = plan.graph.ancestors([block_id]) - {block_id}
         return any(
-            self.graph.blocks[p].block_type == "input" and self.status(p) == "grey" for p in preds
+            plan.graph.blocks[p].block_type == "input" and self._st(p).last_successful_key is None for p in preds
         )
 
-    def run_all(self) -> dict[str, str]:
-        """Topological order; skips already-green blocks; input blocks are
-        never (re)run here — see refresh()/refresh_all()."""
-        self._cancel_requested.clear()
+    def _sweep(self, plan: RunPlan, force: bool) -> dict[str, str]:
         report: dict[str, str] = {}
-        for bid in self.graph.topo_order():
+        for bid in plan.graph.topo_order():
             if self._cancel_requested.is_set():
                 report[bid] = "cancelled"
                 continue
-            block = self.graph.blocks[bid]
-            if block.block_type == "input":
+            if plan.graph.blocks[bid].block_type == "input":
                 continue
-            if self._blocked_on_ungread_input(bid):
+            if self._blocked_on_unread_input(bid, plan):
                 report[bid] = "blocked: upstream input block has never been read"
                 continue
-            if self.status(bid) != "green":
-                self.run_block(bid)
-            report[bid] = self.status(bid)
+            if force or not self._is_current(bid, plan):
+                self.run_block(bid, plan)
+            # Reported against the live graph, which is what the user is
+            # looking at -- a block they edited mid-sweep really is stale
+            # now, however well its run went.
+            report[bid] = self.status(bid) if bid in self.graph.blocks else "deleted during run"
         return report
+
+    def run_all(self) -> dict[str, str]:
+        """Topological order; skips blocks already current under this run's
+        pinned graph; input blocks are never (re)run here — see
+        refresh()/refresh_all()."""
+        self._cancel_requested.clear()
+        return self._sweep(self.pin(), force=False)
 
     def force_run_all(self) -> dict[str, str]:
         """As run_all, but ignores cache entirely for non-input blocks."""
         self._cancel_requested.clear()
-        report: dict[str, str] = {}
-        for bid in self.graph.topo_order():
-            if self._cancel_requested.is_set():
-                report[bid] = "cancelled"
-                continue
-            block = self.graph.blocks[bid]
-            if block.block_type == "input":
-                continue
-            if self._blocked_on_ungread_input(bid):
-                report[bid] = "blocked: upstream input block has never been read"
-                continue
-            self.run_block(bid)
-            report[bid] = self.status(bid)
-        return report
+        return self._sweep(self.pin(), force=True)
 
     def refresh(self, block_id: str) -> Status:
         """Re-reads an input block's source and swaps the cached packet. A
@@ -534,6 +758,7 @@ class Runner:
         packet and its 'last successful read' timestamp intact."""
         block = self.graph.blocks[block_id]
         assert block.block_type == "input", "refresh() is only valid for input blocks"
+        # Bump before pinning, so the run is planned against the new read.
         self._st(block_id).read_counter += 1
         return self.run_block(block_id)
 

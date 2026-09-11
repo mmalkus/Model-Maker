@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
 import { PARAM_SPECS, ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
@@ -292,6 +293,13 @@ export function Inspector({
         </strong>
       </div>
 
+      {block.status === 'orange' && block.stale_reason && (
+        <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+          <strong>Stale:</strong> {block.stale_reason}. The output below is from the last run, not the current
+          settings.
+        </div>
+      )}
+
       {block.last_error && (
         <div style={{ background: '#fef2f2', color: '#b91c1c', padding: 8, borderRadius: 6, marginBottom: 8 }}>
           {block.last_error}
@@ -520,18 +528,13 @@ export function Inspector({
         <>
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>Code (v{block.code_version})</div>
-            <textarea
-              value={codeText}
-              onChange={(e) => setCodeText(e.target.value)}
-              rows={8}
-              spellCheck={false}
-              style={{ width: '100%', fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
-            />
+            <CodeEditor value={codeText} onChange={setCodeText} onSave={saveCode} />
             <button disabled={busy} onClick={saveCode} style={{ marginTop: 4 }}>
               Save code
             </button>
             <div style={{ color: '#9ca3af', marginTop: 2 }}>
-              Saving edits bumps the code version and cascades this block and its downstream to grey/orange.
+              Ctrl/Cmd-S saves too. Saving edits bumps the code version and cascades this block and its downstream
+              to grey/orange.
             </div>
           </div>
 
@@ -553,20 +556,7 @@ export function Inspector({
         block.source && (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>Code</div>
-            <pre
-              style={{
-                background: '#f9fafb',
-                border: '1px solid #e5e7eb',
-                borderRadius: 6,
-                padding: 8,
-                fontSize: 11,
-                overflow: 'auto',
-                maxHeight: 320,
-                margin: 0,
-              }}
-            >
-              {block.source}
-            </pre>
+            <CodeEditor value={block.source} readOnly />
             <div style={{ color: '#9ca3af', marginTop: 2 }}>
               Fixed code from the block library -- not editable. Configure this block via its params above.
             </div>
