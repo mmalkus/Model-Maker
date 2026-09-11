@@ -124,6 +124,13 @@ export function Toolbar({
       <button disabled={busy || running} onClick={() => run(() => api.forceRunAll())}>
         Force run all
       </button>
+      <button
+        disabled={busy || running}
+        title="Fuse compatible blocks (filter/select/group-by/join, read from source) into one streaming query per group, so a source larger than memory doesn't fully load at every step. Fused mid-chain blocks won't individually turn green -- only the block ending each fused stretch does. For a full, production-scale run; use sample mode instead for cheap interactive iteration."
+        onClick={() => run(() => api.runAllStreaming())}
+      >
+        Run all (streaming)
+      </button>
       <button disabled={busy || running} onClick={() => run(() => api.refreshAll())}>
         Refresh sources
       </button>

@@ -1,6 +1,7 @@
 import threading
 import time
 
+from modelmaker.blocks.base import PortSpec
 from modelmaker.cache import CacheStore
 from modelmaker.graph import Graph, Wire
 from modelmaker.runner import Runner
@@ -483,6 +484,27 @@ def test_sample_mode_truncates_at_the_source_and_flows_downstream(tmp_path):
 
     out = runner.cache.get(runner.state["b_select"].last_successful_key).outputs["out"]
     assert out.data.height == 5
+
+
+def test_sample_rows_injected_only_for_input_blocks_that_accept_the_param(tmp_path):
+    # A custom input block naming `sample_rows` in its signature (the same
+    # opt-in convention as output_dir/block_id) gets the live sample size
+    # passed straight in, rather than reading everything and being
+    # truncated after the fact.
+    code = "def custom_source(sample_rows: int | None = None) -> pl.DataFrame:\n    return pl.DataFrame({'sample_rows': [sample_rows]})\n"
+    block = make_block("b_custom", "custom_source", block_type="input", code=code, outputs=[PortSpec("out")])
+    graph = Graph(blocks={"b_custom": block})
+    runner = Runner(graph, CacheStore(), sample_rows=7)
+    runner.run_block("b_custom")
+
+    out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
+    assert out.data["sample_rows"].to_list() == [7]
+
+    # Full mode (sample_rows=None) never injects the kwarg at all.
+    runner.sample_rows = None
+    runner.run_block("b_custom")
+    out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
+    assert out.data["sample_rows"].to_list() == [None]
 
 
 def test_toggling_sample_mode_invalidates_the_graph_and_returns_to_the_full_key(tmp_path):

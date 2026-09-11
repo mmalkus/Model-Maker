@@ -16,7 +16,19 @@ from ..packet import ColumnMeta
 from .base import BlockSpec, PortSpec, register_block
 
 
-def read_csv(path: str) -> pl.DataFrame:
+def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # `sample_rows`, when the engine's sample mode is on, is injected by
+    # Runner.run_block the same way output_dir/block_id are (see
+    # util.accepts_param) -- an input block opts in just by naming the
+    # parameter. Scanning with `n_rows` instead of reading the whole file
+    # and truncating afterward (the fallback for input blocks that don't
+    # accept this param -- see runner.py) is the one place lazy evaluation
+    # earns its keep for sample mode: the rest of the pipeline already runs
+    # on the truncated, small-by-construction sample, so nothing downstream
+    # needs lazy frames to iterate cheaply. Full runs (sample_rows=None)
+    # read exactly as before.
+    if sample_rows is not None:
+        return pl.scan_csv(path, n_rows=sample_rows).collect()
     return pl.read_csv(path)
 
 
@@ -27,6 +39,17 @@ def _probe_read_csv(params: dict) -> float | None:
         return None
 
 
+def _read_csv_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
+    # The lazy twin of read_csv (see BlockSpec.lazy_fn) -- used only by a
+    # streaming run's fusion path (see Runner._dispatch_fused_group), which
+    # collects once at the end of a whole fused chain rather than here.
+    # Ordinary calls to `read_csv` above are untouched and still always
+    # return a materialized pl.DataFrame.
+    if sample_rows is not None:
+        return pl.scan_csv(path, n_rows=sample_rows)
+    return pl.scan_csv(path)
+
+
 register_block(
     BlockSpec(
         category="read_csv",
@@ -35,6 +58,7 @@ register_block(
         inputs=[],
         outputs=[PortSpec("out")],
         fn=read_csv,
+        lazy_fn=_read_csv_lazy,
         metadata_transform=infer_dtypes,
         probe=_probe_read_csv,
     )
@@ -53,6 +77,10 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=filter_rows,
+        # filter_rows is pure expression-based code (`.filter(pl.sql_expr(...))`),
+        # identical over pl.DataFrame/pl.LazyFrame -- reused verbatim as the
+        # lazy_fn a streaming run's fusion path calls (see BlockSpec.lazy_fn).
+        lazy_fn=filter_rows,
         metadata_transform=passthrough,
     )
 )
@@ -70,6 +98,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=select_cols,
+        lazy_fn=select_cols,  # same reasoning as filter's lazy_fn above
         metadata_transform=narrow_from_single_input,
     )
 )
@@ -101,6 +130,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=groupby_agg,
+        lazy_fn=groupby_agg,  # same reasoning as filter's lazy_fn above
         metadata_transform=_groupby_meta,
     )
 )
@@ -126,6 +156,7 @@ register_block(
         inputs=[PortSpec("left"), PortSpec("right")],
         outputs=[PortSpec("out")],
         fn=join,
+        lazy_fn=join,  # same reasoning as filter's lazy_fn above
         metadata_transform=_join_meta,
     )
 )

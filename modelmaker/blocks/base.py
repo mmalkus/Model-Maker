@@ -48,6 +48,16 @@ class BlockSpec:
     # this to cluster related blocks (e.g. "modelling", "tests") regardless
     # of what pipeline role each one plays.
     group: str | None = None
+    # Optional lazy-mode twin of `fn`: same params, but reads/returns
+    # pl.LazyFrame instead of pl.DataFrame. None (the default, and every
+    # custom/AI-authored block) means this block never participates in a
+    # streaming run's fusion -- see Runner._fusable_spec/_build_fusion_groups
+    # in runner.py. For most registry blocks that are already pure
+    # expression-based code (filter/select/groupby_agg/join), `fn` itself
+    # works unchanged over a LazyFrame and can be reused verbatim here; only
+    # a block whose eager `fn` deliberately collects (read_csv) needs an
+    # actual separate implementation.
+    lazy_fn: BlockFn | None = None
 
 
 BLOCK_REGISTRY: dict[str, BlockSpec] = {}
