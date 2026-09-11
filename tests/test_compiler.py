@@ -229,6 +229,41 @@ def test_custom_block_compiles_to_a_function_named_after_the_block_not_its_categ
     assert "def ai_block_lz3k9f(" not in source
 
 
+def test_compiled_grouped_block_matches_engine_output(tmp_path):
+    # A group_by block compiles to a partition/dispatch/recombine sequence
+    # (see compiler._grouped_call_lines) instead of a single call -- the
+    # exec'd script's result must match what the live engine already
+    # computed for the same grouped run (see
+    # test_runner.test_group_by_produces_one_metric_row_per_group).
+    csv_path = tmp_path / "scores.csv"
+    csv_path.write_text(
+        "region,score,target\n"
+        "north,0.9,1\nnorth,0.1,0\nnorth,0.8,1\nnorth,0.2,0\n"
+        "south,0.7,1\nsouth,0.3,0\nsouth,0.6,1\nsouth,0.4,0\n"
+    )
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    gini = make_block("b_gini", "auc_gini", params={"score_col": "score", "target_col": "target"}, x=1)
+    gini.group_by = "region"
+    graph = Graph(
+        blocks={"b_read": read, "b_gini": gini},
+        wires={"w1": Wire("w1", "b_read", "out", "b_gini", "df")},
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_gini") == "green"
+
+    source = compile_graph(graph, runner=runner)
+    assert "ThreadPoolExecutor" in source
+    assert "_combine_group_results" in source
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+
+    engine_out = runner.cache.get(runner.state["b_gini"].last_successful_key).outputs["metric"]
+    compiled_out = ns["b_gini_b_gini"]
+    assert compiled_out.sort("region").to_dicts() == engine_out.data.sort("region").to_dicts()
+
+
 def test_naming_a_port_uses_that_name_as_the_compiled_variable(tmp_path):
     graph, _ = _csv_graph(tmp_path)
     graph.blocks["b_select"].port_names = {"out": "clean_rows"}

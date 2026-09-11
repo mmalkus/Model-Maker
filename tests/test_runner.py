@@ -1,3 +1,6 @@
+import threading
+import time
+
 from modelmaker.cache import CacheStore
 from modelmaker.graph import Graph, Wire
 from modelmaker.runner import Runner
@@ -290,6 +293,153 @@ def test_retagging_the_target_column_invalidates_downstream_and_repropagates(tmp
     assert runner.run_block("b_logreg") == "green"
     artifact = runner.cache.get(runner.state["b_logreg"].last_successful_key).outputs["model"]
     assert artifact["target"] == "x"
+
+
+def _regional_scores_graph(tmp_path):
+    csv_path = tmp_path / "scores.csv"
+    csv_path.write_text(
+        "region,score,target\n"
+        "north,0.9,1\nnorth,0.1,0\nnorth,0.8,1\nnorth,0.2,0\n"
+        "south,0.7,1\nsouth,0.3,0\nsouth,0.6,1\nsouth,0.4,0\n"
+    )
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    gini = make_block("b_gini", "auc_gini", params={"score_col": "score", "target_col": "target"}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_gini": gini},
+        wires={"w1": Wire("w1", "b_read", "out", "b_gini", "df")},
+    )
+    return graph
+
+
+def test_group_by_produces_one_metric_row_per_group(tmp_path):
+    # The motivating case: Gini per region instead of one number for the
+    # whole dataset -- a dict-output (scalar_metric) block's per-group
+    # results combine into a single small dataframe, one row per group.
+    graph = _regional_scores_graph(tmp_path)
+    graph.blocks["b_gini"].group_by = "region"
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_gini") == "green"
+    metric = runner.cache.get(runner.state["b_gini"].last_successful_key).outputs["metric"]
+    assert metric.data.sort("region")["region"].to_list() == ["north", "south"]
+    assert set(metric.data.columns) >= {"region", "gini", "auc"}
+    for gini_value in metric.data["gini"].to_list():
+        assert -1.0 <= gini_value <= 1.0
+    assert metric.schema_meta["region"].role.value == "segment"
+
+
+def test_group_by_on_a_dataframe_output_block_concatenates_rows(tmp_path):
+    # A dataframe-output block (not a scalar_metric one) grouped the same
+    # way: every group's rows come back concatenated, group column intact.
+    graph = _regional_scores_graph(tmp_path)
+    select = make_block("b_select", "select", params={"cols": ["region", "score"]}, x=1)
+    select.group_by = "region"
+    graph.blocks["b_select"] = select
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_select", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_select") == "green"
+    out = runner.cache.get(runner.state["b_select"].last_successful_key).outputs["out"]
+    assert out.data.height == 8
+    assert set(out.data["region"].unique().to_list()) == {"north", "south"}
+
+
+def test_group_by_over_the_group_cap_fails_clearly_instead_of_running(tmp_path):
+    graph = _regional_scores_graph(tmp_path)
+    graph.blocks["b_gini"].group_by = "region"
+    runner = Runner(graph, CacheStore())
+    runner.MAX_GROUPS = 1  # both "north" and "south" are present -> 2 > 1
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_gini") == "red"
+    err = runner.state["b_gini"].last_error.lower()
+    assert "group" in err and "1" in err
+
+
+def test_group_by_on_a_missing_column_fails_clearly(tmp_path):
+    graph = _regional_scores_graph(tmp_path)
+    graph.blocks["b_gini"].group_by = "not_a_real_column"
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_gini") == "red"
+    assert "not_a_real_column" in runner.state["b_gini"].last_error
+
+
+def test_group_by_invalidates_cache_like_any_other_block_edit(tmp_path):
+    graph = _regional_scores_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    assert runner.run_block("b_gini") == "green"
+
+    graph.blocks["b_gini"].group_by = "region"
+    assert runner.status("b_gini") == "orange"
+
+
+def test_cancel_stops_an_in_flight_block_without_waiting_it_out(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_slow"] = make_block(
+        "b_slow",
+        "slow_block",
+        block_type="standard",
+        code="def slow_block(df):\n    import time\n    time.sleep(5)\n    return df\n",
+        inputs=list(graph.blocks["b_filter"].inputs),
+        outputs=list(graph.blocks["b_filter"].outputs),
+        metadata_transform={"kind": "passthrough"},
+        x=2,
+    )
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    result: dict[str, str] = {}
+
+    def _run():
+        result["status"] = runner.run_block("b_slow")
+
+    thread = threading.Thread(target=_run)
+    start = time.monotonic()
+    thread.start()
+    deadline = start + 5
+    while not runner.is_running("b_slow") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runner.is_running("b_slow"), "block never reached 'running' before its subprocess should have started"
+    assert runner.cancel("b_slow") is True
+
+    thread.join(timeout=10)
+    elapsed = time.monotonic() - start
+
+    assert result["status"] == "red"
+    assert "cancel" in runner.state["b_slow"].last_error.lower()
+    assert elapsed < 4, f"took {elapsed:.1f}s -- cancel() should interrupt well before the block's 5s sleep finishes"
+    assert runner.is_running("b_slow") is False
+
+
+def test_worker_crash_is_reported_as_a_red_block_not_a_hang(tmp_path):
+    # A worker that dies outright (os._exit, standing in for a segfault or
+    # an OS OOM-kill) must surface as a normal red-block error, not hang
+    # run_block waiting for a result that will never arrive.
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_crash"] = make_block(
+        "b_crash",
+        "crashy_block",
+        block_type="standard",
+        code="def crashy_block(df):\n    import os\n    os._exit(1)\n",
+        inputs=list(graph.blocks["b_filter"].inputs),
+        outputs=list(graph.blocks["b_filter"].outputs),
+        metadata_transform={"kind": "passthrough"},
+        x=2,
+    )
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_crash", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    start = time.monotonic()
+    assert runner.run_block("b_crash") == "red"
+    assert time.monotonic() - start < 10
+    assert "unexpectedly" in runner.state["b_crash"].last_error.lower()
 
 
 def test_two_upstream_branches_tagging_the_same_role_collide_only_once_joined(tmp_path):

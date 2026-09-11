@@ -3,9 +3,10 @@ from __future__ import annotations
 import functools
 import inspect
 import os
+import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +53,62 @@ app.add_middleware(
 
 SESSION = ProjectSession()
 LLM_SETTINGS = LLMSettingsStore()
+
+# Run orchestration: at most one run (a single block, a cascade, or a full
+# sweep) is active at a time, executed on a background thread so a run that
+# genuinely takes a while -- above all a heavily-grouped block, the case
+# this whole mechanism exists to keep safe -- doesn't block the HTTP
+# request indefinitely: the frontend polls GET /api/graph (whose per-block
+# `status` already reflects "running", see Runner.status) to watch it
+# progress, and POST /api/run/cancel to stop it. _start_background_run
+# joins the thread for up to `wait_seconds` before returning, though, so
+# the common case (a normal-sized run finishes in well under that) still
+# gets a response that reflects the final state, exactly as if the call
+# had been synchronous -- only a run that's still going after the wait
+# comes back as "running" for the client to poll. The isolation that
+# actually matters -- one subprocess per block call, so a crash or a
+# runaway group_by can't take the server down -- is Runner's job (see
+# runner.py) and applies either way.
+_RUN_LOCK = threading.Lock()
+_RUN_THREAD: threading.Thread | None = None
+# A precondition failure (e.g. "Run" clicked on a block whose upstream
+# isn't green yet) raises before any block state changes, so there's
+# nothing in the graph's own status to show it happened -- stashed here,
+# raised directly if the run finishes within the wait window (matching the
+# old synchronous endpoints' behavior), and otherwise surfaced once via
+# _graph_out(), which clears it on read.
+_LAST_RUN_ERROR: str | None = None
+
+
+def _start_background_run(fn: Callable[[], Any], wait_seconds: float = 20.0) -> Any:
+    """Returns fn()'s return value if it finishes within wait_seconds (the
+    common case -- callers that don't care, like the single-block run
+    endpoints, can just ignore it and re-read block state), else None to
+    mean "still running" (poll GET /api/graph)."""
+    global _RUN_THREAD, _LAST_RUN_ERROR
+    with _RUN_LOCK:
+        if _RUN_THREAD is not None and _RUN_THREAD.is_alive():
+            raise HTTPException(409, "a run is already in progress")
+        _LAST_RUN_ERROR = None
+        holder: dict[str, Any] = {}
+
+        def _target() -> None:
+            global _LAST_RUN_ERROR
+            try:
+                holder["result"] = fn()
+            except Exception as e:  # noqa: BLE001 -- has no HTTP response to attach to once the wait below gives up
+                _LAST_RUN_ERROR = f"{type(e).__name__}: {e}"
+
+        thread = threading.Thread(target=_target, daemon=True)
+        _RUN_THREAD = thread
+        thread.start()
+    thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return None
+    if _LAST_RUN_ERROR:
+        err, _LAST_RUN_ERROR = _LAST_RUN_ERROR, None
+        raise HTTPException(409, err)
+    return holder.get("result")
 
 # Static curated list -- the `claude` CLI has no scriptable "list models"
 # command, so this is what the model dropdown offers for the claude_cli
@@ -101,6 +158,12 @@ class BlockUpdate(BaseModel):
     params: dict[str, Any] | None = None
     code: str | None = None
     metadata_transform: dict[str, Any] | None = None
+    # Column to run this block once per distinct value of, instead of once
+    # overall (see BlockInstance.group_by) -- like `lane`, an explicit null
+    # in the request body clears it (session.update_block applies it
+    # whenever the key is present at all, not only when non-None).
+    group_by: str | None = None
+    max_workers: int | None = None
 
 
 class ColumnRoleUpdate(BaseModel):
@@ -207,6 +270,8 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "inputs": [asdict(p) for p in block.inputs],
         "outputs": [asdict(p) for p in block.outputs],
         "port_names": block.port_names,
+        "group_by": block.group_by,
+        "max_workers": block.max_workers,
         "status": SESSION.runner.status(block_id),
         "last_error": st.last_error if st else None,
         "last_successful_read_at": st.last_successful_read_at if st else None,
@@ -215,11 +280,14 @@ def _block_out(block_id: str) -> dict[str, Any]:
 
 
 def _graph_out() -> dict[str, Any]:
+    global _LAST_RUN_ERROR
+    run_error, _LAST_RUN_ERROR = _LAST_RUN_ERROR, None
     return {
         "project_name": SESSION.project_name,
         "project_path": str(SESSION.project_path) if SESSION.project_path else None,
         "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in SESSION.graph.lanes.items()},
         "blocks": {bid: _block_out(bid) for bid in SESSION.graph.blocks},
+        "run_error": run_error,
         "wires": {
             wid: {
                 "from_block": w.from_block,
@@ -546,20 +614,14 @@ def _require_block(block_id: str) -> None:
 @app.post("/api/blocks/{block_id}/run")
 def run_block_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    try:
-        SESSION.runner.run_block(block_id)
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
+    _start_background_run(lambda: SESSION.runner.run_block(block_id))
     return _block_out(block_id)
 
 
 @app.post("/api/blocks/{block_id}/run_to_here")
 def run_to_here_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    try:
-        SESSION.runner.run_to_here(block_id)
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(409, str(e))
+    _start_background_run(lambda: SESSION.runner.run_to_here(block_id))
     return _block_out(block_id)
 
 
@@ -568,10 +630,7 @@ def refresh_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
     if SESSION.graph.blocks[block_id].block_type != "input":
         raise HTTPException(400, "refresh is only valid for input blocks")
-    try:
-        SESSION.runner.refresh(block_id)
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
+    _start_background_run(lambda: SESSION.runner.refresh(block_id))
     return _block_out(block_id)
 
 
@@ -582,24 +641,31 @@ def check_changes(block_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/run_all")
-def run_all() -> dict[str, str]:
-    try:
-        return SESSION.runner.run_all()
-    except ValueError as e:
-        raise HTTPException(409, str(e))
+def run_all() -> dict[str, Any]:
+    report = _start_background_run(lambda: SESSION.runner.run_all())
+    return report if report is not None else {"started": True}
 
 
 @app.post("/api/force_run_all")
-def force_run_all() -> dict[str, str]:
-    try:
-        return SESSION.runner.force_run_all()
-    except ValueError as e:
-        raise HTTPException(409, str(e))
+def force_run_all() -> dict[str, Any]:
+    report = _start_background_run(lambda: SESSION.runner.force_run_all())
+    return report if report is not None else {"started": True}
 
 
 @app.post("/api/refresh_all")
-def refresh_all() -> dict[str, str]:
-    return SESSION.runner.refresh_all()
+def refresh_all() -> dict[str, Any]:
+    report = _start_background_run(lambda: SESSION.runner.refresh_all())
+    return report if report is not None else {"started": True}
+
+
+@app.post("/api/run/cancel")
+def cancel_run() -> dict[str, bool]:
+    """Stop whatever's currently running -- a single block, a run_to_here
+    cascade, or a run_all/force_run_all/refresh_all sweep. The in-flight
+    block's own subprocess(es) are terminated immediately (see
+    Runner._dispatch); a cascade also stops issuing further blocks rather
+    than continuing on to the next one."""
+    return {"cancelled": SESSION.runner.cancel()}
 
 
 @app.post("/api/check_all_sources")

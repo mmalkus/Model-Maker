@@ -1,4 +1,4 @@
-export type Status = 'grey' | 'green' | 'orange' | 'red'
+export type Status = 'grey' | 'green' | 'orange' | 'red' | 'running'
 export type PortType = 'dataframe' | 'model' | 'scalar_metric' | 'image' | 'any'
 export type BlockType = 'input' | 'standard' | 'output'
 
@@ -33,6 +33,12 @@ export interface BlockOut {
   inputs: PortSpec[]
   outputs: PortSpec[]
   port_names: Record<string, string>
+  // Column to run this block once per distinct value of (see
+  // BlockInstance.group_by in graph.py) -- null means plain, ungrouped
+  // execution. max_workers caps concurrent group workers; null means "use
+  // the runner's default".
+  group_by: string | null
+  max_workers: number | null
   status: Status
   last_error: string | null
   last_successful_read_at: string | null
@@ -58,6 +64,12 @@ export interface GraphOut {
   project_path: string | null
   lanes: Record<string, LaneOut>
   blocks: Record<string, BlockOut>
+  // A precondition failure from the most recently *started* run (e.g. "Run"
+  // clicked on a block whose upstream isn't green) that had nothing else to
+  // attach to, since runs execute in the background -- see api.py's
+  // _start_background_run. Present at most once: the server clears it as
+  // soon as a GET /api/graph reads it.
+  run_error: string | null
   wires: Record<string, WireOut>
 }
 
