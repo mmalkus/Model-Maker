@@ -275,3 +275,141 @@ def test_naming_a_port_uses_that_name_as_the_compiled_variable(tmp_path):
     source = compile_graph(graph, runner=runner)
     assert "clean_rows = " in source
     assert "b_select_b_select" not in source
+
+
+def test_stream_false_by_default_leaves_compiled_output_unchanged(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert "Fused (streaming)" not in source
+    assert "collect_all" not in source
+
+
+def test_stream_true_fuses_a_chain_into_one_collect_all_and_matches_engine_output(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n" + "".join(f"{i},{'x' if i % 2 == 0 else 'y'}\n" for i in range(1, 21)))
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 5"}, x=1)
+    select = make_block("b_select", "select", params={"cols": ["a", "b"]}, x=2)
+    agg = make_block("b_agg", "groupby_agg", params={"by": ["b"], "aggs": {"a": "sum"}}, x=3)
+    graph = Graph(
+        blocks={"b_read": read, "b_filter": filt, "b_select": select, "b_agg": agg},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_select", "df"),
+            "w3": Wire("w3", "b_select", "out", "b_agg", "df"),
+        },
+    )
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner, stream=True)
+    assert "# --- Fused (streaming): b_read, b_filter, b_select, b_agg ---" in source
+    assert source.count("pl.collect_all(") == 1
+    # filter/select/groupby_agg's lazy_fn is literally the same function
+    # object as their eager fn (see BlockSpec.lazy_fn) -- a single fused
+    # chain should still get exactly one def each, not a duplicate.
+    assert source.count("def filter(") == 1
+    assert source.count("def select(") == 1
+    assert source.count("def groupby_agg(") == 1
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+
+    engine_out = runner.cache.get(runner.state["b_agg"].last_successful_key).outputs["out"]
+    compiled_out = ns["b_agg_b_agg"]
+    assert compiled_out.sort("b").to_dicts() == engine_out.data.sort("b").to_dicts()
+
+
+def test_stream_true_fan_out_uses_a_single_collect_all_for_both_exits(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n" + "".join(f"{i},{'x' if i % 2 == 0 else 'y'}\n" for i in range(1, 11)))
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 3"}, x=1)
+    sel1 = make_block("b_sel1", "select", params={"cols": ["a"]}, x=2, y=0)
+    sel2 = make_block("b_sel2", "select", params={"cols": ["b"]}, x=2, y=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_filter": filt, "b_sel1": sel1, "b_sel2": sel2},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_sel1", "df"),
+            "w3": Wire("w3", "b_filter", "out", "b_sel2", "df"),
+        },
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner, stream=True)
+    # One fused group covering all four blocks, one collect_all producing
+    # both exits -- b_filter is never independently collected.
+    assert source.count("pl.collect_all(") == 1
+    assert "b_sel1_b_sel1, b_sel2_b_sel2 = pl.collect_all(" in source or (
+        "b_sel2_b_sel2, b_sel1_b_sel1 = pl.collect_all(" in source
+    )
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert sorted(ns["b_sel1_b_sel1"]["a"].to_list()) == [4, 5, 6, 7, 8, 9, 10]
+    assert sorted(ns["b_sel2_b_sel2"]["b"].to_list()) == sorted(
+        ["x" if i % 2 == 0 else "y" for i in range(4, 11)]
+    )
+
+
+def test_stream_true_output_blocks_forces_an_interior_member_to_be_named(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    # b_filter's only consumer (b_select) is in the same fusable stretch,
+    # so it wouldn't normally need its own exit -- requesting it as an
+    # explicit output_blocks target forces one anyway.
+    source = compile_graph(graph, runner=runner, stream=True, output_blocks=["b_filter"])
+    assert "b_filter_b_filter" in source
+    assert "pl.collect_all(" in source
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["b_filter_b_filter"].to_dicts() == [{"a": 2, "b": 20}, {"a": 3, "b": 30}]
+
+
+def test_stream_true_splits_around_a_non_fusable_custom_block(tmp_path):
+    from modelmaker.blocks.base import PortSpec
+
+    graph, _ = _csv_graph(tmp_path)
+    custom_code = "def double_a(df: pl.DataFrame) -> pl.DataFrame:\n    return df.with_columns((pl.col('a') * 2).alias('a'))\n"
+    graph.blocks["b_custom"] = make_block(
+        "b_custom",
+        "ai_double",
+        params={},
+        code=custom_code,
+        block_type="standard",
+        x=3,
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+    )
+    graph.wires["w3"] = Wire("w3", "b_select", "out", "b_custom", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner, stream=True)
+    # b_custom is never fusable -- it stays a plain eager call, wired to
+    # the fused stretch's own exit variable exactly as an ordinary,
+    # non-streaming compile would. Custom blocks are compiled under their
+    # own block name (see compile_graph's fn-naming rule), not the
+    # function's own def name in the source.
+    assert "def b_custom(" in source
+    assert "pl.collect_all(" in source
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    engine_out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
+    assert ns["b_custom_b_custom"].to_dicts() == engine_out.data.to_dicts()

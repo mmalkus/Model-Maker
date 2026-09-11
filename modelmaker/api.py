@@ -207,6 +207,11 @@ class SaveRequest(BaseModel):
 class CompileRequest(BaseModel):
     output_blocks: list[str] | None = None
     strict: bool = True
+    # Mirrors Runner.run_all_streaming for the compiled script itself (see
+    # compile_graph's `stream` param): fuses whatever connected stretch of
+    # compatible blocks it safely can into one polars lazy plan per group.
+    # Default False keeps every existing "Compile" click's output unchanged.
+    stream: bool = False
 
 
 class DraftRequest(BaseModel):
@@ -287,6 +292,12 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "last_error": st.last_error if st else None,
         "last_successful_read_at": st.last_successful_read_at if st else None,
         "last_attempt_at": st.last_attempt_at if st else None,
+        # A crude heartbeat while a block (or a whole fused streaming
+        # group, for its every exit -- see Runner.running_elapsed) is
+        # mid-dispatch -- polars gives no finer-grained progress for a
+        # single collect() call, so this is "how long has this been
+        # running", not "how far along is it".
+        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,
     }
 
 
@@ -757,7 +768,11 @@ def check_all_sources() -> dict[str, bool]:
 def compile_ep(req: CompileRequest) -> dict[str, str]:
     try:
         source = compile_graph(
-            SESSION.graph, runner=SESSION.runner, output_blocks=req.output_blocks, strict=req.strict
+            SESSION.graph,
+            runner=SESSION.runner,
+            output_blocks=req.output_blocks,
+            strict=req.strict,
+            stream=req.stream,
         )
     except (CompileError, ValueError) as e:
         raise HTTPException(409, str(e))

@@ -187,6 +187,17 @@ def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
     df.write_csv(os.path.join(output_dir, filename))
 
 
+def _write_csv_sink(df: pl.LazyFrame, filename: str, output_dir: str = ".") -> None:
+    # The streaming-sink twin of write_csv (see BlockSpec.lazy_sink_fn):
+    # called only when this block is folded onto the end of a streaming
+    # run's fusion group as its terminal write (see
+    # Runner._build_fusion_groups), so the group's whole upstream plan --
+    # source scan included -- is written straight to disk via the
+    # streaming engine without ever materializing a cached DataFrame for
+    # the block that feeds it.
+    df.sink_csv(os.path.join(output_dir, filename))
+
+
 register_block(
     BlockSpec(
         category="write_csv",
@@ -195,6 +206,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[],
         fn=write_csv,
+        lazy_sink_fn=_write_csv_sink,
         metadata_transform=lambda *_a, **_k: {},
     )
 )

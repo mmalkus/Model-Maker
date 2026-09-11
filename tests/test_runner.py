@@ -418,6 +418,41 @@ def test_cancel_stops_an_in_flight_block_without_waiting_it_out(tmp_path):
     assert runner.is_running("b_slow") is False
 
 
+def test_running_elapsed_reports_none_when_idle_and_a_growing_value_mid_dispatch(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_slow"] = make_block(
+        "b_slow",
+        "slow_block",
+        block_type="standard",
+        code="def slow_block(df):\n    import time\n    time.sleep(2)\n    return df\n",
+        inputs=list(graph.blocks["b_filter"].inputs),
+        outputs=list(graph.blocks["b_filter"].outputs),
+        metadata_transform={"kind": "passthrough"},
+        x=2,
+    )
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.running_elapsed("b_slow") is None
+
+    thread = threading.Thread(target=lambda: runner.run_block("b_slow"))
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not runner.is_running("b_slow") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runner.is_running("b_slow")
+
+    first = runner.running_elapsed("b_slow")
+    assert first is not None and first >= 0
+    time.sleep(0.2)
+    second = runner.running_elapsed("b_slow")
+    assert second is not None and second > first
+
+    thread.join(timeout=10)
+    assert runner.running_elapsed("b_slow") is None
+
+
 def test_worker_crash_is_reported_as_a_red_block_not_a_hang(tmp_path):
     # A worker that dies outright (os._exit, standing in for a segfault or
     # an OS OOM-kill) must surface as a normal red-block error, not hang

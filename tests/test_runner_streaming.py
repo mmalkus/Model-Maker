@@ -85,7 +85,7 @@ def test_streaming_exit_key_matches_normal_run_block_key(tmp_path):
     assert streamed_key == normal_key
 
 
-def test_fan_out_forces_a_checkpoint_and_both_branches_get_correct_data(tmp_path):
+def test_fan_out_stays_fused_and_both_branches_get_correct_data(tmp_path):
     csv_path = _write_csv(tmp_path)
     read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
     filt = make_block("b_filter", "filter", params={"expr": "a > 5"}, x=1)
@@ -102,16 +102,94 @@ def test_fan_out_forces_a_checkpoint_and_both_branches_get_correct_data(tmp_path
     runner = Runner(graph, CacheStore())
     report = runner.run_all_streaming()
 
-    # b_filter has two not-yet-current consumers -- it must become its own
-    # checkpoint (independently cached/green), not fused into either branch.
-    assert report["b_filter"] == "green"
+    # b_filter feeds two consumers, but both are fusable and both are being
+    # (re)computed this run, so the whole thing -- including the shared
+    # b_filter stretch -- is one connected fusion group with two exits
+    # (b_sel1, b_sel2); b_filter itself needs no independent cache entry.
+    assert report["b_read"] == "fused"
+    assert report["b_filter"] == "fused"
     assert report["b_sel1"] == "green"
     assert report["b_sel2"] == "green"
+    assert runner.status("b_filter") == "grey"
 
     sel1_out = runner.cache.get(runner.state["b_sel1"].last_successful_key).outputs["out"]
     sel2_out = runner.cache.get(runner.state["b_sel2"].last_successful_key).outputs["out"]
     assert sorted(sel1_out.data["a"].to_list()) == list(range(6, 21))
     assert sorted(sel2_out.data["b"].to_list()) == sorted(["x" if i % 2 == 0 else "y" for i in range(6, 21)])
+
+
+def test_fan_out_becomes_a_checkpoint_when_one_branch_is_not_fusable(tmp_path):
+    csv_path = _write_csv(tmp_path)
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 5"}, x=1)
+    sel = make_block("b_sel", "select", params={"cols": ["a"]}, x=2, y=0)
+    custom_code = "def touch(df: pl.DataFrame) -> pl.DataFrame:\n    return df\n"
+    custom = make_block(
+        "b_custom",
+        "ai_touch",
+        params={},
+        code=custom_code,
+        block_type="standard",
+        x=2,
+        y=1,
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+    )
+    graph = Graph(
+        blocks={"b_read": read, "b_filter": filt, "b_sel": sel, "b_custom": custom},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_sel", "df"),
+            "w3": Wire("w3", "b_filter", "out", "b_custom", "df"),
+        },
+    )
+    runner = Runner(graph, CacheStore())
+    report = runner.run_all_streaming()
+
+    # b_custom is never fusable, so it sits outside b_filter's group -- that
+    # makes b_filter an exit of its own group (real cache entry) even though
+    # b_sel *is* fused with it.
+    assert report["b_read"] == "fused"
+    assert report["b_filter"] == "green"
+    assert report["b_sel"] == "green"
+    assert report["b_custom"] == "green"
+
+    filter_out = runner.cache.get(runner.state["b_filter"].last_successful_key).outputs["out"]
+    assert sorted(filter_out.data["a"].to_list()) == list(range(6, 21))
+
+
+def test_true_fan_in_join_with_both_sides_fusable_stays_one_group(tmp_path):
+    left_path = tmp_path / "left.csv"
+    left_path.write_text("id,a\n" + "".join(f"{i},{i * 10}\n" for i in range(1, 11)))
+    right_path = tmp_path / "right.csv"
+    right_path.write_text("id,label\n" + "".join(f"{i},{'even' if i % 2 == 0 else 'odd'}\n" for i in range(1, 11)))
+
+    read_left = make_block("b_left", "read_csv", params={"path": str(left_path)})
+    read_right = make_block("b_right", "read_csv", params={"path": str(right_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 30"}, x=1)
+    joined = make_block("b_join", "join", params={"on": ["id"], "how": "inner"}, x=2)
+    graph = Graph(
+        blocks={"b_left": read_left, "b_right": read_right, "b_filter": filt, "b_join": joined},
+        wires={
+            "w1": Wire("w1", "b_left", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_join", "left"),
+            "w3": Wire("w3", "b_right", "out", "b_join", "right"),
+        },
+    )
+    # Neither b_left nor b_right has ever been refreshed -- both are
+    # fusable input blocks, so both sides of the join are scanned live and
+    # fused into one group with the join itself, rather than either side
+    # needing a prior checkpoint.
+    runner = Runner(graph, CacheStore())
+    report = runner.run_all_streaming()
+
+    assert report["b_left"] == "fused"
+    assert report["b_right"] == "fused"
+    assert report["b_filter"] == "fused"
+    assert report["b_join"] == "green"
+
+    out = runner.cache.get(runner.state["b_join"].last_successful_key).outputs["out"]
+    assert sorted(out.data["id"].to_list()) == [4, 5, 6, 7, 8, 9, 10]
 
 
 def test_role_tag_propagates_through_fused_chain(tmp_path):
@@ -247,3 +325,79 @@ def test_join_extends_a_fused_chain_with_the_other_side_read_from_cache(tmp_path
 
     out = runner.cache.get(runner.state["b_select"].last_successful_key).outputs["out"]
     assert sorted(out.data["id"].to_list()) == [4, 5, 6, 7, 8, 9, 10]
+
+
+def test_write_csv_sink_fuses_onto_a_pure_read_filter_write_tail(tmp_path):
+    csv_path = _write_csv(tmp_path)
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 5"}, x=1)
+    write = make_block(
+        "b_write",
+        "write_csv",
+        params={"filename": "out.csv"},
+        block_type="output",
+        x=2,
+    )
+    graph = Graph(
+        blocks={"b_read": read, "b_filter": filt, "b_write": write},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_write", "df"),
+        },
+    )
+    runner = Runner(graph, CacheStore(), output_dir=str(tmp_path))
+    report = runner.run_all_streaming()
+
+    # b_filter's *only* consumer anywhere in the graph is the write -- so
+    # the write is folded onto the group as a terminal sink, and b_filter
+    # never gets an intermediate collect+cache write of its own (it's
+    # "fused", not "green", proving the sink optimization actually took
+    # effect rather than falling back to the ordinary checkpoint path).
+    assert report["b_read"] == "fused"
+    assert report["b_filter"] == "fused"
+    assert report["b_write"] == "green"
+    assert runner.state["b_filter"].last_successful_key is None
+    assert runner.cache.get(runner.compute_key("b_filter")) is None
+
+    written = (tmp_path / "out.csv").read_text()
+    rows = written.strip().splitlines()[1:]
+    assert sorted(int(r.split(",")[0]) for r in rows) == list(range(6, 21))
+
+
+def test_write_csv_sink_does_not_apply_when_predecessor_has_another_consumer(tmp_path):
+    csv_path = _write_csv(tmp_path)
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    filt = make_block("b_filter", "filter", params={"expr": "a > 5"}, x=1)
+    sel = make_block("b_sel", "select", params={"cols": ["a"]}, x=2, y=0)
+    write = make_block(
+        "b_write",
+        "write_csv",
+        params={"filename": "out.csv"},
+        block_type="output",
+        x=2,
+        y=1,
+    )
+    graph = Graph(
+        blocks={"b_read": read, "b_filter": filt, "b_sel": sel, "b_write": write},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_filter", "df"),
+            "w2": Wire("w2", "b_filter", "out", "b_sel", "df"),
+            "w3": Wire("w3", "b_filter", "out", "b_write", "df"),
+        },
+    )
+    # b_filter feeds both b_sel (fusable) and b_write (a sink candidate) --
+    # since b_write isn't b_filter's *only* consumer, b_filter must still
+    # get a real exit/cache entry that b_write's own (non-fused) run can
+    # read from -- run_all_streaming still gets everything green/fused,
+    # just without the sink shortcut.
+    runner = Runner(graph, CacheStore(), output_dir=str(tmp_path))
+    report = runner.run_all_streaming()
+
+    assert report["b_read"] == "fused"
+    assert report["b_filter"] == "green"
+    assert report["b_sel"] == "green"
+    assert report["b_write"] == "green"
+
+    written = (tmp_path / "out.csv").read_text()
+    rows = written.strip().splitlines()[1:]
+    assert sorted(int(r.split(",")[0]) for r in rows) == list(range(6, 21))

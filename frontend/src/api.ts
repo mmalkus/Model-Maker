@@ -103,8 +103,8 @@ export const api = {
   checkAllSources: () => request<Record<string, boolean>>('/check_all_sources', { method: 'POST' }),
   cancelRun: () => request<{ cancelled: boolean }>('/run/cancel', { method: 'POST' }),
 
-  compile: (output_blocks?: string[]) =>
-    request<{ source: string }>('/compile', { method: 'POST', body: JSON.stringify({ output_blocks }) }),
+  compile: (output_blocks?: string[], stream?: boolean) =>
+    request<{ source: string }>('/compile', { method: 'POST', body: JSON.stringify({ output_blocks, stream }) }),
 
   undo: () => request<GraphOut>('/undo', { method: 'POST' }),
   redo: () => request<GraphOut>('/redo', { method: 'POST' }),

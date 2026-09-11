@@ -51,6 +51,7 @@ export function Toolbar({
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
+  const [compileStreaming, setCompileStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showSave, setShowSave] = useState(false)
   const [showLoad, setShowLoad] = useState(false)
@@ -78,7 +79,7 @@ export function Toolbar({
 
   const doCompile = () =>
     run(async () => {
-      const { source } = await api.compile()
+      const { source } = await api.compile(undefined, compileStreaming)
       setCompiled(source)
     })
 
@@ -159,6 +160,18 @@ export function Toolbar({
       <button disabled={busy} onClick={doCompile}>
         Compile
       </button>
+      <label
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--brand-charcoal)' }}
+        title="Compile fusable stretches (filter/select/group-by/join, read from source) into a single streaming polars query each, the same way 'Run all (streaming)' does for the live engine -- for a compiled script meant to run on data larger than memory."
+      >
+        <input
+          type="checkbox"
+          checked={compileStreaming}
+          disabled={busy}
+          onChange={(e) => setCompileStreaming(e.target.checked)}
+        />
+        Streaming
+      </label>
 
       <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(11,35,64,0.15)', margin: '0 2px' }} />
       <button disabled={busy || !canUndo} onClick={onUndo} title="Undo the last graph edit (Ctrl/Cmd-Z)">

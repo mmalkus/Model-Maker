@@ -47,6 +47,11 @@ export interface BlockOut {
   // (see Runner.stale_reason) -- null for every other status, since grey has
   // never run and red carries its error instead.
   stale_reason: string | null
+  // Seconds since this block's (or its whole fused streaming group's --
+  // see Runner.running_elapsed) current dispatch started; null unless
+  // status is "running". A crude heartbeat, not real progress -- polars
+  // gives no finer-grained signal for one collect() call.
+  running_seconds: number | null
 }
 
 export interface WireOut {
