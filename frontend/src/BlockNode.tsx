@@ -84,7 +84,15 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         )}
       </div>
       <div style={{ padding: '4px 8px 8px', color: '#6b7280' }}>
-        <div>{block.category}{block.status === 'running' && <span style={{ color: '#2563eb', fontWeight: 600 }}> · running…</span>}</div>
+        <div>
+          {block.category}
+          {block.status === 'running' && (
+            <span style={{ color: '#2563eb', fontWeight: 600 }}>
+              {' '}
+              · running{block.running_seconds != null && ` (${Math.round(block.running_seconds)}s)`}…
+            </span>
+          )}
+        </div>
 
         {paramEntries.length > 0 && (
           <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3 }}>

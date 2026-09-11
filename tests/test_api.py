@@ -622,6 +622,50 @@ def test_stale_reason_is_absent_for_green_and_grey_blocks(client, tmp_path):
     assert client.get("/api/graph").json()["blocks"][read["id"]]["stale_reason"] is None  # green
 
 
+def test_running_seconds_is_null_normally_and_a_number_while_running(client, tmp_path):
+    import threading
+    import time
+
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n1\n2\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    assert read["running_seconds"] is None
+
+    slow = client.post(
+        "/api/blocks",
+        json={
+            "category": "ai_slow",
+            "block_type": "standard",
+            "code": "def slow(df):\n    import time\n    time.sleep(2)\n    return df\n",
+            "inputs": [{"name": "df", "type": "dataframe"}],
+            "outputs": [{"name": "out", "type": "dataframe"}],
+            "metadata_transform": {"kind": "passthrough"},
+        },
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": read["id"], "from_port": "out", "to_block": slow["id"], "to_port": "df"},
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    runner = api_module.SESSION.runner
+    thread = threading.Thread(target=lambda: runner.run_block(slow["id"]))
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not runner.is_running(slow["id"]) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runner.is_running(slow["id"])
+
+    out = client.get("/api/graph").json()["blocks"][slow["id"]]
+    assert out["status"] == "running"
+    assert out["running_seconds"] is not None
+    assert out["running_seconds"] >= 0
+
+    thread.join(timeout=10)
+    out = client.get("/api/graph").json()["blocks"][slow["id"]]
+    assert out["running_seconds"] is None
+
+
 def test_recovery_is_offered_after_edits_and_rebuilds_the_graph(client, tmp_path):
     client.post("/api/blocks", json={"category": "filter", "params": {"expr": "a > 1"}})
     info = client.get("/api/project/recovery").json()["recovery"]

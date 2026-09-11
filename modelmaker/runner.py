@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import queue as queue_mod
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -131,6 +132,36 @@ def _short(value: Any, limit: int = 24) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _is_fusable_block(block: BlockInstance) -> BlockSpec | None:
+    """The registry spec for `block` if it's eligible to join a streaming
+    run's fusion (see Runner._build_fusion_groups), else None. Fusable
+    means: a registry block (never custom/AI-authored code -- the LLM
+    contract in llm/prompts.py keeps assuming plain eager pl.DataFrame)
+    with a lazy_fn (see BlockSpec.lazy_fn), no group_by (grouping needs
+    materialized data to partition_by), and no role/output_dir/block_id
+    auto-fill -- fusable blocks (filter/select/groupby_agg/join/read_csv
+    today) only ever take plain params, and this also guards against a
+    future lazy_fn'd block that actually needs one of these, which
+    _run_fused_group doesn't resolve.
+
+    A module-level function (not a Runner method) because it needs no
+    instance state -- Runner._fusable_spec just delegates to it, and
+    compiler.py's streaming-mode compile (see
+    compiler._build_compile_fusion_groups) imports it directly, so the
+    live engine and a compiled script agree on exactly what fuses."""
+    if block.is_custom or block.group_by:
+        return None
+    spec = BLOCK_REGISTRY.get(block.category)
+    if spec is None or spec.lazy_fn is None:
+        return None
+    fn = spec.fn
+    if accepts_param(fn, "output_dir") or accepts_param(fn, "block_id"):
+        return None
+    if any(find_role_param(fn, role) for role in ROLE_PARAM_NAMES):
+        return None
+    return spec
+
+
 class _SchemaView:
     """Duck-types just enough of pl.DataFrame (`.columns`, `.schema[name]`)
     for a metadata_transform to run against a plain `{name: dtype_str}`
@@ -147,6 +178,34 @@ class _SchemaView:
     def __init__(self, schema: dict[str, str]):
         self.columns = list(schema.keys())
         self.schema = schema
+
+
+@dataclass
+class FusionGroup:
+    """One streaming run's fusion group (see Runner._build_fusion_groups):
+    a connected set of fusable blocks executed as a single polars lazy
+    plan in one subprocess. Not required to be a straight-line chain --
+    fan-out (one block feeding several fusable consumers) and fan-in (e.g.
+    a join whose both sides are fusable) both stay inside one group, as
+    long as every member is fusable (see Runner._fusable_spec).
+
+    `members` names every block computed as part of this group's plan, in
+    topological order. `exits` names the subset that need an actual
+    collected DataFrame and a real cache entry: a member with a
+    downstream dataframe consumer outside the group, or none at all.
+    Every other member is purely interior -- computed as part of the
+    group's one lazy plan, but never independently cached (reported as
+    "fused").
+
+    `sinks` maps a terminal-write block id (e.g. write_csv, folded onto
+    the group's tail -- see BlockSpec.lazy_sink_fn) to the group member
+    whose output it writes straight to disk via the streaming engine,
+    without that member ever needing a collected DataFrame. A sink
+    produces no DataFrame and is never in `exits`."""
+
+    members: list[str]
+    exits: set[str]
+    sinks: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -218,6 +277,20 @@ class Runner:
     def is_running(self, block_id: str | None = None) -> bool:
         with self._active_lock:
             return (block_id in self._active) if block_id is not None else bool(self._active)
+
+    def running_elapsed(self, block_id: str) -> float | None:
+        """Seconds since this block's current dispatch started, or None if
+        it isn't running -- a crude heartbeat for the UI while polars gives
+        no finer-grained progress for a `collect(engine="streaming")` or a
+        `collect_all(...)` call (see _dispatch/_dispatch_fused_group,
+        which both stamp "started_at" here). Several exits of one fused
+        group share the same started_at, so they report identically for as
+        long as the group's single subprocess is in flight."""
+        with self._active_lock:
+            handle = self._active.get(block_id)
+            if handle is None:
+                return None
+            return time.monotonic() - handle["started_at"]
 
     def cancel(self, block_id: str | None = None) -> bool:
         """Stop whichever run is currently in flight. With no block_id,
@@ -442,27 +515,11 @@ class Runner:
 
     def _fusable_spec(self, block: BlockInstance) -> BlockSpec | None:
         """The registry spec for `block` if it's eligible to join a
-        streaming run's fusion (see _build_fusion_groups), else None.
-        Fusable means: a registry block (never custom/AI-authored code --
-        the LLM contract in llm/prompts.py keeps assuming plain eager
-        pl.DataFrame) with a lazy_fn (see BlockSpec.lazy_fn), no group_by
-        (grouping needs materialized data to partition_by), and no
-        role/output_dir/block_id auto-fill -- fusable blocks (filter/
-        select/groupby_agg/join/read_csv today) only ever take plain
-        params, and this also guards against a future lazy_fn'd block that
-        actually needs one of these, which _run_fused_group doesn't
-        resolve."""
-        if block.is_custom or block.group_by:
-            return None
-        spec = BLOCK_REGISTRY.get(block.category)
-        if spec is None or spec.lazy_fn is None:
-            return None
-        fn = spec.fn
-        if accepts_param(fn, "output_dir") or accepts_param(fn, "block_id"):
-            return None
-        if any(find_role_param(fn, role) for role in ROLE_PARAM_NAMES):
-            return None
-        return spec
+        streaming run's fusion (see _build_fusion_groups), else None --
+        see module-level _is_fusable_block, which this just delegates to
+        (it needs no Runner state; compiler.py's streaming-mode compile
+        reuses the exact same rule via that free function)."""
+        return _is_fusable_block(block)
 
     def run_block(self, block_id: str, plan: RunPlan | None = None) -> Status:
         """Requires all of this block's inputs to currently be green.
@@ -633,7 +690,7 @@ class Runner:
         errors: dict[Any, str] = {}
 
         with self._active_lock:
-            self._active[block_id] = {"cancel_event": cancel_event}
+            self._active[block_id] = {"cancel_event": cancel_event, "started_at": time.monotonic()}
 
         def _start_next() -> None:
             while pending and len(running) < max(1, max_workers):
@@ -683,26 +740,32 @@ class Runner:
         return results
 
     def _dispatch_fused_group(
-        self, group_key: str, steps: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, str]], pl.DataFrame]:
-        """Runs one streaming run's fused chain (see _build_fusion_groups)
+        self, exits: list[str], steps: list[dict[str, Any]]
+    ) -> tuple[dict[str, dict[str, str]], dict[str, pl.DataFrame]]:
+        """Runs one streaming run's fused group (see _build_fusion_groups)
         to completion in its own subprocess -- same isolation rationale as
         _dispatch above (a crash or runaway allocation only takes down this
         worker), trimmed to a single task since a fused group is inherently
         one unit of work, not a pool of independent ones, so there's no
-        worker-pool bookkeeping to do. `group_key` is the group's exit
-        block id -- used the same way `_dispatch`'s `block_id` is, so
-        cancel()/is_running() work identically for a fused group as for any
-        other in-flight run. Returns (per_step_schema, collected_result) on
-        success; raises RunCancelled or RuntimeError exactly like _dispatch
-        does on cancellation or a worker crash/error."""
+        worker-pool bookkeeping to do. `exits` is the group's exit block
+        ids -- there can be more than one now that a group is a DAG rather
+        than just a chain (see FusionGroup) -- each registered in
+        self._active sharing the same cancel_event, so status()/
+        is_running() report "running" for every exit while the group is in
+        flight, and cancel() called against any one of them stops the
+        whole subprocess. Returns (schemas, results) on success; raises
+        RunCancelled or RuntimeError exactly like _dispatch does on
+        cancellation or a worker crash/error."""
         result_queue = MP_CONTEXT.Queue()
         cancel_event = MP_CONTEXT.Event()
+        task_key = "+".join(exits)
+        started_at = time.monotonic()
 
         with self._active_lock:
-            self._active[group_key] = {"cancel_event": cancel_event}
+            for eid in exits:
+                self._active[eid] = {"cancel_event": cancel_event, "started_at": started_at}
 
-        p = MP_CONTEXT.Process(target=run_fused_group_entry, args=(steps, result_queue, group_key), daemon=True)
+        p = MP_CONTEXT.Process(target=run_fused_group_entry, args=(steps, result_queue, task_key), daemon=True)
         p.start()
         try:
             while True:
@@ -722,7 +785,8 @@ class Runner:
                 p.terminate()
             p.join(timeout=5)
             with self._active_lock:
-                self._active.pop(group_key, None)
+                for eid in exits:
+                    self._active.pop(eid, None)
 
         if not ok:
             raise RuntimeError(payload)
@@ -809,59 +873,97 @@ class Runner:
                 combined.append(dict(zip(group_values, values)))
         return combined[0] if len(combined) == 1 else tuple(combined)
 
-    def _run_fused_group(self, group: list[tuple[str, str | None]], plan: RunPlan, report: dict[str, str]) -> None:
+    def _run_fused_group(self, group: FusionGroup, plan: RunPlan, report: dict[str, str]) -> None:
         """Runs one fusion group (see _build_fusion_groups) end to end and
         writes `report` in place -- the streaming-run counterpart of
-        run_block for a chain of 2+ blocks fused into a single polars
-        query. Only the group's exit block (its last member) gets a real
-        cache entry/RunState update; interior members are marked "fused"
-        and left otherwise untouched, exactly as documented on
-        run_all_streaming."""
+        run_block for a DAG of 2+ blocks fused into a single polars query.
+        Every exit in the group -- there can be more than one now that
+        fan-out/fan-in no longer force a checkpoint, see FusionGroup --
+        gets a real cache entry/RunState update; every other member is
+        marked "fused" and left otherwise untouched. A sink member (e.g.
+        write_csv folded onto the group's tail -- see
+        BlockSpec.lazy_sink_fn) gets a RunState update too, but no cache
+        entry, since it produces no DataFrame -- exactly like write_csv's
+        ordinary (non-streaming) run."""
+        member_set = set(group.members)
         steps: list[dict[str, Any]] = []
-        input_metas_per_step: list[dict[str, dict[str, ColumnMeta]]] = []
+        input_metas_per_step: dict[str, dict[str, dict[str, ColumnMeta]]] = {}
+        chain_inputs_per_step: dict[str, dict[str, str]] = {}
 
-        for bid, chain_port in group:
+        for bid in group.members:
             block = plan.graph.blocks[bid]
-            spec = self._fusable_spec(block)
-            assert spec is not None, f"non-fusable block {bid!r} in a fusion group"
+            is_sink = bid in group.sinks
+            if not is_sink:
+                assert self._fusable_spec(block) is not None, f"non-fusable block {bid!r} in a fusion group"
             kwargs: dict[str, Any] = dict(block.params)
+            if is_sink:
+                # Same output_dir/block_id auto-fill run_block does for an
+                # ordinary output block (see accepts_param) -- a sink step
+                # never goes through run_block, so it has to happen here.
+                sink_spec = BLOCK_REGISTRY[block.category]
+                if block.block_type == "output" and accepts_param(sink_spec.lazy_sink_fn, "output_dir"):
+                    kwargs["output_dir"] = self.output_dir
+                if block.block_type == "output" and accepts_param(sink_spec.lazy_sink_fn, "block_id"):
+                    kwargs["block_id"] = bid
+            chain_inputs: dict[str, str] = {}
             input_metas: dict[str, dict[str, ColumnMeta]] = {}
             for port, wire in plan.graph.input_wires(bid).items():
-                if port == chain_port:
-                    continue  # filled in below, chained from the previous step's real output schema
+                if wire.from_block in member_set:
+                    chain_inputs[port] = wire.from_block
+                    continue
                 df, meta = self._real_df_and_meta(wire, plan)
                 kwargs[port] = df
                 input_metas[port] = meta
-            steps.append({"category": block.category, "kwargs": kwargs, "chain_port": chain_port})
-            input_metas_per_step.append(input_metas)
+            steps.append(
+                {
+                    "id": bid,
+                    "category": block.category,
+                    "kwargs": kwargs,
+                    "chain_inputs": chain_inputs,
+                    "is_exit": bid in group.exits,
+                    "is_sink": is_sink,
+                }
+            )
+            input_metas_per_step[bid] = input_metas
+            chain_inputs_per_step[bid] = chain_inputs
 
-        exit_id, _ = group[-1]
+        def _fail_group(error: str) -> None:
+            now = _now()
+            for eid in group.exits:
+                st = self._st(eid)
+                st.last_attempt_key = plan.key(eid)
+                st.last_attempt_at = now
+                st.failed = True
+                st.last_error = error
+                report[eid] = "red"
+            for bid in group.members:
+                if bid not in group.exits:
+                    report[bid] = "fused (group failed)"
+
         try:
-            schemas, final_df = self._dispatch_fused_group(exit_id, steps)
+            schemas, results = self._dispatch_fused_group(sorted(group.exits), steps)
         except Exception as e:  # noqa: BLE001 -- captured as block state, same contract as run_block
-            st = self._st(exit_id)
-            st.last_attempt_key = plan.key(exit_id)
-            st.last_attempt_at = _now()
-            st.failed = True
-            st.last_error = f"{type(e).__name__}: {e}"
-            report[exit_id] = "red"
-            for bid, _ in group[:-1]:
-                report[bid] = "fused (group failed)"
+            _fail_group(f"{type(e).__name__}: {e}")
             return
 
-        # Chain each member's own metadata_transform forward using the
-        # schemas the worker returned -- collect_schema() never touched
-        # data, so this reconstructs full role/dtype tracking (including
-        # column_role_overrides and the duplicate-unique-role check) through
-        # the fused stretch without having materialized any interior
-        # result, not just a bare dtype fallback at the exit.
-        out_meta: dict[str, ColumnMeta] = {}
-        for (bid, chain_port), input_metas, schema in zip(group, input_metas_per_step, schemas):
+        # Chain each member's own metadata_transform forward, in the
+        # group's topological order, using the schemas the worker
+        # returned -- collect_schema() never touched data, so this
+        # reconstructs full role/dtype tracking (including
+        # column_role_overrides and the duplicate-unique-role check)
+        # through the whole fused DAG without having materialized any
+        # interior result, not just a bare dtype fallback at the exits. A
+        # sink member has no output schema of its own and is skipped here.
+        out_meta_by_id: dict[str, dict[str, ColumnMeta]] = {}
+        for bid in group.members:
+            if bid in group.sinks:
+                continue
             block = plan.graph.blocks[bid]
-            if chain_port is not None:
-                input_metas[chain_port] = out_meta
+            input_metas = dict(input_metas_per_step[bid])
+            for port, src_id in chain_inputs_per_step[bid].items():
+                input_metas[port] = out_meta_by_id[src_id]
             spec = BLOCK_REGISTRY[block.category]
-            metas = spec.metadata_transform(input_metas, {"out": _SchemaView(schema)}, block.params)
+            metas = spec.metadata_transform(input_metas, {"out": _SchemaView(schemas[bid])}, block.params)
             out_meta = dict(metas.get("out", {}))
             if block.column_role_overrides:
                 for name, role_value in block.column_role_overrides.items():
@@ -870,29 +972,37 @@ class Runner:
             dup = find_duplicate_unique_role(out_meta)
             if dup:
                 role, cols = dup
-                st = self._st(exit_id)
-                st.last_attempt_key = plan.key(exit_id)
-                st.last_attempt_at = _now()
-                st.failed = True
-                st.last_error = f"role '{role.value}' is set on more than one column: {', '.join(cols)}"
-                report[exit_id] = "red"
-                for other_bid, _ in group[:-1]:
-                    report[other_bid] = "fused (group failed)"
+                _fail_group(f"role '{role.value}' is set on more than one column: {', '.join(cols)}")
                 return
-            if bid != exit_id:
+            out_meta_by_id[bid] = out_meta
+            if bid not in group.exits:
                 report[bid] = "fused"
 
-        key = plan.key(exit_id)
-        packet = DataFramePacket(data=final_df, schema_meta=out_meta).with_lineage(exit_id)
-        self.cache.set(key, {"out": packet})
-        st = self._st(exit_id)
-        st.last_attempt_key = key
-        st.last_attempt_at = _now()
-        st.last_successful_key = key
-        st.last_successful_basis = plan.basis(exit_id)
-        st.failed = False
-        st.last_error = None
-        report[exit_id] = self.status(exit_id) if exit_id in self.graph.blocks else "deleted during run"
+        now = _now()
+        for sink_id in group.sinks:
+            key = plan.key(sink_id)
+            self.cache.set(key, {})
+            st = self._st(sink_id)
+            st.last_attempt_key = key
+            st.last_attempt_at = now
+            st.last_successful_key = key
+            st.last_successful_basis = plan.basis(sink_id)
+            st.failed = False
+            st.last_error = None
+            report[sink_id] = self.status(sink_id) if sink_id in self.graph.blocks else "deleted during run"
+
+        for eid in group.exits:
+            key = plan.key(eid)
+            packet = DataFramePacket(data=results[eid], schema_meta=out_meta_by_id[eid]).with_lineage(eid)
+            self.cache.set(key, {"out": packet})
+            st = self._st(eid)
+            st.last_attempt_key = key
+            st.last_attempt_at = now
+            st.last_successful_key = key
+            st.last_successful_basis = plan.basis(eid)
+            st.failed = False
+            st.last_error = None
+            report[eid] = self.status(eid) if eid in self.graph.blocks else "deleted during run"
 
     def _ordered_ancestors(self, block_id: str, plan: RunPlan) -> list[str]:
         anc = plan.graph.ancestors([block_id])
@@ -993,83 +1103,146 @@ class Runner:
                 to_run.append(bid)
         return to_run, report
 
-    def _build_fusion_groups(self, to_run: list[str], plan: RunPlan) -> list[list[tuple[str, str | None]]]:
-        """Partitions `to_run` (topo-ordered) into fusion groups: a maximal
-        straight-line chain of fusable blocks per group, each entry a
-        (block_id, chain_port) pair -- chain_port is None for a group's
-        head (all of whose dataframe inputs, if any, come from cache or,
-        for an input block, from its own params) and names the one port
-        that receives the previous member's still-lazy output for every
-        later member.
-
-        Block `b` extends predecessor `p`'s group only if `p` is fusable,
-        already placed in a group, and `b` is the *only* not-yet-current
-        dataframe consumer of `p` anywhere in the graph -- multiple
-        qualifying predecessors (fan-in) or multiple such consumers of one
-        predecessor (fan-out) both fall back to starting a new group
-        instead, which just means less fusion, never wrong results (see
-        the MVP scope note on this in the streaming-run design). A
+    def _build_fusion_groups(self, to_run: list[str], plan: RunPlan) -> list[FusionGroup]:
+        """Partitions `to_run` (topo-ordered) into fusion groups (see
+        FusionGroup): each maximal connected component of fusable blocks
+        (following dataframe wires in either direction) becomes one
+        group, executed as a single polars lazy plan -- fan-out (one
+        block feeding several fusable consumers) and fan-in (e.g. a join
+        whose both sides are fusable) both stay inside one group, rather
+        than forcing a checkpoint the way a chain-only algorithm would. A
         non-fusable block is always its own singleton group and can never
-        be chained onto by a later block."""
+        be absorbed into another one.
+
+        Within a group, a member is an "exit" -- gets a real collected
+        DataFrame and its own cache entry -- iff it has a downstream
+        dataframe consumer outside the group, or no downstream dataframe
+        consumer at all (a leaf the user actually wants materialized).
+        Every other member is purely interior, reported as "fused".
+
+        A trailing sink-capable block (write_csv today -- see
+        BlockSpec.lazy_sink_fn) is folded onto a group as a terminal
+        write, replacing what would otherwise be its predecessor's
+        collected exit, whenever that predecessor's *only* dataframe
+        consumer anywhere in the graph is this one sink -- see the second
+        pass below."""
         to_run_set = set(to_run)
-        groups: list[list[tuple[str, str | None]]] = []
-        group_index: dict[str, int] = {}
-
+        fusable: dict[str, BlockSpec] = {}
         for bid in to_run:
-            block = plan.graph.blocks[bid]
-            spec = self._fusable_spec(block)
-            if spec is None:
-                groups.append([(bid, None)])
-                group_index[bid] = len(groups) - 1
-                continue
+            spec = self._fusable_spec(plan.graph.blocks[bid])
+            if spec is not None:
+                fusable[bid] = spec
 
-            port_types = {p.name: p.type for p in block.inputs}
-            chainable: list[tuple[str, str]] = []
+        parent: dict[str, str] = {bid: bid for bid in fusable}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        port_types_cache: dict[str, dict[str, str]] = {}
+
+        def port_types(bid: str) -> dict[str, str]:
+            if bid not in port_types_cache:
+                port_types_cache[bid] = {p.name: p.type for p in plan.graph.blocks[bid].inputs}
+            return port_types_cache[bid]
+
+        for bid in fusable:
             for port, wire in plan.graph.input_wires(bid).items():
-                if port_types.get(port) != "dataframe":
+                if port_types(bid).get(port) != "dataframe":
                     continue
-                pred = wire.from_block
-                if pred not in to_run_set or pred not in group_index:
-                    continue
-                if self._fusable_spec(plan.graph.blocks[pred]) is None:
-                    continue
-                consumers = {
-                    w.to_block
-                    for w in plan.graph.wires.values()
-                    if w.from_block == pred
-                    and w.to_block in to_run_set
-                    and {p.name: p.type for p in plan.graph.blocks[w.to_block].inputs}.get(w.to_port) == "dataframe"
-                }
-                if consumers != {bid}:
-                    continue  # fan-out: pred must stay a checkpoint
-                chainable.append((pred, port))
+                if wire.from_block in fusable:
+                    union(bid, wire.from_block)
 
-            if len(chainable) == 1:
-                pred, port = chainable[0]
-                gi = group_index[pred]
-                groups[gi].append((bid, port))
-                group_index[bid] = gi
+        groups_by_root: dict[str, list[str]] = {}
+        for bid in to_run:  # preserves the caller's topological order
+            key = find(bid) if bid in fusable else bid
+            groups_by_root.setdefault(key, []).append(bid)
+
+        groups: list[FusionGroup] = []
+        group_index: dict[str, int] = {}
+        for members in groups_by_root.values():
+            member_set = set(members)
+            if len(members) == 1 and members[0] not in fusable:
+                groups.append(FusionGroup(members=list(members), exits=set(member_set)))
             else:
-                groups.append([(bid, None)])
+                exits: set[str] = set()
+                for bid in members:
+                    out_ports = {p.name for p in plan.graph.blocks[bid].outputs if p.type == "dataframe"}
+                    df_consumers = [
+                        w
+                        for w in plan.graph.wires.values()
+                        if w.from_block == bid
+                        and w.from_port in out_ports
+                        and w.to_block in plan.graph.blocks
+                        and port_types(w.to_block).get(w.to_port) == "dataframe"
+                    ]
+                    if not df_consumers or any(w.to_block not in member_set for w in df_consumers):
+                        exits.add(bid)
+                groups.append(FusionGroup(members=list(members), exits=exits))
+            for bid in members:
                 group_index[bid] = len(groups) - 1
 
-        return groups
+        # Sink attachment: fold a to_run sink-capable block into its sole
+        # fusable predecessor's group when that predecessor's only
+        # dataframe consumer anywhere in the graph is this one sink. A
+        # sink block is never itself fusable, so it always starts out as
+        # its own singleton group -- that's the only shape this ever folds
+        # away.
+        for group in groups:
+            for eid in list(group.exits):
+                block = plan.graph.blocks[eid]
+                out_ports = {p.name for p in block.outputs if p.type == "dataframe"}
+                all_wires = [w for w in plan.graph.wires.values() if w.from_block == eid and w.from_port in out_ports]
+                if len(all_wires) != 1:
+                    continue
+                sink_id = all_wires[0].to_block
+                if sink_id not in to_run_set:
+                    continue
+                sink_idx = group_index.get(sink_id)
+                if sink_idx is None or groups[sink_idx] is group or len(groups[sink_idx].members) != 1:
+                    continue
+                sink_block = plan.graph.blocks[sink_id]
+                if sink_block.is_custom or sink_block.group_by:
+                    continue
+                sink_spec = BLOCK_REGISTRY.get(sink_block.category)
+                if sink_spec is None or sink_spec.lazy_sink_fn is None:
+                    continue
+                if len(plan.graph.input_wires(sink_id)) != 1:
+                    continue
+                groups[sink_idx].members = []  # folded into `group`; dropped below
+                group.exits.discard(eid)
+                group.members.append(sink_id)
+                group.sinks[sink_id] = eid
+
+        return [g for g in groups if g.members]
 
     def run_all_streaming(self) -> dict[str, str]:
-        """Like run_all, but fuses whatever contiguous stretch of the
+        """Like run_all, but fuses whatever connected stretch of the
         pipeline it safely can (see _build_fusion_groups) into a single
         polars query per group, executed with a streaming collect -- the
         one path in this engine where a source larger than memory doesn't
-        have to fully materialize at every block boundary. An explicit,
-        opt-in action: ordinary run_all/run_to_here/single-block runs are
-        completely unaffected by this method existing.
+        have to fully materialize at every block boundary. Fan-out (one
+        block feeding several fusable consumers) and fan-in (e.g. a join
+        whose both sides are fusable) both stay fused rather than forcing
+        a checkpoint; a sink-capable terminal block (write_csv) fused onto
+        a group's tail skips the collect entirely, streaming straight to
+        disk. An explicit, opt-in action: ordinary run_all/run_to_here/
+        single-block runs are completely unaffected by this method
+        existing.
 
-        A fusion group's interior members (everything but the group's
-        last/exit block) get no independent cache entry or RunState update
-        -- the report marks them "fused" rather than green/red/orange, and
-        clicking them individually still shows whatever they last were.
-        That's the real cost of streaming mode, in exchange for the fused
-        stretch never fully materializing at every step.
+        A fusion group's interior members (everything but its exits) get
+        no independent cache entry or RunState update -- the report marks
+        them "fused" rather than green/red/orange, and clicking them
+        individually still shows whatever they last were. That's the real
+        cost of streaming mode, in exchange for the fused stretch never
+        fully materializing at every step.
 
         Mutually exclusive with sample mode: sample mode already makes
         interactive iteration on a huge source cheap (see read_csv's
@@ -1082,11 +1255,11 @@ class Runner:
         to_run, report = self._streaming_to_run(plan)
         for group in self._build_fusion_groups(to_run, plan):
             if self._cancel_requested.is_set():
-                for bid, _ in group:
+                for bid in group.members:
                     report.setdefault(bid, "cancelled")
                 continue
-            if len(group) == 1:
-                bid, _ = group[0]
+            if len(group.members) == 1:
+                bid = group.members[0]
                 self.run_block(bid, plan)
                 report[bid] = self.status(bid) if bid in self.graph.blocks else "deleted during run"
                 continue
