@@ -96,6 +96,12 @@ directly instead of shelling out to the `claude` CLI:
 pip install -e ".[anthropic]"
 ```
 
+And a `tui` extra for the terminal UI (see [Terminal UI](#terminal-ui)):
+
+```bash
+pip install -e ".[tui]"
+```
+
 Install the frontend dependencies:
 
 ```bash
@@ -133,6 +139,44 @@ npm run dev
 ```
 
 Then open `http://localhost:5173` in a browser.
+
+## Terminal UI
+
+`modelmaker-tui` (installed by `pip install -e ".[tui]"`) is a
+[Textual](https://textual.textualize.io/)-based terminal alternative to the
+web UI, talking to the same backend over the same HTTP API. Lanes render as
+titled, horizontally-scrolling rows of block chips (a free 2D canvas
+doesn't map to a character grid at a readable size) colored by status; a
+Wires panel lists connections as `from.port → to.port` rather than drawn
+ASCII lines. Charts (`generate_image` blocks) render as ANSI plots via
+[plotext](https://github.com/piccolomo/plotext) instead of matplotlib, and
+can be saved to a `.txt`/`.html` file alongside the block's own PNG.
+
+```bash
+modelmaker-tui                          # spawns its own modelmaker-api, zero setup
+modelmaker-tui projects/demo_pd_model.json   # ...and loads a project on startup
+modelmaker-tui --host 127.0.0.1 --port 8001  # attach to an already-running modelmaker-api instead
+```
+
+Standalone mode spawns a real `modelmaker-api` subprocess on a loopback
+port rather than importing the backend in-process -- block execution
+spawns its own `multiprocessing` subprocesses (see `runner.py`), and
+running that inside the same process as the terminal driver risks fd-table
+conflicts between the two. `--host`/`--port` skips spawning and attaches
+to a server you already started (e.g. so the TUI and the web UI can drive
+the same session live).
+
+Key bindings (also shown in the footer): arrow keys move block selection;
+`a` adds a block, `Delete` removes the focused block or wires-list row,
+`w` starts/completes a wire (select the source block, `w`, select the
+target block, `w` again); `r` runs the selected block, `Shift+R` runs to
+it, `g`/`Ctrl+G` refresh the selected/all input sources, `Ctrl+R` runs
+all, `x` cancels a run, `m` toggles sample mode; `t` tags a column's role;
+`i` exports the selected block's chart/image; `c` compiles; `Ctrl+D`/
+`Ctrl+F` draft with AI / suggest a fix for the selected block (`Ctrl+A`
+applies the proposal, `Esc` discards it); `Ctrl+S` saves (the project, or
+the block being edited if the inspector has focus), `Ctrl+O` opens,
+`Ctrl+Z`/`Ctrl+Y` undo/redo.
 
 ## Building a self-contained package
 

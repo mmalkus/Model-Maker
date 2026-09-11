@@ -20,9 +20,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0", "httpx>=0.27.0"]
 anthropic = ["anthropic>=0.70.0"]
+# Terminal UI. Pinned below 6 -- plotext 6.x restructured the package and
+# dropped the top-level plot()/build()/save_fig() functions charts.py uses.
+tui = ["textual>=0.80.0", "httpx>=0.27.0", "plotext>=5.2.0,<6"]
 
 [project.scripts]
 modelmaker-api = "modelmaker.api:main"
+modelmaker-tui = "modelmaker.tui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["modelmaker*"]
