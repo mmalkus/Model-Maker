@@ -72,6 +72,16 @@ class BlockInstance:
     # (see compiler.compile_graph) -- so naming your data also names it in
     # the generated script.
     port_names: dict[str, str] = field(default_factory=dict)
+    # When set, this block runs once per distinct value of this column
+    # (present in one of its dataframe inputs) instead of once overall --
+    # e.g. an auc_gini block with group_by="region" produces a Gini per
+    # region instead of one for the whole dataset. See Runner._run_grouped.
+    # None (the default) is plain, ungrouped execution.
+    group_by: str | None = None
+    # Cap on how many of this block's groups may run concurrently, when
+    # group_by is set. None means "use the runner's default" (see
+    # Runner.MAX_GROUP_WORKERS). Ignored for ungrouped blocks.
+    max_workers: int | None = None
 
     def resolved_fn(self):
         if self.is_custom:

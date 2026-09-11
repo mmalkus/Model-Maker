@@ -49,6 +49,8 @@ export const api = {
       params: Record<string, unknown>
       code: string
       metadata_transform: Record<string, unknown>
+      group_by: string | null
+      max_workers: number | null
     }>,
   ) => request<BlockOut>(`/blocks/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
@@ -91,6 +93,7 @@ export const api = {
   forceRunAll: () => request<Record<string, string>>('/force_run_all', { method: 'POST' }),
   refreshAll: () => request<Record<string, string>>('/refresh_all', { method: 'POST' }),
   checkAllSources: () => request<Record<string, boolean>>('/check_all_sources', { method: 'POST' }),
+  cancelRun: () => request<{ cancelled: boolean }>('/run/cancel', { method: 'POST' }),
 
   compile: (output_blocks?: string[]) =>
     request<{ source: string }>('/compile', { method: 'POST', body: JSON.stringify({ output_blocks }) }),

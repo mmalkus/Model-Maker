@@ -6,6 +6,7 @@ const STATUS_COLOR: Record<string, string> = {
   green: '#22c55e',
   orange: '#f59e0b',
   red: '#ef4444',
+  running: '#2563eb',
 }
 
 // What kind of object each port type actually is, at a glance -- so a
@@ -58,11 +59,28 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           background: '#fafafa',
         }}
       >
-        <span style={{ width: 8, height: 8, borderRadius: 999, background: color, flexShrink: 0 }} />
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: color,
+            flexShrink: 0,
+            animation: block.status === 'running' ? 'mm-pulse 1s ease-in-out infinite' : undefined,
+          }}
+        />
         <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</strong>
+        {block.group_by && (
+          <span
+            title={`Runs once per distinct value of '${block.group_by}'`}
+            style={{ fontSize: 10, color: '#7c3aed', border: '1px solid #7c3aed55', borderRadius: 4, padding: '0 4px', flexShrink: 0 }}
+          >
+            ⟲ {block.group_by}
+          </span>
+        )}
       </div>
       <div style={{ padding: '4px 8px 8px', color: '#6b7280' }}>
-        <div>{block.category}</div>
+        <div>{block.category}{block.status === 'running' && <span style={{ color: '#2563eb', fontWeight: 600 }}> · running…</span>}</div>
 
         {paramEntries.length > 0 && (
           <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3 }}>

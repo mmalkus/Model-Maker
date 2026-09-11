@@ -112,6 +112,10 @@ class ProjectSession:
             block.position = Position(**fields["position"])
         if "params" in fields and fields["params"] is not None:
             block.params = fields["params"]
+        if "group_by" in fields:
+            block.group_by = fields["group_by"]
+        if "max_workers" in fields:
+            block.max_workers = fields["max_workers"]
         if "code" in fields and fields["code"] is not None and fields["code"] != block.code:
             block.code = fields["code"]
             block.code_version += 1

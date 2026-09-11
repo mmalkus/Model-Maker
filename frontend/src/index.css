@@ -77,3 +77,15 @@ textarea {
 table {
   color: #111827;
 }
+
+/* Pulsing dot for a block/run currently in progress -- see BlockNode.tsx's
+   'running' status badge and Toolbar.tsx's Stop button. */
+@keyframes mm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

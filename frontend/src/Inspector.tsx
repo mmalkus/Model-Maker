@@ -35,6 +35,8 @@ export function Inspector({
   const [metricValues, setMetricValues] = useState<Record<string, unknown>>({})
   const [dynamicDataframePorts, setDynamicDataframePorts] = useState<Set<string>>(new Set())
   const [dynamicImagePorts, setDynamicImagePorts] = useState<Set<string>>(new Set())
+  const [groupBy, setGroupBy] = useState<string>('')
+  const [maxWorkers, setMaxWorkers] = useState<string>('')
   const instructionRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
@@ -119,6 +121,8 @@ export function Inspector({
     setEditingName(false)
     setShowBrowser(false)
     setDrafting(false)
+    setGroupBy(block?.group_by ?? '')
+    setMaxWorkers(block?.max_workers != null ? String(block.max_workers) : '')
 
     // A block that's never been touched (still v1, still the default
     // scaffold body) is almost certainly one the user just created to hand
@@ -232,6 +236,16 @@ export function Inspector({
       }
     })
 
+  const saveGroupBy = () => {
+    const parsedWorkers = maxWorkers.trim() ? Number(maxWorkers) : null
+    run(() =>
+      api.updateBlock(block.id, {
+        group_by: groupBy.trim() ? groupBy.trim() : null,
+        max_workers: parsedWorkers != null && Number.isFinite(parsedWorkers) && parsedWorkers > 0 ? Math.floor(parsedWorkers) : null,
+      }),
+    )
+  }
+
   const saveCode = () => run(() => api.updateBlock(block.id, { code: codeText }))
 
   const saveMeta = () => {
@@ -271,7 +285,11 @@ export function Inspector({
         </h3>
       )}
       <div style={{ color: '#6b7280', marginBottom: 8 }}>
-        {block.category} &middot; {block.block_type} &middot; status: <strong>{block.status}</strong>
+        {block.category} &middot; {block.block_type} &middot; status:{' '}
+        <strong style={block.status === 'running' ? { color: '#2563eb' } : undefined}>
+          {block.status}
+          {block.status === 'running' && '…'}
+        </strong>
       </div>
 
       {block.last_error && (
@@ -281,15 +299,23 @@ export function Inspector({
       )}
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-        <button disabled={busy} onClick={() => run(() => api.run(block.id))}>
+        <button disabled={busy || block.status === 'running'} onClick={() => run(() => api.run(block.id))}>
           Run
         </button>
-        <button disabled={busy} onClick={() => run(() => api.runToHere(block.id))}>
+        <button disabled={busy || block.status === 'running'} onClick={() => run(() => api.runToHere(block.id))}>
           Run to here
         </button>
+        {block.status === 'running' && (
+          <button
+            onClick={() => run(() => api.cancelRun())}
+            style={{ color: '#b91c1c', borderColor: '#fecaca' }}
+          >
+            Stop
+          </button>
+        )}
         {block.block_type === 'input' && (
           <>
-            <button disabled={busy} onClick={() => run(() => api.refresh(block.id))}>
+            <button disabled={busy || block.status === 'running'} onClick={() => run(() => api.refresh(block.id))}>
               Refresh
             </button>
             <button
@@ -393,6 +419,46 @@ export function Inspector({
           {paramsError && <div style={{ color: '#b91c1c' }}>{paramsError}</div>}
           <button disabled={busy} onClick={saveParams} style={{ marginTop: 4 }}>
             Save params
+          </button>
+        </div>
+      )}
+
+      {block.inputs.some((p) => p.type === 'dataframe') && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Group by</div>
+          <div style={{ color: '#9ca3af', marginBottom: 4 }}>
+            Run this block once per distinct value of a column instead of once overall (e.g. Gini per region) --
+            each group runs in its own isolated process, up to "Max parallel" at a time.
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value)}
+              disabled={busy}
+              style={{ flex: 1, fontSize: 11 }}
+            >
+              <option value="">(none -- run once)</option>
+              {inputColumns.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+              {groupBy && !inputColumns.some((c) => c.name === groupBy) && <option value={groupBy}>{groupBy}</option>}
+            </select>
+            {groupBy && (
+              <input
+                type="number"
+                min={1}
+                value={maxWorkers}
+                onChange={(e) => setMaxWorkers(e.target.value)}
+                placeholder="max parallel"
+                title="Max concurrent group workers (default: a small fixed number)"
+                style={{ width: 90, fontSize: 11 }}
+              />
+            )}
+          </div>
+          <button disabled={busy} onClick={saveGroupBy} style={{ marginTop: 4 }}>
+            Save group by
           </button>
         </div>
       )}

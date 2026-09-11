@@ -96,6 +96,11 @@ function AppInner() {
         didInitialFit.current = true
         requestAnimationFrame(() => fitView({ nodes: nextBlockNodes.map((n) => ({ id: n.id })), padding: 0.2 }))
       }
+      // A run started in the background (see api.py's _start_background_run)
+      // can fail on a precondition (e.g. "Run" clicked on a block whose
+      // upstream isn't green) before any block state changes -- surfaced
+      // here once, the server clears it as soon as this read happens.
+      if (g.run_error) alert(g.run_error)
     })
   }, [collapsedLanes, fitView, onViewPort])
 
@@ -103,6 +108,19 @@ function AppInner() {
     reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Runs (a single block, a cascade, or a full sweep) execute on the server
+  // in the background -- see api.py -- so a block that's still "running"
+  // by the time reload() above returns means the run outlived its bounded
+  // wait and is genuinely still in flight. Keep polling until nothing is,
+  // so status badges (see BlockNode) and the Stop button (see Toolbar)
+  // stay live without the user having to manually refresh.
+  const anyRunning = useMemo(() => (graph ? Object.values(graph.blocks).some((b) => b.status === 'running') : false), [graph])
+  useEffect(() => {
+    if (!anyRunning) return
+    const id = setInterval(reload, 700)
+    return () => clearInterval(id)
+  }, [anyRunning, reload])
 
   useEffect(() => {
     if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort))
@@ -326,6 +344,7 @@ function AppInner() {
         projectPath={graph?.project_path ?? null}
         llmSettings={llmSettings}
         onLlmSettingsChange={setLlmSettings}
+        running={anyRunning}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />

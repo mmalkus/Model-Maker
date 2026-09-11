@@ -18,11 +18,18 @@ export function Toolbar({
   projectPath,
   llmSettings,
   onLlmSettingsChange,
+  running,
 }: {
   onChanged: () => void
   projectPath: string | null
   llmSettings: LLMSettingsOut | null
   onLlmSettingsChange: (settings: LLMSettingsOut) => void
+  // Whether any block is currently mid-run on the server (see
+  // BlockOut.status === 'running', polled by App) -- distinct from the
+  // local `busy` below, which only covers this component's own in-flight
+  // fetch (a run's own POST resolves quickly now that runs execute in the
+  // background; `running` is what stays true for the run's actual duration).
+  running: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
@@ -93,18 +100,37 @@ export function Toolbar({
         <span style={{ color: 'var(--brand-border)' }}>|</span>
         <span style={{ color: 'var(--brand-charcoal)', fontWeight: 500 }}>Model Maker</span>
       </div>
-      <button className="brand-primary" disabled={busy} onClick={() => run(() => api.runAll())}>
+      <button className="brand-primary" disabled={busy || running} onClick={() => run(() => api.runAll())}>
         Run all
       </button>
-      <button disabled={busy} onClick={() => run(() => api.forceRunAll())}>
+      <button disabled={busy || running} onClick={() => run(() => api.forceRunAll())}>
         Force run all
       </button>
-      <button disabled={busy} onClick={() => run(() => api.refreshAll())}>
+      <button disabled={busy || running} onClick={() => run(() => api.refreshAll())}>
         Refresh sources
       </button>
-      <button disabled={busy} onClick={() => run(() => api.checkAllSources())}>
+      <button disabled={busy || running} onClick={() => run(() => api.checkAllSources())}>
         Check all sources
       </button>
+      {running && (
+        <button
+          onClick={() => run(() => api.cancelRun())}
+          style={{ color: '#b91c1c', borderColor: '#fecaca', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+          title="Stop the run in progress -- the block currently executing is interrupted immediately"
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 999,
+              background: '#ef4444',
+              display: 'inline-block',
+              animation: 'mm-pulse 1s ease-in-out infinite',
+            }}
+          />
+          Stop
+        </button>
+      )}
       <button disabled={busy} onClick={doCompile}>
         Compile
       </button>
