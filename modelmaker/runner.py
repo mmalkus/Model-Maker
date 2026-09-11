@@ -446,6 +446,13 @@ class Runner:
                 call_kwargs["output_dir"] = self.output_dir
             if block.block_type == "output" and accepts_param(fn, "block_id"):
                 call_kwargs["block_id"] = block_id
+            # Same injection pattern as output_dir/block_id above: an input
+            # block that names a `sample_rows` parameter (e.g. read_csv, via
+            # a lazy scan) gets sample mode's row cap pushed to its source
+            # instead of reading everything and truncating after the fact
+            # (the fallback below, for input blocks that don't opt in).
+            if block.block_type == "input" and plan.sample_rows is not None and accepts_param(fn, "sample_rows"):
+                call_kwargs["sample_rows"] = plan.sample_rows
 
             group_col = block.group_by
             if group_col:
@@ -465,6 +472,10 @@ class Runner:
             if block.block_type == "input" and plan.sample_rows is not None:
                 # Sample mode truncates at the source, so every downstream
                 # block sees the sample without needing to know it exists.
+                # A no-op for a block that already honored `sample_rows`
+                # above (its output is at most this many rows already) --
+                # this stays the backstop for any input block that doesn't
+                # accept the param, custom AI-authored ones included.
                 raw_outputs = {
                     k: (v.head(plan.sample_rows) if isinstance(v, pl.DataFrame) else v)
                     for k, v in raw_outputs.items()

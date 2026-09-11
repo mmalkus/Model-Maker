@@ -16,7 +16,19 @@ from ..packet import ColumnMeta
 from .base import BlockSpec, PortSpec, register_block
 
 
-def read_csv(path: str) -> pl.DataFrame:
+def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # `sample_rows`, when the engine's sample mode is on, is injected by
+    # Runner.run_block the same way output_dir/block_id are (see
+    # util.accepts_param) -- an input block opts in just by naming the
+    # parameter. Scanning with `n_rows` instead of reading the whole file
+    # and truncating afterward (the fallback for input blocks that don't
+    # accept this param -- see runner.py) is the one place lazy evaluation
+    # earns its keep for sample mode: the rest of the pipeline already runs
+    # on the truncated, small-by-construction sample, so nothing downstream
+    # needs lazy frames to iterate cheaply. Full runs (sample_rows=None)
+    # read exactly as before.
+    if sample_rows is not None:
+        return pl.scan_csv(path, n_rows=sample_rows).collect()
     return pl.read_csv(path)
 
 
