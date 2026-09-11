@@ -58,6 +58,16 @@ class BlockSpec:
     # a block whose eager `fn` deliberately collects (read_csv) needs an
     # actual separate implementation.
     lazy_fn: BlockFn | None = None
+    # Optional streaming-sink twin of `fn`: takes a still-uncollected
+    # pl.LazyFrame plus the block's other params and writes it straight to
+    # its destination (e.g. LazyFrame.sink_csv), returning None -- never
+    # called through the normal eager path, only when this block is folded
+    # onto the end of a streaming run's fusion group as a terminal write
+    # (see Runner._build_fusion_groups' sink-attachment pass). None (the
+    # default) means this block is never eligible for that: it always runs
+    # as an ordinary checkpoint reading a materialized DataFrame from cache,
+    # exactly as before.
+    lazy_sink_fn: BlockFn | None = None
 
 
 BLOCK_REGISTRY: dict[str, BlockSpec] = {}

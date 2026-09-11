@@ -61,51 +61,83 @@ def run_fused_group_entry(
     result_queue: Any,
     task_key: Any,
 ) -> None:
-    """Entry point for a *streaming run*'s fused chain (see
+    """Entry point for a *streaming run*'s fused group (see
     Runner._build_fusion_groups/_dispatch_fused_group in runner.py) --
-    runs an ordered run of compatible registry blocks (filter/select/
-    groupby_agg/join and read_csv today; see BlockSpec.lazy_fn) as one
-    unbroken polars lazy plan in this single subprocess, and only collects
-    once, at the very end, with the streaming engine -- the one place in
-    this app where a source larger than memory doesn't fully materialize
-    at every block boundary.
+    runs a whole connected DAG of compatible registry blocks (filter/
+    select/groupby_agg/join and read_csv today; see BlockSpec.lazy_fn) as
+    one unbroken polars lazy plan in this single subprocess, and only
+    collects at the very end, with the streaming engine -- the one place
+    in this app where a source larger than memory doesn't fully
+    materialize at every block boundary. A group is no longer required to
+    be a straight-line chain: fan-out (one block feeding several others in
+    the same group) and fan-in (e.g. a join whose both sides are still
+    lazy) are both single lazy plans here, built up in `steps` order (a
+    topological order over the group, guaranteed by the caller) and
+    resolved by block id rather than by "the previous step".
 
-    Each `steps[i]` is `{"category", "kwargs", "chain_port"}`: `kwargs` is
-    every param this step's lazy_fn needs *except* the chained one --
+    Each `steps[i]` is `{"id", "category", "kwargs", "chain_inputs",
+    "is_exit", "is_sink"}`: `kwargs` is every param this step's lazy_fn (or
+    lazy_sink_fn, for a sink step) needs *except* the chained ones --
     including any already-materialized pl.DataFrame values read from cache
     for a non-chained dataframe input (the caller's job, see
     Runner._real_df_and_meta) -- lazily wrapped here so it joins the same
     unbroken plan rather than anchoring a fresh eager sub-result partway
-    through. `chain_port`, when not None, names the one kwarg replaced with
-    the previous step's still-uncollected LazyFrame output.
+    through. `chain_inputs` maps a kwarg name to the block id (some earlier
+    step) whose still-uncollected LazyFrame output fills it -- one entry
+    per internal edge, so a step can have more than one (a join with both
+    sides fused) or none (a group's head).
 
-    Reports `(task_key, True, (per_step_schema, collected_df))` on success
-    -- `per_step_schema` is a plain `[{col: dtype_str}, ...]`, one per step,
-    from `LazyFrame.collect_schema()` (free -- no data touched) so the
-    parent can chain each block's own metadata_transform through the fused
-    stretch without having materialized any of it -- or
-    `(task_key, False, "step <i> (<category>): <error>")` naming which
-    block in the chain actually failed. Never raises into the parent, same
-    contract as run_worker_entry above."""
+    A step with `is_exit` True needs its LazyFrame actually collected and
+    handed back as a real DataFrame; all such exits in the group are
+    collected together via `pl.collect_all(..., engine="streaming")`,
+    which applies common-subplan elimination across them, so a shared
+    upstream stretch (fan-out) is computed once even though it feeds two
+    different exits. A step with `is_sink` True is a terminal write (e.g.
+    write_csv, see BlockSpec.lazy_sink_fn): its lazy_fn is never called --
+    instead its `lazy_sink_fn` is called directly on its one chained input
+    and writes straight to disk via the streaming engine, so the block(s)
+    feeding it never need a collected DataFrame at all, in memory or in
+    the cache.
+
+    Reports `(task_key, True, (schemas, results))` on success -- `schemas`
+    is `{block_id: {col: dtype_str}}` for every step (from
+    `LazyFrame.collect_schema()`, free -- no data touched), so the parent
+    can chain each block's own metadata_transform through the fused DAG
+    without having materialized any of it; `results` is `{block_id: pl.DataFrame}`
+    for exit steps only (empty for a sink, which produces no DataFrame) --
+    or `(task_key, False, "step <i> (<category>, block <id>): <error>")`
+    naming which block in the group actually failed. Never raises into the
+    parent, same contract as run_worker_entry above."""
     import polars as pl
 
     import modelmaker.blocks.library  # noqa: F401 -- see run_worker_entry's comment on this import
     from .blocks.base import BLOCK_REGISTRY
 
     idx = -1
-    schemas: list[dict[str, str]] = []
+    schemas: dict[str, dict[str, str]] = {}
+    lazy_by_id: dict[str, pl.LazyFrame] = {}
     try:
-        chain_value: pl.LazyFrame | None = None
+        exit_ids: list[str] = []
         for idx, step in enumerate(steps):
             spec = BLOCK_REGISTRY[step["category"]]
             kwargs = {k: (v.lazy() if isinstance(v, pl.DataFrame) else v) for k, v in step["kwargs"].items()}
-            chain_port = step.get("chain_port")
-            if chain_port is not None:
-                kwargs[chain_port] = chain_value
-            chain_value = spec.lazy_fn(**kwargs)
-            schemas.append({name: str(dtype) for name, dtype in chain_value.collect_schema().items()})
-        final = chain_value.collect(engine="streaming")
-        result_queue.put((task_key, True, (schemas, final)))
+            for port, src_id in step["chain_inputs"].items():
+                kwargs[port] = lazy_by_id[src_id]
+            if step.get("is_sink"):
+                spec.lazy_sink_fn(**kwargs)
+                continue
+            value = spec.lazy_fn(**kwargs)
+            lazy_by_id[step["id"]] = value
+            schemas[step["id"]] = {name: str(dtype) for name, dtype in value.collect_schema().items()}
+            if step.get("is_exit"):
+                exit_ids.append(step["id"])
+
+        results: dict[str, pl.DataFrame] = {}
+        if exit_ids:
+            collected = pl.collect_all([lazy_by_id[eid] for eid in exit_ids], engine="streaming")
+            results = dict(zip(exit_ids, collected))
+        result_queue.put((task_key, True, (schemas, results)))
     except BaseException as e:  # noqa: BLE001 -- must reach the queue, not crash the worker silently
-        category = steps[idx]["category"] if 0 <= idx < len(steps) else "?"
-        result_queue.put((task_key, False, f"step {idx} ({category}): {type(e).__name__}: {e}"))
+        step = steps[idx] if 0 <= idx < len(steps) else None
+        where = f"step {idx} ({step['category']}, block {step['id']!r})" if step else "step ?"
+        result_queue.put((task_key, False, f"{where}: {type(e).__name__}: {e}"))

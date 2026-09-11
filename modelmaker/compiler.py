@@ -4,8 +4,10 @@ import inspect
 import textwrap
 from datetime import datetime, timezone
 
+from .blocks.base import BLOCK_REGISTRY, BlockSpec
 from .graph import Graph
 from .packet import ColumnRole, DataFramePacket, resolve_role_column
+from .runner import FusionGroup, _is_fusable_block
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 
@@ -16,6 +18,152 @@ class CompileError(Exception):
 def _sanitize(name: str) -> str:
     out = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
     return out if out and not out[0].isdigit() else f"_{out}"
+
+
+def _alloc_output_vars(
+    bid: str,
+    block,
+    out_ports: list[str],
+    var_names: dict[tuple[str, str], str],
+    used_var_names: set[str],
+) -> list[str]:
+    """Pick the compiled script's variable name(s) for `bid`'s output
+    port(s) -- a user-chosen port name (see BlockInstance.port_names) when
+    one's set and not already taken, else the block-name/id/port scheme,
+    which is always unique by construction. Shared between the ordinary
+    per-block call emission and a fused group's exit(s) (see
+    _fused_group_call_lines) so a name picked for a streaming exit reads
+    exactly like any other block's output would."""
+    varlist = []
+    for p in out_ports:
+        custom = block.port_names.get(p)
+        var = _sanitize(custom) if custom else None
+        if var is None or var in used_var_names:
+            var = f"{_sanitize(block.name)}_{bid}" if len(out_ports) == 1 else f"{_sanitize(block.name)}_{bid}_{p}"
+        used_var_names.add(var)
+        var_names[(bid, p)] = var
+        varlist.append(var)
+    return varlist
+
+
+def _build_compile_fusion_groups(graph: Graph, order: list[str], must_exit: set[str]) -> list[FusionGroup]:
+    """Compiler-side counterpart of Runner._build_fusion_groups (see
+    runner.py for the full design): groups `order` (the whole reachable
+    compile set -- a compiled script unconditionally (re)executes
+    everything it emits, so there's no "not yet current" subset the way a
+    live run has) into fusion groups exactly as FusionGroup describes,
+    using dataframe wires restricted to `order` itself -- a block outside
+    what this compile emits doesn't exist as far as the script is
+    concerned, unlike the live engine where an already-cached consumer
+    outside the run still matters for a future run.
+
+    `must_exit` (an explicitly requested `output_blocks` entry) forces a
+    real, individually-named exit even when the block's only consumer is
+    also being compiled -- the whole point of naming a block in
+    `output_blocks` is to get its own variable in the script."""
+    candidate_set = set(order)
+    fusable: dict[str, BlockSpec] = {}
+    for bid in order:
+        spec = _is_fusable_block(graph.blocks[bid])
+        if spec is not None:
+            fusable[bid] = spec
+
+    parent: dict[str, str] = {bid: bid for bid in fusable}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    port_types_cache: dict[str, dict[str, str]] = {}
+
+    def port_types(bid: str) -> dict[str, str]:
+        if bid not in port_types_cache:
+            port_types_cache[bid] = {p.name: p.type for p in graph.blocks[bid].inputs}
+        return port_types_cache[bid]
+
+    for bid in fusable:
+        for port, wire in graph.input_wires(bid).items():
+            if port_types(bid).get(port) != "dataframe":
+                continue
+            if wire.from_block in fusable:
+                union(bid, wire.from_block)
+
+    groups_by_root: dict[str, list[str]] = {}
+    for bid in order:  # preserves topo order
+        key = find(bid) if bid in fusable else bid
+        groups_by_root.setdefault(key, []).append(bid)
+
+    groups: list[FusionGroup] = []
+    for members in groups_by_root.values():
+        member_set = set(members)
+        if len(members) == 1 and members[0] not in fusable:
+            groups.append(FusionGroup(members=list(members), exits=set(member_set)))
+            continue
+        exits: set[str] = set()
+        for bid in members:
+            out_ports = {p.name for p in graph.blocks[bid].outputs if p.type == "dataframe"}
+            df_consumers = [
+                w
+                for w in graph.wires.values()
+                if w.from_block == bid
+                and w.from_port in out_ports
+                and w.to_block in candidate_set
+                and port_types(w.to_block).get(w.to_port) == "dataframe"
+            ]
+            if not df_consumers or any(w.to_block not in member_set for w in df_consumers) or bid in must_exit:
+                exits.add(bid)
+        groups.append(FusionGroup(members=list(members), exits=exits))
+    return groups
+
+
+def _fused_group_call_lines(
+    group: FusionGroup,
+    graph: Graph,
+    fn_names: dict[str, str],
+    var_names: dict[tuple[str, str], str],
+    used_var_names: set[str],
+) -> list[str]:
+    """Emit one fusion group (see _build_compile_fusion_groups) as a
+    single polars lazy plan: every member becomes a `_lz_<id> = fn(...)`
+    assignment (chained inputs referencing another member's own `_lz_`
+    variable directly; anything else -- an already-compiled eager
+    DataFrame from outside the group -- wrapped in `.lazy()` so it joins
+    the same unbroken plan), and the group's exit(s) are collected
+    together in one `pl.collect_all(..., engine="streaming")` call, which
+    applies common-subplan elimination across them so a shared upstream
+    stretch (fan-out) is computed once even when it feeds two exits."""
+    member_set = set(group.members)
+    lines: list[str] = [f"# --- Fused (streaming): {', '.join(group.members)} ---"]
+    lazy_var = {bid: f"_lz_{_sanitize(bid)}" for bid in group.members}
+
+    for bid in group.members:
+        block = graph.blocks[bid]
+        kwarg_pairs: list[tuple[str, str]] = []
+        for port, wire in sorted(graph.input_wires(bid).items()):
+            if wire.from_block in member_set:
+                kwarg_pairs.append((port, lazy_var[wire.from_block]))
+            else:
+                kwarg_pairs.append((port, f"{var_names[(wire.from_block, wire.from_port)]}.lazy()"))
+        for pname, pval in block.params.items():
+            kwarg_pairs.append((pname, repr(pval)))
+        call = f"{fn_names[bid]}({', '.join(f'{k}={v}' for k, v in kwarg_pairs)})"
+        lines.append(f"{lazy_var[bid]} = {call}")
+
+    exits = [bid for bid in group.members if bid in group.exits]
+    exit_vars = [_alloc_output_vars(bid, graph.blocks[bid], ["out"], var_names, used_var_names)[0] for bid in exits]
+    collect_call = f"pl.collect_all([{', '.join(lazy_var[bid] for bid in exits)}], engine='streaming')"
+    if len(exit_vars) == 1:
+        lines.append(f"({exit_vars[0]},) = {collect_call}")
+    else:
+        lines.append(f"{', '.join(exit_vars)} = {collect_call}")
+    return lines
 
 
 def _resolve_role_value(graph: Graph, runner, block_id: str, role: ColumnRole) -> str | None:
@@ -49,13 +197,24 @@ def compile_graph(
     runner=None,
     output_blocks: list[str] | None = None,
     strict: bool = True,
+    stream: bool = False,
 ) -> str:
     """Compile the graph to a single, self-contained Python script (plan
     section 7, default/clean mode — DataFramePacket/ColumnMeta scaffolding
     is absent by construction, since block bodies are plain-dataframe
     functions to begin with). `--with-metadata` verbose mode is not yet
     implemented.
-    """
+
+    `stream=True` mirrors Runner.run_all_streaming for a compiled script:
+    whatever connected stretch of fusable blocks (filter/select/
+    groupby_agg/join/read_csv -- see BlockSpec.lazy_fn, and
+    _build_compile_fusion_groups for the exact same grouping rule the
+    live engine uses) is emitted as one polars lazy plan, collected once
+    via `pl.collect_all(..., engine="streaming")`, instead of one eager
+    call per block -- so a compiled script's source, not just the live
+    engine, can process a source larger than memory. Default False keeps
+    every existing compiled script byte-for-byte identical to before this
+    existed."""
     targets = output_blocks or list(graph.blocks)
     reachable = graph.ancestors(targets)
 
@@ -65,6 +224,19 @@ def compile_graph(
             raise CompileError(f"blocks not ready to compile (grey/red): {not_ready}")
 
     order = [b for b in graph.topo_order() if b in reachable]
+
+    # Streaming mode groups the compile set up front so both passes below
+    # (function defs, then call sites) can tell a fused member from an
+    # ordinary one -- must_exit only applies when output_blocks was given
+    # explicitly (an unscoped compile has no extra "name this variable"
+    # requirement beyond normal graph consumption, which the grouping's
+    # own no-consumers-outside-the-group rule already covers).
+    fusion_groups = _build_compile_fusion_groups(graph, order, set(output_blocks or [])) if stream else []
+    fused_group_of: dict[str, FusionGroup] = {}
+    for group in fusion_groups:
+        if len(group.members) > 1:
+            for bid in group.members:
+                fused_group_of[bid] = group
 
     fn_names: dict[str, str] = {}
     wants_output_dir: dict[str, bool] = {}
@@ -76,11 +248,21 @@ def compile_graph(
     # function definition, shared across every instance's call site below --
     # e.g. two WoE blocks compile to one `woe_transform` function called
     # twice with each instance's own params, not two near-identical copies.
+    # A fused member's def uses its lazy_fn instead of the eager fn (see
+    # BlockSpec.lazy_fn) -- for filter/select/groupby_agg/join that's
+    # literally the same function object, so the emitted source is
+    # unchanged; only read_csv's separate lazy twin actually differs, and
+    # naturally gets its own def (different source text -> different key
+    # below) alongside any non-fused read_csv elsewhere in the script.
     seen_fns: dict[tuple[str, str], str] = {}
     used_fn_names: set[str] = set()
     for bid in order:
         block = graph.blocks[bid]
-        fn = block.resolved_fn()
+        group = fused_group_of.get(bid)
+        if group is not None:
+            fn = BLOCK_REGISTRY[block.category].lazy_fn
+        else:
+            fn = block.resolved_fn()
         wants_output_dir[bid] = accepts_param(fn, "output_dir")
         wants_block_id[bid] = accepts_param(fn, "block_id")
         wants_role_params[bid] = {
@@ -119,6 +301,7 @@ def compile_graph(
     used_var_names: set[str] = set()
     current_lane: str | None = "__unset__"
     uses_group_by = any(graph.blocks[bid].group_by for bid in order)
+    emitted_groups: set[int] = set()
     for bid in order:
         block = graph.blocks[bid]
         # Lanes group the pipeline into modeling phases (Data Prep -> Feature
@@ -130,6 +313,15 @@ def compile_graph(
             current_lane = lane_name
             if lane_name:
                 call_lines.append(f"# ===== Lane: {lane_name} =====")
+
+        group = fused_group_of.get(bid)
+        if group is not None:
+            if id(group) in emitted_groups:
+                continue  # already emitted in full when we reached the group's first member
+            emitted_groups.add(id(group))
+            call_lines.extend(_fused_group_call_lines(group, graph, fn_names, var_names, used_var_names))
+            call_lines.append("")
+            continue
 
         # (kwarg name, source-code expression for its value) pairs -- kept
         # apart instead of pre-joined into "name=value" text so grouped
@@ -155,22 +347,14 @@ def compile_graph(
         out_ports = [p.name for p in block.outputs]
         call_lines.append(f'# --- Call: {bid} | name="{block.name}" ---')
 
-        varlist = []
-        for p in out_ports:
-            # A port the user's named (see BlockInstance.port_names,
-            # settable by clicking that output's data in the UI) becomes
-            # the variable holding it here, so the compiled script reads
-            # with the same names the user gave the data -- falling back
-            # to the block-name/id/port scheme, which is always unique by
-            # construction, for any port left unnamed or whose chosen
-            # name collides with another one already used in this script.
-            custom = block.port_names.get(p)
-            var = _sanitize(custom) if custom else None
-            if var is None or var in used_var_names:
-                var = f"{_sanitize(block.name)}_{bid}" if len(out_ports) == 1 else f"{_sanitize(block.name)}_{bid}_{p}"
-            used_var_names.add(var)
-            var_names[(bid, p)] = var
-            varlist.append(var)
+        # A port the user's named (see BlockInstance.port_names, settable
+        # by clicking that output's data in the UI) becomes the variable
+        # holding it here, so the compiled script reads with the same
+        # names the user gave the data -- falling back to the
+        # block-name/id/port scheme, which is always unique by
+        # construction, for any port left unnamed or whose chosen name
+        # collides with another one already used in this script.
+        varlist = _alloc_output_vars(bid, block, out_ports, var_names, used_var_names)
 
         if block.group_by:
             call_lines.extend(_grouped_call_lines(bid, block, fn_names[bid], dataframe_ports, kwarg_pairs, varlist))
