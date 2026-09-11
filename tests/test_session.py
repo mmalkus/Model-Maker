@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -196,3 +198,47 @@ def test_undoing_a_param_edit_returns_the_block_to_green(session, tmp_path):
     # Reverting the config reaches the key that was already run and cached.
     session.undo()
     assert session.runner.status(filt.id) == "green"
+
+
+def test_undo_while_a_run_is_in_flight_does_not_disturb_it(session, tmp_path):
+    """Undo replaces the graph object wholesale. A run pinned to the old one
+    (see Runner.pin) carries on against its own copy rather than finding the
+    blocks swapped underneath it mid-execution."""
+    csv = tmp_path / "data.csv"
+    csv.write_text("a\n1\n2\n3\n")
+    with session.edit():
+        read = session.add_block("read_csv", params={"path": str(csv)})
+    with session.edit():
+        slow = session.add_block(
+            "slow_block",
+            block_type="standard",
+            inputs=[{"name": "df", "type": "dataframe"}],
+            outputs=[{"name": "out", "type": "dataframe"}],
+            code="def slow_block(df):\n    import time\n    time.sleep(1.5)\n    return df\n",
+            metadata_transform={"kind": "passthrough"},
+        )
+    with session.edit():
+        session.add_wire(read.id, "out", slow.id, "df")
+    session.runner.refresh(read.id)
+
+    errors: list[BaseException] = []
+
+    def _run():
+        try:
+            session.runner.run_all()
+        except BaseException as e:  # noqa: BLE001 -- recorded so the test can assert on it
+            errors.append(e)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not session.runner.is_running() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    session.undo()  # removes the wire under the running block
+    thread.join(timeout=60)
+
+    assert not thread.is_alive()
+    assert not errors, errors
+    # The run completed against the graph it was pinned to.
+    assert session.runner.state[slow.id].last_successful_key is not None
+    assert session.graph.wires == {}

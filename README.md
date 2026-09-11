@@ -72,6 +72,10 @@ A few things worth knowing beyond the canvas itself.
   `.modelmaker-cache/recovery.json`. After a crash or a closed browser, the
   app offers to restore it on next start. Nothing ever writes your project
   file behind your back.
+- **Editing during a run** — a run is pinned to the graph as it stood when
+  it started, so you can keep editing (or undo, or toggle sample mode) while
+  a long sweep executes. The run finishes against its own version; anything
+  you changed in the meantime simply shows as stale afterwards, saying so.
 - **Editing block code** — custom/AI-authored blocks use a real code editor
   (syntax highlighting, line numbers, bracket matching, `Ctrl-F` search);
   `Ctrl`/`Cmd-S` saves.

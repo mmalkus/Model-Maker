@@ -571,3 +571,103 @@ def test_stale_reason_is_none_for_a_block_that_has_never_run(tmp_path):
     graph, _ = _csv_graph(tmp_path)
     runner = Runner(graph, CacheStore())
     assert runner.stale_reason("b_filter") is None
+
+
+def _wait_until_running(runner, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if runner.is_running():
+            return True
+        time.sleep(0.02)
+    raise AssertionError("run never started")
+
+
+def _slow_block(graph, version: str):
+    return make_block(
+        "b_slow",
+        "slow_block",
+        block_type="standard",
+        code=(
+            "def slow_block(df):\n"
+            "    import time\n"
+            "    time.sleep(1.5)\n"
+            f"    return df.with_columns(pl.lit({version!r}).alias('version'))\n"
+        ),
+        inputs=list(graph.blocks["b_filter"].inputs),
+        outputs=list(graph.blocks["b_filter"].outputs),
+        metadata_transform={"kind": "passthrough"},
+        x=5,
+    )
+
+
+def test_a_code_edit_mid_run_cannot_mix_itself_into_the_running_block(tmp_path):
+    """A run is pinned to one version of the graph (see Runner.pin). Editing
+    a block while it executes used to send the new code to the worker
+    alongside the already-built old params, and cache whatever came out
+    under a key describing the old version."""
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_slow"] = _slow_block(graph, "v1")
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    thread = threading.Thread(target=runner.run_all)
+    thread.start()
+    _wait_until_running(runner)
+    # The edit lands while the block is mid-flight.
+    graph.blocks["b_slow"].code = graph.blocks["b_slow"].code.replace("'v1'", "'v2'")
+    graph.blocks["b_slow"].code_version += 1
+    thread.join(timeout=60)
+    assert not thread.is_alive()
+
+    # What was cached is what actually ran: the version the run was pinned to.
+    entry = runner.cache.get(runner.state["b_slow"].last_successful_key)
+    assert entry.outputs["out"].data["version"].unique().to_list() == ["v1"]
+    # And the canvas tells the truth about the edit rather than hiding it.
+    assert runner.status("b_slow") == "orange"
+    assert runner.stale_reason("b_slow") == "its code changed"
+
+
+def test_deleting_a_block_mid_run_does_not_derail_the_sweep(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_slow"] = _slow_block(graph, "v1")
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    report = {}
+    thread = threading.Thread(target=lambda: report.update(runner.run_all()))
+    thread.start()
+    _wait_until_running(runner)
+    del graph.blocks["b_filter"]
+    thread.join(timeout=60)
+
+    assert not thread.is_alive()
+    # The sweep ran to completion against the graph it was given, rather
+    # than dying on a KeyError partway through.
+    assert report.get("b_slow") == "orange" or report.get("b_slow") == "green"
+    assert runner.state["b_slow"].last_successful_key is not None
+
+
+def test_sample_mode_toggled_mid_run_does_not_change_what_that_run_produces(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n" + "".join(f"{i}\n" for i in range(1, 41)))
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    graph = Graph(blocks={"b_read": read})
+    graph.blocks["b_filter"] = make_block("b_filter", "filter", params={"expr": "a > 0"}, x=1)
+    graph.wires["w1"] = Wire("w1", "b_read", "out", "b_filter", "df")
+    graph.blocks["b_slow"] = _slow_block(graph, "v1")
+    graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    thread = threading.Thread(target=runner.run_all)
+    thread.start()
+    _wait_until_running(runner)
+    runner.sample_rows = 5
+    thread.join(timeout=60)
+
+    # The run was planned on full data and delivered full data.
+    entry = runner.cache.get(runner.state["b_slow"].last_successful_key)
+    assert entry.outputs["out"].data.height == 40
+    assert "sample mode changed" in runner.stale_reason("b_slow")

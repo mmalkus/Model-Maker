@@ -492,9 +492,8 @@ def redo_ep() -> dict[str, Any]:
 def set_sample_mode(req: SampleModeUpdate) -> dict[str, Any]:
     """Turn sample mode on (rows=N) or off (rows=null). Changes every
     block's cache key, so statuses shift immediately -- nothing re-runs
-    until asked."""
-    if SESSION.runner.is_running():
-        raise HTTPException(409, "can't change sample mode while a run is in progress")
+    until asked. Safe mid-run: a run in flight is pinned to the sample
+    setting it started with (see Runner.pin)."""
     try:
         SESSION.set_sample_rows(req.rows)
     except ValueError as e:
