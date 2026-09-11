@@ -149,7 +149,11 @@ does not survive a server restart — set the corresponding env var instead
 for a value that should.
 
 Env vars are still honored as defaults (useful for headless/CI use, or to
-set a starting point before the server starts): `MODELMAKER_LLM_PROVIDER`
+set a starting point before the server starts) -- copy
+[`.env.example`](.env.example) to `.env` and fill in what you need; it's
+loaded automatically on startup (and gitignored, so keys never get
+committed) and a real exported environment variable always overrides it.
+`MODELMAKER_LLM_PROVIDER`
 picks the provider, `MODELMAKER_LLM_MODEL` pins a model, and
 `MODELMAKER_LLM_INCLUDE_REFERENCE` (default on) controls the Polars
 reference toggle. Per provider: `lmstudio` reads `MODELMAKER_LLM_BASE_URL`

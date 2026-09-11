@@ -33,6 +33,15 @@ try:
 except ImportError:
     _anthropic_provider = None
 
+# Load a local .env file (if present) into the process environment before
+# anything reads provider API keys/config from os.environ -- lets
+# ANTHROPIC_API_KEY etc. live in a gitignored .env instead of being
+# exported by hand or typed into Settings every run. A missing .env is not
+# an error; existing environment variables always take precedence.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+
 app = FastAPI(title="Model-Maker API")
 app.add_middleware(
     CORSMiddleware,
