@@ -361,7 +361,7 @@ which is what makes the core worth paying for:
 - **Market risk / ALM** — MC and historical VaR, ES at 97.5%, backtesting
   exceptions, IRRBB scenario grids.
 - **Reserving bootstrap** — ODP bootstrap and Mack are literally fan-out +
-  quantiles (§3.7).
+  quantiles (§3.8).
 - **IFRS 9 macro scenarios** (§2.4) — the same fan-out at N=3 instead of
   N=1,000,000, with probability weights instead of equal weights.
 - **Validation** — k-fold CV, bootstrap CIs on Gini and on coefficients
@@ -385,12 +385,13 @@ sales pitch:
   insurance internal model aggregates ~20–100 risk nodes with a rich
   dependency structure — trivial compute, complex structure. Same API, wildly
   different execution strategy underneath; see §3.5.
-- **Nested stochastic.** Insurance's one-year view of a multi-year liability
-  is a stochastic-within-stochastic problem, normally dodged via LSMC
-  (least-squares Monte Carlo), replicating portfolios or curve-fitting.
-  Credit EC has no real equivalent. This is the one genuinely
-  insurance-specific piece of machinery, and it's a big one — likely a
-  "later, if at all" item.
+- **Severity of the nesting problem.** Both domains have it; insurance has it
+  worst. A one-year view of a multi-year liability with options and
+  guarantees is stochastic-within-stochastic and unavoidable; the banking
+  twin is CVA/XVA exposure simulation, while credit EC largely escapes via
+  semi-analytic conditional independence. So this is a difference of
+  *degree and of which escape you reach for*, not a clean insurance-only
+  boundary — see §3.6, which is where the actual design decision sits.
 - **Benchmarks.** Credit has closed-form ASRF to sanity-check against;
   insurance has the standard formula as a rough comparator but no analytic
   truth. Affects how much validation tooling each needs.
@@ -430,7 +431,118 @@ Both are probably needed, and they have different costs. Related decisions:
 - **Determinism under parallelism** — see §3.1(2); it has to hold whether
   the run is serial, threaded or across processes.
 
-### 3.6 Insurance pricing / underwriting
+### 3.6 Scenario valuation — the nested-simulation problem and its escapes
+
+The outer loop hands you N real-world scenarios at the horizon. At each one
+you need a **value** (own funds, portfolio value, ECL, exposure). If valuing
+itself requires simulation, you have N × M nested paths — 10⁶ × 10⁴ is not a
+compute problem, it's an impossibility. Every practical method is a way of
+*not doing that*, and they are all instances of one abstraction:
+
+> a **proxy function** (valuation surrogate) mapping risk factors → value,
+> fitted or derived once, then evaluated cheaply N times.
+
+This is not a corner of the design — for scenario-based capital it *is* the
+design. Correcting what I wrote earlier: this isn't deferrable. What's
+deferrable is how many of the escapes below we support beyond the cheapest.
+
+**The family:**
+
+1. **Closed-form / semi-analytic** — the value function is known, so evaluate
+   it directly per scenario. No fitting, no nesting, exact where it applies,
+   and it should be the default wherever the payoff permits. In credit this
+   is the conditional-independence trick: conditional on the systematic
+   factor draw the loss distribution is analytic (or FFT / saddlepoint), so
+   you integrate over factors instead of nesting — Vasicek/ASRF is its
+   limiting case, CreditRisk+ its FFT form. In insurance it covers simple
+   liabilities and vanilla market instruments.
+2. **Curve fitting** — value accurately at a *small number of deliberately
+   chosen* fitting scenarios (heavy inner simulation or exact valuation at
+   each), then fit a proxy function through those points. Few points, each
+   precise. Scenario selection is the craft.
+3. **LSMC** — the mirror image: very many fitting scenarios with very few
+   inner paths each (often 1–2), so every point is extremely noisy, and
+   least-squares regression on a basis expansion averages the noise out.
+   Same compute budget, spent the opposite way. Design params that matter:
+   basis family and degree, regressor selection (stepwise/AIC), the risk
+   factor set, and the fitting-scenarios ÷ inner-paths split.
+4. **Replicating portfolio** — fit a portfolio of instruments with known
+   closed-form values (zeros, swaps, swaptions, equity options) to match
+   liability cash flows or values across a calibration set, then value the
+   replicating portfolio under the full scenario set. The fitted object is a
+   *portfolio*, not a polynomial: interpretable, hedge-relevant, reusable.
+   Limited by the instrument universe and weak on non-market risks
+   (biometric, lapse).
+5. **Var-covar / sensitivity-based** — local expansion around the base:
+   delta, gamma, cross-gamma plus an assumed risk-factor distribution.
+   Analytic aggregation if everything is normal — but the tail is precisely
+   where normality fails, hence the non-normal variants worth supporting:
+   fat-tailed marginals and a copula pushed through the delta-gamma
+   expansion, Cornish–Fisher or moment-based quantile corrections, Johnson
+   transformations, moment-matching on the aggregate. Fast and transparent;
+   poor for path-dependent or strongly convex liabilities.
+
+**The unifying contract.** All five reduce to:
+
+```
+fit_proxy(fitting_scenarios, values | analytic_spec) -> ProxyFunction
+evaluate(ProxyFunction, scenario_set)               -> value per scenario
+```
+
+So `ProxyFunction` belongs as a first-class port type next to `distribution`
+and `model` (§7.1), and the choice of method becomes a **swappable block
+against a common interface**. That matters practically, because real
+balance sheets use different methods for different sub-portfolios and
+aggregate the results — and because being able to swap one for another and
+compare *is* a large part of how you validate the proxy.
+
+**Scenario sets as typed artefacts.** A scenario set is not "a dataframe I
+hope is the right one". It should carry: measure (**real-world vs.
+risk-neutral**), horizon, risk factors, N, generator/calibration reference,
+seed, and its purpose (fitting / validation / capital). Valuing under the
+wrong measure is a classic and expensive error, and with this metadata it
+becomes a **wire-validity check** rather than something caught in review —
+which is exactly the trick the tool already plays with `ColumnRole`, raised
+from the column to the object level. Real-world outer / risk-neutral inner
+is the standard structure and should be visible on the canvas. ESG
+integration is either a simple built-in generator or (more realistically)
+import from whatever external ESG the shop already runs, with that metadata
+attached on import.
+
+**Proxy validation — mandatory, and a real product opportunity.** The proxy
+is a model approximating a model, and supervisors scrutinise it hard:
+
+- Out-of-sample validation scenarios, fully and accurately valued, compared
+  against the proxy — with error measured not just overall but **in the
+  region that matters**, around the SCR quantile and the biting scenarios.
+- Diagnostics: error vs. each risk factor, tail error, the worst-case
+  scenarios where the proxy breaks down, stability of fitted coefficients
+  across refits, out-of-sample R².
+- Validation on deliberately chosen stress scenarios, not only random ones.
+- Refit cadence and drift: when is the proxy stale? Ties to §7.3.
+
+This pack is currently built in spreadsheets almost everywhere. A block that
+produces it is a strong candidate for a flagship feature.
+
+**Where this bites outside insurance** — reinforcing §3's thesis rather than
+undercutting it:
+
+- **CVA / XVA** is nested Monte Carlo in a bank: simulate exposure paths,
+  value the book at each path and time step. Solved with regression
+  proxies — and Longstaff–Schwartz American Monte Carlo is the direct
+  ancestor of LSMC. Same technique, different desk.
+- **Market risk**: full revaluation vs. grid vs. Taylor expansion is the
+  same trade-off; FRTB's sensitivities-based approach is a prescribed
+  var-covar.
+- **Credit EC**: semi-analytic conditional-independence (above) is the
+  escape from nesting; importance sampling handles the deep tail.
+- **IFRS 9**: ECL is a *deterministic* function of the macro scenario, so
+  it's case (1) at small N — no proxy fitting needed. Worth stating plainly,
+  because it means the scenario machinery serves the IFRS 9 work we already
+  care about without any of the fitting complexity.
+- Any what-if or stress-testing workflow where full revaluation is too slow.
+
+### 3.7 Insurance pricing / underwriting
 
 - Frequency–severity structure: Poisson/NB frequency with exposure offset ×
   Gamma/Lognormal/Tweedie severity, combined to pure premium.
@@ -445,7 +557,7 @@ Both are probably needed, and they have different costs. Related decisions:
   which is not the same construction as credit Gini).
 - One-way vs. multi-way analysis views.
 
-### 3.7 Insurance reserving
+### 3.8 Insurance reserving
 
 - Claims triangle construction from transactional data (accident/underwriting
   period × development period), incremental and cumulative.
@@ -462,7 +574,7 @@ Both are probably needed, and they have different costs. Related decisions:
   same feature as the IFRS 9 overlay register (§2.4): a block whose params
   are human judgements carrying a justification and an approver.
 
-### 3.8 Insurance capital specifics, on top of the shared spine
+### 3.9 Insurance capital specifics, on top of the shared spine
 
 Distribution fitting, copulas, the simulation engine, risk measures and
 aggregation/allocation all come from §3.1 — they are *not* insurance line
@@ -474,7 +586,7 @@ items. What's genuinely additional here:
   needs to be an explicit, documented modelling choice).
 - Loss-absorbing capacity of technical provisions and deferred taxes.
 - Risk margin (cost-of-capital on projected future SCRs) — which needs the
-  SCR projected forward, i.e. the nested problem from §3.4.
+  SCR projected forward, i.e. the nested problem from §3.6.
 - Standard-formula comparison as a benchmark/sanity view alongside the
   internal model result.
 - **P&L attribution** — mandatory annual test: attribute realised P&L to the
@@ -489,13 +601,13 @@ items. What's genuinely additional here:
   change-log entry. This is the insurance twin of §4's change-materiality
   feature and the same machinery serves both.
 
-### 3.9 IFRS 17 adjacency (probably out of scope, worth naming)
+### 3.10 IFRS 17 adjacency (probably out of scope, worth naming)
 
 Building blocks for fulfilment cash flows, risk adjustment (confidence-level
 or cost-of-capital), CSM roll-forward, and cohort/grouping. Very large scope;
 mention only so we can explicitly say "not now".
 
-### 3.10 What the engine lacks for any of §3
+### 3.11 What the engine lacks for any of §3
 
 - No `model` / `distribution` / `simulation` port type flowing over a wire
   with the same richness as `DataFramePacket` (there's a typed-port notion in
@@ -538,7 +650,7 @@ all, and it's largely orthogonal to the modelling blocks.
   blocks need the equivalent. Every model doc has this section and it's
   always reconstructed from memory at the end.
 - **Expert judgement / override log** — shared mechanism with §2.4 overlays
-  and §3.7 actuarial selections.
+  and §3.8 actuarial selections.
 - **Data lineage back to source systems** — `lineage` currently lists block
   ids. Extend to: source system, extract date, query/file, owner. The
   question "where did this field come from" must be answerable end to end.
@@ -690,10 +802,13 @@ Things that would need to change under the hood for a lot of the above.
 These are the decisions with the longest lead time, so worth settling early.
 
 1. **Non-dataframe packets as first-class citizens** — fitted model objects,
-   distributions, simulation results (NumPy arrays, not frames), metric
-   bundles. Currently the packet is dataframe-shaped; ports are typed in the
-   plan but the richness (metadata, caching, preview, compilation) is
-   dataframe-specific. Prerequisite for all of §3.
+   distributions, **proxy functions** (§3.6), **scenario sets** with their
+   measure/horizon/purpose metadata, simulation results (NumPy arrays, not
+   frames), metric bundles. Currently the packet is dataframe-shaped; ports
+   are typed in the plan but the richness (metadata, caching, preview,
+   compilation) is dataframe-specific. Prerequisite for all of §3 — and the
+   scenario-set metadata is what turns "valued under the wrong measure" from
+   a review finding into a wire-validity error.
 2. **Sub-graph iteration** — run a branch once per scenario / per fold / per
    simulation / per segment, then collect. Needed for macro scenarios (§2.4),
    CV and bootstrap (§1.4), the whole of §3, and per-segment models. This
@@ -783,13 +898,22 @@ Not a plan, just my read on where the value/effort ratio sits.
   Because it is shared, it should be costed as core infrastructure rather
   than as a domain feature — the per-domain work on top is comparatively
   thin.
+- **The scenario/proxy layer** (§3.6): typed scenario sets, a `ProxyFunction`
+  port type, and at least the closed-form and one fitted method behind a
+  common interface, plus the proxy validation pack. Not separable from the
+  above for any scenario-based capital use case — the nesting problem has to
+  be answered the moment you do that work at all. The cheap entry point is
+  closed-form/semi-analytic only (which is all IFRS 9 needs); LSMC,
+  replicating portfolios and non-normal var-covar are increments on the same
+  interface.
 - Full IFRS 9 chain: lifetime PD → staging → ECL → attribution (§2.4)
 - Lazy/streaming or DuckDB execution (§7.4)
 
 **Explicit "decide whether we care" list**
-- Nested stochastic / LSMC (§3.4) — the one genuinely insurance-only piece
-  of heavy machinery; recommend deferring
-- IFRS 17 (§3.9) — recommend no, for now
+- *Which* proxy methods beyond closed-form to support, and in what order —
+  LSMC, replicating portfolios, non-normal var-covar (§3.6). The interface
+  is the commitment; each method is then an increment
+- IFRS 17 (§3.10) — recommend no, for now
 - Multi-user / access control / server deployment (§4)
 - Fairness testing and EU AI Act positioning (§1.4, §4)
 
