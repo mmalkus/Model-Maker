@@ -719,6 +719,18 @@ def force_run_all() -> dict[str, Any]:
     return report if report is not None else {"started": True}
 
 
+@app.post("/api/run_all_streaming")
+def run_all_streaming() -> dict[str, Any]:
+    """Opt-in streaming run (see Runner.run_all_streaming): fuses whatever
+    contiguous stretch of compatible blocks it safely can into a single
+    polars query per group, so a source larger than memory doesn't fully
+    materialize at every block boundary. A precondition failure (sample
+    mode is on) surfaces the same way run_to_here's does -- see
+    _start_background_run."""
+    report = _start_background_run(lambda: SESSION.runner.run_all_streaming())
+    return report if report is not None else {"started": True}
+
+
 @app.post("/api/refresh_all")
 def refresh_all() -> dict[str, Any]:
     report = _start_background_run(lambda: SESSION.runner.refresh_all())
@@ -728,9 +740,10 @@ def refresh_all() -> dict[str, Any]:
 @app.post("/api/run/cancel")
 def cancel_run() -> dict[str, bool]:
     """Stop whatever's currently running -- a single block, a run_to_here
-    cascade, or a run_all/force_run_all/refresh_all sweep. The in-flight
-    block's own subprocess(es) are terminated immediately (see
-    Runner._dispatch); a cascade also stops issuing further blocks rather
+    cascade, a run_all/force_run_all/refresh_all/run_all_streaming sweep,
+    or one streaming run's fused group. The in-flight block's own
+    subprocess(es) are terminated immediately (see Runner._dispatch/
+    _dispatch_fused_group); a cascade also stops issuing further blocks rather
     than continuing on to the next one."""
     return {"cancelled": SESSION.runner.cancel()}
 

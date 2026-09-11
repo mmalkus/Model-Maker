@@ -141,6 +141,37 @@ def test_run_all_and_compile(client, tmp_path):
     assert "def filter(" in compiled["source"]
 
 
+def test_run_all_streaming_endpoint(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n" + "".join(f"{i},{i * 10}\n" for i in range(1, 11)))
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    filt = client.post("/api/blocks", json={"category": "filter", "params": {"expr": "a > 5"}, "x": 200}).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": read["id"], "from_port": "out", "to_block": filt["id"], "to_port": "df"},
+    )
+
+    # No refresh() needed first -- a fusable input block (read_csv) is
+    # scanned live as part of the streaming run's fused chain.
+    report = client.post("/api/run_all_streaming").json()
+    assert report[filt["id"]] == "green"
+    assert report[read["id"]] == "fused"
+
+    preview = client.get(f"/api/blocks/{filt['id']}/preview").json()
+    assert sorted(r["a"] for r in preview["rows"]) == [6, 7, 8, 9, 10]
+
+
+def test_run_all_streaming_refuses_in_sample_mode(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a\n" + "".join(f"{i}\n" for i in range(1, 6)))
+    client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}})
+    client.put("/api/sample_mode", json={"rows": 5})
+
+    resp = client.post("/api/run_all_streaming")
+    assert resp.status_code == 409
+    assert "sample mode" in resp.json()["detail"]
+
+
 def test_compile_before_run_returns_409(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")

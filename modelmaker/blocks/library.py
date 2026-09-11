@@ -39,6 +39,17 @@ def _probe_read_csv(params: dict) -> float | None:
         return None
 
 
+def _read_csv_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
+    # The lazy twin of read_csv (see BlockSpec.lazy_fn) -- used only by a
+    # streaming run's fusion path (see Runner._dispatch_fused_group), which
+    # collects once at the end of a whole fused chain rather than here.
+    # Ordinary calls to `read_csv` above are untouched and still always
+    # return a materialized pl.DataFrame.
+    if sample_rows is not None:
+        return pl.scan_csv(path, n_rows=sample_rows)
+    return pl.scan_csv(path)
+
+
 register_block(
     BlockSpec(
         category="read_csv",
@@ -47,6 +58,7 @@ register_block(
         inputs=[],
         outputs=[PortSpec("out")],
         fn=read_csv,
+        lazy_fn=_read_csv_lazy,
         metadata_transform=infer_dtypes,
         probe=_probe_read_csv,
     )
@@ -65,6 +77,10 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=filter_rows,
+        # filter_rows is pure expression-based code (`.filter(pl.sql_expr(...))`),
+        # identical over pl.DataFrame/pl.LazyFrame -- reused verbatim as the
+        # lazy_fn a streaming run's fusion path calls (see BlockSpec.lazy_fn).
+        lazy_fn=filter_rows,
         metadata_transform=passthrough,
     )
 )
@@ -82,6 +98,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=select_cols,
+        lazy_fn=select_cols,  # same reasoning as filter's lazy_fn above
         metadata_transform=narrow_from_single_input,
     )
 )
@@ -113,6 +130,7 @@ register_block(
         inputs=[PortSpec("df")],
         outputs=[PortSpec("out")],
         fn=groupby_agg,
+        lazy_fn=groupby_agg,  # same reasoning as filter's lazy_fn above
         metadata_transform=_groupby_meta,
     )
 )
@@ -138,6 +156,7 @@ register_block(
         inputs=[PortSpec("left"), PortSpec("right")],
         outputs=[PortSpec("out")],
         fn=join,
+        lazy_fn=join,  # same reasoning as filter's lazy_fn above
         metadata_transform=_join_meta,
     )
 )

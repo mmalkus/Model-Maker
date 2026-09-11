@@ -92,6 +92,13 @@ export const api = {
 
   runAll: () => request<Record<string, string>>('/run_all', { method: 'POST' }),
   forceRunAll: () => request<Record<string, string>>('/force_run_all', { method: 'POST' }),
+  // Opt-in streaming run (see Runner.run_all_streaming): fuses whatever
+  // contiguous stretch of compatible blocks it safely can into one polars
+  // query per group, so a source larger than memory doesn't fully
+  // materialize at every block boundary. Fused interior blocks report as
+  // "fused" rather than turning green individually -- see the tooltip on
+  // the toolbar button that calls this.
+  runAllStreaming: () => request<Record<string, string>>('/run_all_streaming', { method: 'POST' }),
   refreshAll: () => request<Record<string, string>>('/refresh_all', { method: 'POST' }),
   checkAllSources: () => request<Record<string, boolean>>('/check_all_sources', { method: 'POST' }),
   cancelRun: () => request<{ cancelled: boolean }>('/run/cancel', { method: 'POST' }),
