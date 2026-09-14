@@ -189,18 +189,24 @@ routes stay under `/api/*`, so nothing conflicts. That means a single
 built assets are picked up as package data, so they're included in a wheel
 or sdist built from the repo.
 
+A non-editable install or build runs `npm install && npm run build` for
+you (wired in via `setup.py`), so this is normally all you need:
+
 ```bash
-cd frontend
-npm install
-npm run build
-cd ..
 pip install .          # or: python -m build
-modelmaker-api          # now serves the UI at http://127.0.0.1:8001/ too
+modelmaker-api          # serves the UI at http://127.0.0.1:8001/ too
 ```
 
-`modelmaker/static/` is a build artifact (gitignored, not checked in) —
-regenerate it with `npm run build` whenever you want an up-to-date bundle,
-including before building a distributable wheel/sdist.
+Requires Node.js on `PATH`. If it's missing, or the frontend build fails,
+packaging falls back to a backend-only package with a warning instead of
+failing outright — set `MODELMAKER_SKIP_FRONTEND_BUILD=1` to skip the
+frontend step on purpose (e.g. CI building a backend-only wheel).
+
+`pip install -e .` (editable/dev installs) skips this, since backend-only
+iteration is the common case there — run `npm run build` yourself first if
+you also want the UI available locally in that mode.
+
+`modelmaker/static/` is a build artifact (gitignored, not checked in).
 
 ## LLM provider
 

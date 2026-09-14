@@ -1,0 +1,6 @@
+include README.md LICENSE NOTICE
+graft frontend
+prune frontend/node_modules
+prune frontend/dist
+global-exclude __pycache__
+global-exclude *.py[cod]
