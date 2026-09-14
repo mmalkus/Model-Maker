@@ -115,6 +115,9 @@ class ModelMakerClient:
     async def recover(self) -> dict[str, Any]:
         return await self._post("/api/project/recover")
 
+    async def dismiss_recovery(self) -> dict[str, Any]:
+        return await self._post("/api/project/recovery/dismiss")
+
     async def undo(self) -> dict[str, Any]:
         return await self._post("/api/undo")
 

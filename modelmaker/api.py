@@ -485,6 +485,15 @@ def recover_ep() -> dict[str, Any]:
     return _graph_out()
 
 
+@app.post("/api/project/recovery/dismiss")
+def dismiss_recovery_ep() -> dict[str, str]:
+    """Discard the crash-recovery snapshot without applying it -- called
+    when the user declines the restore prompt, so the same stale snapshot
+    doesn't keep coming back on every future startup."""
+    SESSION.clear_recovery()
+    return {"status": "ok"}
+
+
 @app.post("/api/undo")
 def undo_ep() -> dict[str, Any]:
     if not SESSION.undo():

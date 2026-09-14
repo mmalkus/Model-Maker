@@ -64,17 +64,15 @@ class ModelMakerTUI(App):
         Binding("ctrl+o", "open_project", "Open"),
         Binding("ctrl+z", "undo", "Undo"),
         Binding("ctrl+y", "redo", "Redo"),
-        Binding("left", "nav_left", "Prev block", show=False),
-        Binding("right", "nav_right", "Next block", show=False),
         Binding("a", "add_block", "Add block"),
         Binding("delete", "delete_selected", "Delete"),
-        Binding("backspace", "delete_selected", "Delete", show=False),
         Binding("r", "run_selected", "Run"),
         Binding("R", "run_to_here", "Run to here", show=False),
         Binding("g", "refresh_selected", "Refresh src"),
         Binding("ctrl+r", "run_all", "Run all"),
         Binding("ctrl+g", "refresh_all_sources", "Refresh all"),
         Binding("ctrl+t", "run_all_streaming", "Run all (stream)"),
+        Binding("f", "toggle_fullscreen_preview", "Fullscreen preview"),
         Binding("x", "cancel_run", "Cancel run"),
         Binding("m", "toggle_sample", "Sample mode"),
         Binding("w", "wire_toggle", "Wire"),
@@ -97,6 +95,7 @@ class ModelMakerTUI(App):
         self.wire_pending: tuple[str, str] | None = None
         self.pending_draft: dict[str, Any] | None = None
         self._did_initial_focus = False
+        self.preview_fullscreen = False
 
         self.status = StatusBar()
         self.canvas = Canvas()
@@ -154,6 +153,13 @@ class ModelMakerTUI(App):
                 try:
                     await self.client.recover()
                     self.notify("recovered")
+                except APIError as e:
+                    self.notify(str(e), severity="error")
+            else:
+                # Declined -- don't ask again with the same stale snapshot
+                # on every future startup.
+                try:
+                    await self.client.dismiss_recovery()
                 except APIError as e:
                     self.notify(str(e), severity="error")
 
@@ -264,10 +270,28 @@ class ModelMakerTUI(App):
         except Exception as e:  # noqa: BLE001 -- surfaced to the user, not fatal
             self.preview.show_message(f"chart error: {e}")
 
+    def action_toggle_fullscreen_preview(self) -> None:
+        """The preview panel is normally squeezed into a 62-column sidebar
+        under the inspector -- too narrow to actually read a wide table.
+        This hides the canvas and inspector so the preview can take the
+        whole screen, and puts it back exactly as it was on toggle-off."""
+        self.preview_fullscreen = not self.preview_fullscreen
+        self.canvas.display = not self.preview_fullscreen
+        self.inspector.display = not self.preview_fullscreen
+        right = self.query_one("#right")
+        if self.preview_fullscreen:
+            right.styles.width = "1fr"
+            self.preview.focus_active()
+        else:
+            right.styles.width = None
+            if self.selected_block_id:
+                self.canvas.focus_block(self.selected_block_id)
+
     # ---- selection ---------------------------------------------------------
 
     def on_block_chip_selected(self, event: BlockChip.Selected) -> None:
         self.selected_block_id = event.block_id
+        self.canvas.highlight_neighbors(event.block_id)
         self.run_worker(self.refresh_inspector(), exclusive=True, group="inspector")
         self.run_worker(self.refresh_preview(), exclusive=True, group="preview")
 
@@ -278,16 +302,6 @@ class ModelMakerTUI(App):
                 return True
             node = node.parent
         return False
-
-    # ---- navigation ---------------------------------------------------------
-
-    def action_nav_left(self) -> None:
-        if isinstance(self.focused, BlockChip):
-            self.canvas.focus_adjacent(self.focused.block_id, -1)
-
-    def action_nav_right(self) -> None:
-        if isinstance(self.focused, BlockChip):
-            self.canvas.focus_adjacent(self.focused.block_id, 1)
 
     # ---- save / load ---------------------------------------------------------
 
@@ -396,9 +410,17 @@ class ModelMakerTUI(App):
         await self.refresh_all()
         self.canvas.focus_block(block["id"])
 
+    @work(exclusive=True)
     async def action_delete_selected(self) -> None:
         focused = self.focused
         if isinstance(focused, BlockChip):
+            block = self.graph["blocks"].get(focused.block_id)
+            name = block.get("name") if block else focused.block_id
+            confirmed = await self.push_screen_wait(
+                ConfirmScreen(f"Delete block '{name}'? (Ctrl+Z undoes this)")
+            )
+            if not confirmed:
+                return
             try:
                 await self.client.delete_block(focused.block_id)
             except APIError as e:
@@ -411,6 +433,9 @@ class ModelMakerTUI(App):
             row = focused.cursor_row
             wire_id = focused.wire_id_for_row(row) if row is not None else None
             if wire_id is None:
+                return
+            confirmed = await self.push_screen_wait(ConfirmScreen("Delete this wire? (Ctrl+Z undoes this)"))
+            if not confirmed:
                 return
             try:
                 await self.client.delete_wire(wire_id)
