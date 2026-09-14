@@ -505,6 +505,9 @@ function AppInner() {
                 borderRadius: 4,
               }}
             >
+              <a href="https://www.quantology.nl/" target="_blank" rel="noreferrer">
+                Quantology
+              </a>
               <a href="https://github.com/mmalkus/Model-Maker" target="_blank" rel="noreferrer">
                 GitHub
               </a>

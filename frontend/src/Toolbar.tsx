@@ -111,14 +111,20 @@ export function Toolbar({
         borderBottom: '1px solid rgba(11,35,64,0.1)',
       }}
     >
-      <img src="/brand-quantology/icon-mark-light.svg" alt="" width={24} height={24} style={{ display: 'block' }} />
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12 }}>
+      <a
+        href="https://www.quantology.nl/"
+        target="_blank"
+        rel="noreferrer"
+        title="Quantology"
+        style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12, textDecoration: 'none' }}
+      >
+        <img src="/brand-quantology/icon-mark-light.svg" alt="" width={24} height={24} style={{ display: 'block' }} />
         <strong style={{ color: 'var(--brand-ink)', fontFamily: 'var(--font-heading)', fontSize: 16, fontWeight: 600 }}>
           Quantology
         </strong>
         <span style={{ color: 'var(--brand-border)' }}>|</span>
         <span style={{ color: 'var(--brand-charcoal)', fontWeight: 500 }}>Model Maker</span>
-      </div>
+      </a>
       <button className="brand-primary" disabled={busy || running} onClick={() => run(() => api.runAll())}>
         Run all
       </button>
