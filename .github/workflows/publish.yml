@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/modelmaker
+      url: https://pypi.org/p/quantology-modelmaker
     permissions:
       id-token: write # required for PyPI trusted publishing (OIDC)
     steps:

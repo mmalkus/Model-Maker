@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "modelmaker"
+name = "quantology-modelmaker"
 version = "0.1.0"
 description = "Visual pipeline builder for financial model development"
 readme = "README.md"
