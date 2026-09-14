@@ -83,6 +83,19 @@ PARAM_SPECS: dict[str, list[FieldSpec]] = {
         FieldSpec("col", "Column to compare", "column"),
         FieldSpec("bins", "Bins", "number"),
     ],
+    "fit_master_scale": [
+        FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
+        FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+        FieldSpec("n_grades", "Number of grades", "number"),
+        FieldSpec("algorithm", "Algorithm", "select", options=("quantile", "equal_width", "monotonic_default_rate")),
+    ],
+    "assign_rating_grade": [
+        FieldSpec("score_col", "Score column (defaults to the scale's own)", "column", auto_role="predicted"),
+    ],
+    "rating_summary": [
+        FieldSpec("grade_col", "Grade column", "column"),
+        FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+    ],
 }
 
 

@@ -1,6 +1,7 @@
 import {
   Background,
   Controls,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
@@ -479,6 +480,7 @@ function AppInner() {
               setSelectedId(null)
               setSelectedPort(null)
             }}
+            proOptions={{ hideAttribution: true }}
           >
             <Background />
             <Controls />
@@ -491,6 +493,25 @@ function AppInner() {
               onMove={moveLane}
             />
             <LaneResizeHandles lanes={laneLayout} collapsedLanes={collapsedLanes} onResize={resizeLane} />
+            <Panel
+              position="bottom-right"
+              style={{
+                display: 'flex',
+                gap: 10,
+                fontSize: 11,
+                color: 'var(--brand-charcoal, #6b7280)',
+                background: 'rgba(255,255,255,0.85)',
+                padding: '3px 8px',
+                borderRadius: 4,
+              }}
+            >
+              <a href="https://github.com/mmalkus/Model-Maker" target="_blank" rel="noreferrer">
+                GitHub
+              </a>
+              <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noreferrer">
+                Apache 2.0 License
+              </a>
+            </Panel>
           </ReactFlow>
         </div>
         {selectedPort && graph ? (

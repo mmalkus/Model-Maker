@@ -29,7 +29,9 @@ def test_demo_project_runs_green_end_to_end(in_repo_root):
     session.load(DEMO)
     assert session.graph.blocks, "demo project has no blocks"
 
-    session.runner.refresh_all()
+    # Just Run all, the way the README tells a new user to do it -- its
+    # sources have never been read, so run_all() reads them itself (see
+    # Runner._sweep) instead of leaving the whole pipeline blocked.
     session.runner.run_all()
 
     failures = {
@@ -43,7 +45,6 @@ def test_demo_project_runs_green_end_to_end(in_repo_root):
 def test_demo_project_produces_the_headline_validation_metrics(in_repo_root):
     session = ProjectSession(recovery_path=None)
     session.load(DEMO)
-    session.runner.refresh_all()
     session.runner.run_all()
 
     metrics = {}

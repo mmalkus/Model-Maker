@@ -81,20 +81,33 @@ def test_editing_params_cascades_orange_not_upstream(tmp_path):
     assert runner.status("b_read") == "green"
 
 
-def test_run_all_blocks_on_ungread_input_then_succeeds(tmp_path):
+def test_run_all_reads_a_never_touched_source_then_succeeds(tmp_path):
     graph, _ = _csv_graph(tmp_path)
     runner = Runner(graph, CacheStore())
 
     report = runner.run_all()
-    assert report["b_filter"].startswith("blocked")
-    assert runner.status("b_filter") == "grey"
-
-    runner.refresh("b_read")
-    report = runner.run_all()
+    assert runner.status("b_read") == "green"
     assert report["b_filter"] == "green"
 
     report2 = runner.run_all()
     assert report2["b_filter"] == "green"
+
+
+def test_run_all_does_not_reread_a_source_already_read_but_stale(tmp_path):
+    graph, csv_path = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.run_all()
+    assert runner.status("b_read") == "green"
+    read_key_before = runner.state["b_read"].last_successful_key
+
+    other_csv = tmp_path / "other.csv"
+    other_csv.write_text("a,b\n9,90\n")
+    graph.blocks["b_read"].params["path"] = str(other_csv)
+    assert runner.status("b_read") == "orange"
+
+    runner.run_all()
+    assert runner.status("b_read") == "orange"
+    assert runner.state["b_read"].last_successful_key == read_key_before
 
 
 def test_red_status_keeps_stale_green_output_and_recovers(tmp_path):
@@ -328,6 +341,47 @@ def test_group_by_produces_one_metric_row_per_group(tmp_path):
     for gini_value in metric.data["gini"].to_list():
         assert -1.0 <= gini_value <= 1.0
     assert metric.schema_meta["region"].role.value == "segment"
+
+
+def _regional_classification_graph(tmp_path):
+    csv_path = tmp_path / "class_scores.csv"
+    csv_path.write_text(
+        "region,x,y\n"
+        "north,1,0\nnorth,2,1\nnorth,3,0\nnorth,4,1\nnorth,5,0\nnorth,6,1\n"
+        "south,1,0\nsouth,2,1\nsouth,3,0\nsouth,4,1\nsouth,5,0\nsouth,6,1\n"
+    )
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    logreg = make_block("b_logreg", "logistic_regression", params={"target": "y", "features": ["x"]}, x=1)
+    graph = Graph(
+        blocks={"b_read": read, "b_logreg": logreg},
+        wires={"w1": Wire("w1", "b_read", "out", "b_logreg", "df")},
+    )
+    return graph
+
+
+def test_group_by_on_a_model_output_block_keeps_the_model_output_per_group(tmp_path):
+    # A "model"-typed output (logistic_regression's fitted-model artifact)
+    # is a plain dict too, just like a scalar_metric's -- but unlike a
+    # scalar_metric it must NOT be folded into a per-group dataframe (see
+    # Runner._combine_group_results): a fitted model has no natural
+    # per-group table shape, and folding it into one produced a *second*
+    # dataframe output, which broke _predictions_meta's assumption of
+    # exactly one dataframe output (regression test for that bug).
+    graph = _regional_classification_graph(tmp_path)
+    graph.blocks["b_logreg"].group_by = "region"
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_block("b_logreg") == "green"
+    outputs = runner.cache.get(runner.state["b_logreg"].last_successful_key).outputs
+    predictions = outputs["predictions"]
+    assert predictions.data.height == 12
+    assert set(predictions.data["region"].unique().to_list()) == {"north", "south"}
+
+    model = outputs["model"]
+    assert isinstance(model, dict)
+    assert set(model) == {"north", "south"}
+    assert model["north"]["target"] == "y"
 
 
 def test_group_by_on_a_dataframe_output_block_concatenates_rows(tmp_path):

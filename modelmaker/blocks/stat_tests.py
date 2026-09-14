@@ -92,6 +92,33 @@ def psi_test(expected: pl.DataFrame, actual: pl.DataFrame, col: str, bins: int =
     }
 
 
+def rating_summary(df: pl.DataFrame, grade_col: str, target_col: str) -> dict:
+    """Per-grade population and observed default rate -- the standard check
+    that a rating scale (see modelling.fit_master_scale/assign_rating_grade)
+    is monotonic: default rate should rise, never fall, from the
+    lowest-risk grade to the highest."""
+    stats = df.group_by(grade_col).agg(n=pl.len(), default_rate=pl.col(target_col).mean())
+    stats = stats.sort(pl.col(grade_col).cast(pl.Int64, strict=False), nulls_last=True)
+    rows = stats.to_dicts()
+    rates = [r["default_rate"] for r in rows]
+    monotonic = all(a <= b for a, b in zip(rates, rates[1:]))
+    return {"kind": "rating_summary", "grades": rows, "monotonic": monotonic}
+
+
+register_block(
+    BlockSpec(
+        category="rating_summary",
+        block_type="output",
+        group="tests",
+        display_name="Rating scale summary",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=rating_summary,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)
+
+
 register_block(
     BlockSpec(
         category="psi_test",

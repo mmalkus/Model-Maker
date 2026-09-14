@@ -44,7 +44,8 @@ to re-run any time — it just re-syncs dependencies and rebuilds.
 runnable PD pipeline over [`sample_data/pd_model_data.csv`](sample_data):
 load → clean → weight-of-evidence → train/test split → logistic regression →
 Gini, KS and PSI. Open it with **Load** (it's what the file dialog opens on),
-then **Refresh sources** followed by **Run all**.
+then **Run all** — it reads the CSV source itself since it's never been read
+before, then runs the rest of the pipeline.
 
 It's the quickest way to see what a finished graph looks like, and the test
 suite runs it end to end so it can't rot.

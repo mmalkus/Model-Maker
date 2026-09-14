@@ -867,7 +867,7 @@ class Runner:
                     for gval, v in zip(group_values, values)
                 ]
                 combined.append(pl.concat(parts, how="diagonal_relaxed"))
-            elif all(isinstance(v, dict) for v in values):
+            elif block.outputs[i].type == "scalar_metric" and all(isinstance(v, dict) for v in values):
                 combined.append(pl.DataFrame([{group_col: gval, **v} for gval, v in zip(group_values, values)]))
             else:
                 combined.append(dict(zip(group_values, values)))
@@ -1037,7 +1037,20 @@ class Runner:
             if self._cancel_requested.is_set():
                 report[bid] = "cancelled"
                 continue
-            if plan.graph.blocks[bid].block_type == "input":
+            block = plan.graph.blocks[bid]
+            if block.block_type == "input":
+                # A source that's *never* been read blocks every downstream
+                # block anyway (see _blocked_on_unread_input) -- reporting
+                # the whole rest of the pipeline as permanently "blocked"
+                # instead of just reading it isn't useful to anyone, so the
+                # first read happens here automatically. A source that has
+                # been read before but is merely stale (an edited param,
+                # sample mode toggled, ...) is left alone: re-reading it is
+                # a deliberate, sometimes expensive action (Refresh sources),
+                # not something a plain Run all should decide to do on its
+                # own once data has already been pulled in once.
+                if self._st(bid).last_successful_key is None:
+                    self.run_block(bid, plan)
                 continue
             if self._blocked_on_unread_input(bid, plan):
                 report[bid] = "blocked: upstream input block has never been read"
@@ -1052,8 +1065,10 @@ class Runner:
 
     def run_all(self) -> dict[str, str]:
         """Topological order; skips blocks already current under this run's
-        pinned graph; input blocks are never (re)run here — see
-        refresh()/refresh_all()."""
+        pinned graph. Input blocks are read here too, but only the first
+        time -- an input block that's already been read at least once stays
+        untouched by Run all, however stale; re-reading it is what Refresh
+        sources is for (see refresh()/refresh_all())."""
         self._cancel_requested.clear()
         return self._sweep(self.pin(), force=False)
 
