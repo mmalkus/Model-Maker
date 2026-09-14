@@ -18,9 +18,7 @@ The project has two parts:
 The [`quantology-modelmaker`](https://pypi.org/project/quantology-modelmaker/)
 package on PyPI ships both: the frontend's built bundle is baked into the
 wheel, so `modelmaker-api` alone serves the whole app on one port with no
-separate frontend build or Node.js install required. Building from a clone
-of this repo is only needed if you're developing Model-Maker itself — see
-[Development](#development).
+separate frontend build or Node.js install required.
 
 ## Install
 
@@ -184,96 +182,6 @@ export MODELMAKER_LLM_PROVIDER=openai
 export OPENAI_API_KEY=sk-...
 export MODELMAKER_LLM_MODEL=gpt-5.1
 modelmaker-api
-```
-
-## Development
-
-Building or hacking on Model-Maker itself (rather than just using it)
-needs a clone of this repository and Node.js >= 18, in addition to Python
->= 3.11.
-
-Install the backend as an editable package:
-
-```bash
-pip install -e ".[dev]"
-```
-
-`[dev]` pulls in `pytest`/`httpx` for running the test suite. The
-`anthropic` and `tui` extras from [Install](#install) work the same way
-with `-e`, e.g. `pip install -e ".[tui]"`.
-
-Install the frontend dependencies:
-
-```bash
-cd frontend
-npm install
-```
-
-### Running it
-
-Run the backend and frontend in two terminals.
-
-**Backend** (FastAPI, defaults to `http://127.0.0.1:8001`):
-
-```bash
-modelmaker-api
-```
-
-This is the console script installed by `pip install -e .`; it's
-equivalent to `python -m modelmaker.api`. For auto-reload during
-development, run uvicorn directly instead:
-
-```bash
-uvicorn modelmaker.api:app --reload --port 8001
-```
-
-Override the host/port with `MODELMAKER_HOST` / `MODELMAKER_PORT`
-environment variables.
-
-**Frontend** (Vite dev server on `http://localhost:5173`, proxies `/api`
-requests to the backend on port 8001):
-
-```bash
-cd frontend
-npm run dev
-```
-
-Then open `http://localhost:5173` in a browser.
-
-### Building a self-contained package
-
-`npm run build` writes the frontend's production bundle straight into
-`modelmaker/static/` (configured in `frontend/vite.config.ts`), and
-`modelmaker.api` serves that directory at `/` whenever it's present — API
-routes stay under `/api/*`, so nothing conflicts. That means a single
-`modelmaker-api` process can serve the whole app on one port, and the
-built assets are picked up as package data, so they're included in a wheel
-or sdist built from the repo -- this is how the `quantology-modelmaker`
-package on PyPI is built.
-
-A non-editable install or build runs `npm install && npm run build` for
-you (wired in via `setup.py`), so this is normally all you need:
-
-```bash
-pip install .          # or: python -m build
-modelmaker-api          # serves the UI at http://127.0.0.1:8001/ too
-```
-
-Requires Node.js on `PATH`. If it's missing, or the frontend build fails,
-packaging falls back to a backend-only package with a warning instead of
-failing outright — set `MODELMAKER_SKIP_FRONTEND_BUILD=1` to skip the
-frontend step on purpose (e.g. CI building a backend-only wheel).
-
-`pip install -e .` (editable/dev installs) skips this, since backend-only
-iteration is the common case there — run `npm run build` yourself first if
-you also want the UI available locally in that mode.
-
-`modelmaker/static/` is a build artifact (gitignored, not checked in).
-
-### Tests
-
-```bash
-pytest
 ```
 
 ## Project structure
