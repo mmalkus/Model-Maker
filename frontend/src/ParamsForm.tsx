@@ -67,6 +67,22 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'col', label: 'Column to compare', kind: 'column' },
     { key: 'bins', label: 'Bins', kind: 'number' },
   ],
+  fit_master_scale: [
+    { key: 'score_col', label: 'Score column', kind: 'column', autoRole: 'predicted' },
+    { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
+    { key: 'n_grades', label: 'Number of grades', kind: 'number' },
+    {
+      key: 'algorithm',
+      label: 'Algorithm',
+      kind: 'select',
+      options: ['quantile', 'equal_width', 'monotonic_default_rate'],
+    },
+  ],
+  assign_rating_grade: [{ key: 'score_col', label: 'Score column (defaults to the scale’s own)', kind: 'column', autoRole: 'predicted' }],
+  rating_summary: [
+    { key: 'grade_col', label: 'Grade column', kind: 'column' },
+    { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
+  ],
 }
 
 function prettifyColumnParamLabel(key: string): string {

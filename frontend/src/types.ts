@@ -1,5 +1,5 @@
 export type Status = 'grey' | 'green' | 'orange' | 'red' | 'running'
-export type PortType = 'dataframe' | 'model' | 'scalar_metric' | 'image' | 'any'
+export type PortType = 'dataframe' | 'model' | 'scalar_metric' | 'image' | 'master_scale' | 'any'
 export type BlockType = 'input' | 'standard' | 'output'
 
 export interface PortSpec {

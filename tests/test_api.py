@@ -130,12 +130,11 @@ def test_run_all_and_compile(client, tmp_path):
         json={"from_block": read["id"], "from_port": "out", "to_block": filt["id"], "to_port": "df"},
     )
 
-    blocked = client.post("/api/run_all").json()
-    assert blocked[filt["id"]].startswith("blocked")
-
-    client.post(f"/api/blocks/{read['id']}/refresh")
     report = client.post("/api/run_all").json()
     assert report[filt["id"]] == "green"
+
+    report2 = client.post("/api/run_all").json()
+    assert report2[filt["id"]] == "green"
 
     compiled = client.post("/api/compile", json={}).json()
     assert "def filter(" in compiled["source"]

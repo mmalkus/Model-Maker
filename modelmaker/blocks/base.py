@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-PortType = Literal["dataframe", "model", "scalar_metric", "image", "any"]
+PortType = Literal["dataframe", "model", "scalar_metric", "image", "master_scale", "any"]
 # Pipeline role only -- governs runtime behavior (input blocks need no
 # upstream and support refresh/probe; output blocks may take an injected
 # output_dir). Orthogonal to where a block's code comes from: see

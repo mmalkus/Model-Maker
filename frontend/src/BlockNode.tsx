@@ -17,6 +17,7 @@ const PORT_BADGE: Record<PortType, { icon: string; label: string; color: string 
   model: { icon: '◆', label: 'model', color: '#7c3aed' },
   scalar_metric: { icon: '#', label: 'metric', color: '#16a34a' },
   image: { icon: '▨', label: 'image', color: '#ea580c' },
+  master_scale: { icon: '▤', label: 'scale', color: '#0891b2' },
   any: { icon: '?', label: 'value', color: '#6b7280' },
 }
 
