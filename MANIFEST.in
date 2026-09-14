@@ -1,4 +1,4 @@
-include README.md LICENSE NOTICE
+include README.md LICENSE NOTICE run.bat
 graft frontend
 prune frontend/node_modules
 prune frontend/dist

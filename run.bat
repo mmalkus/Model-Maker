@@ -9,16 +9,8 @@ if not exist .venv (
 
 call .venv\Scripts\activate.bat || goto :error
 
-echo Installing backend dependencies...
-python -m pip install -e ".[dev]" || goto :error
-
-echo Installing frontend dependencies...
-pushd frontend
-call npm install --no-audit --prefer-offline || goto :error
-
-echo Building frontend...
-call npm run build || goto :error
-popd
+echo Installing/updating Model Maker...
+python -m pip install --upgrade quantology-modelmaker || goto :error
 
 echo Starting Model Maker at http://127.0.0.1:8001
 modelmaker-api
