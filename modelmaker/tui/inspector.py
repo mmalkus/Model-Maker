@@ -122,12 +122,25 @@ class ParamsPanel(VerticalScroll):
         self._fields: list[ParamField] = []
         self._json_area: TextArea | None = None
         self._block: dict[str, Any] | None = None
+        self._shown_signature: tuple[Any, ...] | None = None
 
     async def show(self, block: dict[str, Any] | None, columns: list[str]) -> None:
+        # show() runs on every refresh (including each 2s poll tick, even
+        # when nothing changed) -- rebuilding unconditionally destroyed and
+        # recreated the JSON TextArea every time, which both wiped any
+        # in-progress edit and could race Textual's CSS component-style
+        # resolution on the freshly-mounted widget (KeyError on
+        # 'text-area--gutter' mid-render). Only rebuild when what would be
+        # displayed actually changed.
+        block_id = block["id"] if block is not None else None
+        signature = (block_id, block.get("params") if block else None, block.get("category") if block else None, tuple(columns))
+        self._block = block
+        if signature == self._shown_signature:
+            return
+        self._shown_signature = signature
         await self.remove_children()
         self._fields = []
         self._json_area = None
-        self._block = block
         if block is None:
             return
         specs = field_specs_for(block["category"], block.get("params") or {}, block.get("is_custom", False))
@@ -171,17 +184,28 @@ class CodePanel(Vertical):
         super().__init__()
         self._area = TextArea(language="python")
         self._is_custom = False
+        self._shown_signature: tuple[Any, ...] | None = None
 
     def compose(self):
         yield self._area
 
     def show(self, block: dict[str, Any] | None) -> None:
+        # show() runs on every refresh, including each unchanged 2s poll
+        # tick -- reloading unconditionally would wipe an in-progress edit
+        # (and reset the cursor) every couple of seconds while typing.
+        block_id = block["id"] if block is not None else None
+        is_custom = bool(block.get("is_custom")) if block is not None else False
+        code_value = (block.get("code") if is_custom else block.get("source")) if block is not None else None
+        signature = (block_id, is_custom, code_value)
+        if signature == self._shown_signature:
+            return
+        self._shown_signature = signature
         if block is None:
             self._area.load_text("")
             self._area.read_only = True
             return
-        self._is_custom = bool(block.get("is_custom"))
-        self._area.load_text((block.get("code") if self._is_custom else block.get("source")) or "")
+        self._is_custom = is_custom
+        self._area.load_text(code_value or "")
         self._area.read_only = not self._is_custom
 
     def collect_code(self) -> str | None:
@@ -204,6 +228,7 @@ class AIPanel(Vertical):
         self._hint = Static("", classes="ai-hint")
         self._proposal = TextArea("", read_only=True, language="python")
         self._proposal.display = False
+        self._shown_block_id: str | None = "__unset__"
 
     def compose(self):
         yield self.instruction
@@ -211,9 +236,17 @@ class AIPanel(Vertical):
         yield self._proposal
 
     def show(self, block: dict[str, Any] | None) -> None:
-        self.instruction.value = ""
+        # Only reset the in-progress instruction and any pending AI
+        # proposal when the selected block actually changes -- show() runs
+        # on every refresh (including each unchanged 2s poll tick), and
+        # resetting unconditionally cleared whatever the user was typing,
+        # or hid a just-received draft proposal, within a couple of seconds.
+        block_id = block["id"] if block is not None else None
+        if block_id != self._shown_block_id:
+            self._shown_block_id = block_id
+            self.instruction.value = ""
+            self._proposal.display = False
         self._hint.update("Ctrl+D draft with AI" + ("  |  Ctrl+F suggest fix" if block and block.get("last_error") else ""))
-        self._proposal.display = False
 
     def show_proposal(self, code: str | None, params: dict[str, Any] | None, explanation: str | None) -> None:
         text = (explanation or "").strip()

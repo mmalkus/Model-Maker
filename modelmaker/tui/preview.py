@@ -37,6 +37,15 @@ class PreviewPane(Vertical):
         for w in (self._table, self._chart, self._value, self._message):
             w.display = w is widget
 
+    def focus_active(self) -> None:
+        """Focus whichever view is currently shown -- only the DataTable is
+        actually focusable, but that's the case that matters: it's what
+        lets arrow/PageUp/PageDown scroll the data in fullscreen mode."""
+        for w in (self._table, self._chart, self._value, self._message):
+            if w.display:
+                w.focus()
+                return
+
     def show_dataframe(self, columns: list[dict[str, Any]], rows: list[dict[str, Any]], row_count: int) -> None:
         self._table.clear(columns=True)
         col_labels = [f"{c['name']} [{c['dtype']}]" for c in columns]

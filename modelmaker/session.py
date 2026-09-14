@@ -184,6 +184,19 @@ class ProjectSession:
             "block_count": len(blocks),
         }
 
+    def clear_recovery(self) -> None:
+        """Discard the crash-recovery snapshot. Called after a save (the
+        work it protected is now safe in the user's own project file) and
+        when the user explicitly declines the restore prompt at startup --
+        either way, re-offering the same stale snapshot on every later
+        startup would just be noise."""
+        if self.recovery_path is None:
+            return
+        try:
+            self.recovery_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def recover(self) -> None:
         if self.recovery_path is None or not self.recovery_path.exists():
             raise ValueError("no recovery snapshot available")
@@ -214,6 +227,11 @@ class ProjectSession:
         save_project(self.graph, target, project_name=self.project_name)
         self.project_path = target
         self.saved_revision = self.revision
+        # The work this snapshot exists to protect is now safely on disk in
+        # the user's own project file -- leaving it behind would just nag
+        # with the same stale "restore?" prompt on every future startup,
+        # forever, even though there's nothing left to recover.
+        self.clear_recovery()
         return target
 
     def set_sample_rows(self, rows: int | None) -> None:
