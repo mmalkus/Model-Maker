@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mmalkus/Model-Maker"
+Homepage = "https://www.quantology.nl/"
 Repository = "https://github.com/mmalkus/Model-Maker"
 Issues = "https://github.com/mmalkus/Model-Maker/issues"
 
