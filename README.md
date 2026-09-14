@@ -1,19 +1,22 @@
 # Model-Maker
 
-A SAS Enterprise Guide–style visual pipeline builder for financial model
-development in Python. Blocks contain functional Python code, are wired
-together via Polars DataFrames carrying metadata, organized visually into
-phase-labelled swimlanes, and compile down to a single, human-readable,
-self-contained Python script.
+A visual pipeline builder for financial model development in Python, with
+both a web GUI and a terminal UI, and an embedded, pluggable AI provider
+that can draft and fix blocks for you. Blocks contain functional Python
+code, are wired together via Polars DataFrames carrying metadata,
+organized visually into phase-labelled swimlanes, and compile down to a
+single, human-readable, self-contained Python script.
 
 See [`modelmaker-v2-plan.md`](modelmaker-v2-plan.md) for the full design.
 
 The project has two parts:
 
 - **`modelmaker/`** — the Python backend: block registry, graph/session
-  model, execution runner, single-file compiler, and a FastAPI HTTP API.
-- **`frontend/`** — a React + Vite UI for building and running pipelines
-  against that API.
+  model, execution runner, single-file compiler, pluggable AI-assisted
+  block drafting, a FastAPI HTTP API, and a Textual-based terminal UI
+  (`modelmaker-tui`, see [Terminal UI](#terminal-ui)).
+- **`frontend/`** — a React + Vite web UI for building and running
+  pipelines against that API.
 
 The [`quantology-modelmaker`](https://pypi.org/project/quantology-modelmaker/)
 package on PyPI ships both: the frontend's built bundle is baked into the
