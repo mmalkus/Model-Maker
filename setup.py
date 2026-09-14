@@ -1,10 +1,12 @@
 """Packaging hook.
 
 All metadata lives in pyproject.toml; this file only wires the frontend
-build into `build_py` so that `python -m build` / `pip install .` produce
-a self-contained wheel (UI bundled into modelmaker/static/) without a
-separate manual `npm run build` step. Skipped for editable installs
-(`pip install -e .`), where backend-only dev is the common case.
+build and the bundled demo project into `build_py` so that `python -m
+build` / `pip install .` produce a self-contained wheel (UI bundled into
+modelmaker/static/, demo project bundled into modelmaker/examples/)
+without separate manual steps. Skipped for editable installs (`pip
+install -e .`), where working from the repo's own projects/ and
+sample_data/ is the common case.
 """
 
 import os
@@ -17,6 +19,9 @@ from setuptools.command.build_py import build_py as _build_py
 
 _ROOT = Path(__file__).parent
 _FRONTEND = _ROOT / "frontend"
+_DEMO_PROJECT = _ROOT / "projects" / "demo_pd_model.json"
+_DEMO_DATA = _ROOT / "sample_data" / "pd_model_data.csv"
+_EXAMPLES_OUT = _ROOT / "modelmaker" / "examples"
 
 
 def _build_frontend() -> None:
@@ -42,10 +47,23 @@ def _build_frontend() -> None:
         )
 
 
+def _copy_examples() -> None:
+    if not (_DEMO_PROJECT.is_file() and _DEMO_DATA.is_file()):
+        return
+    if _EXAMPLES_OUT.exists():
+        shutil.rmtree(_EXAMPLES_OUT)
+    _EXAMPLES_OUT.mkdir(parents=True)
+    shutil.copy2(_DEMO_PROJECT, _EXAMPLES_OUT / _DEMO_PROJECT.name)
+    data_dir = _EXAMPLES_OUT / "sample_data"
+    data_dir.mkdir()
+    shutil.copy2(_DEMO_DATA, data_dir / _DEMO_DATA.name)
+
+
 class build_py(_build_py):
     def run(self):
         if not getattr(self, "editable_mode", False):
             _build_frontend()
+            _copy_examples()
         super().run()
 
 

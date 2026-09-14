@@ -2,5 +2,7 @@ include README.md LICENSE NOTICE run.bat
 graft frontend
 prune frontend/node_modules
 prune frontend/dist
+include projects/demo_pd_model.json
+graft sample_data
 global-exclude __pycache__
 global-exclude *.py[cod]

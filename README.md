@@ -56,14 +56,22 @@ it. It creates a `.venv` next to itself if missing, installs/upgrades
 [`projects/demo_pd_model.json`](projects/demo_pd_model.json) is a complete,
 runnable PD pipeline over [`sample_data/pd_model_data.csv`](sample_data):
 load → clean → weight-of-evidence → train/test split → logistic regression →
-Gini, KS and PSI. Open it with **Load** (it's what the file dialog opens on),
-then **Run all** — it reads the CSV source itself since it's never been read
-before, then runs the rest of the pipeline.
+Gini, KS and PSI. Open it with **Load**, then **Run all** — it reads the CSV
+source itself since it's never been read before, then runs the rest of the
+pipeline.
 
 It's the quickest way to see what a finished graph looks like, and the test
-suite runs it end to end so it can't rot. These files live in the git
-repository rather than the PyPI package — clone the repo (or just download
-those two files) to try it.
+suite runs it end to end so it can't rot.
+
+After `pip install quantology-modelmaker[tui]`, the fastest way to see it is:
+
+```bash
+modelmaker-tui --demo
+```
+
+which loads the copy of these two files bundled into the package. From a
+repo clone, run `modelmaker-api`/`modelmaker-tui` from the repo root instead
+and open `projects/demo_pd_model.json` (it's what the file dialog opens on).
 
 ## Working in the tool
 
@@ -110,7 +118,8 @@ can be saved to a `.txt`/`.html` file alongside the block's own PNG.
 
 ```bash
 modelmaker-tui                          # spawns its own modelmaker-api, zero setup
-modelmaker-tui projects/demo_pd_model.json   # ...and loads a project on startup
+modelmaker-tui --demo                        # ...and loads the bundled demo project (see above)
+modelmaker-tui projects/demo_pd_model.json   # ...or a project file of your own
 modelmaker-tui --host 127.0.0.1 --port 8001  # attach to an already-running modelmaker-api instead
 ```
 

@@ -727,6 +727,17 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _demo_dir() -> Path | None:
+    """Directory containing the bundled demo project + its sample CSV,
+    copied into modelmaker/examples/ at build time (see setup.py) -- or
+    None for an editable/dev install, which has no such copy and should
+    use the repo's own projects/demo_pd_model.json directly instead."""
+    from importlib import resources
+
+    examples = Path(resources.files("modelmaker")) / "examples"
+    return examples if examples.is_dir() else None
+
+
 def _wait_for_health(base_url: str, timeout: float = 20.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -752,9 +763,22 @@ def main() -> None:
     of a browser."""
     parser = argparse.ArgumentParser(prog="modelmaker-tui", description="Terminal UI for Model-Maker.")
     parser.add_argument("project", nargs="?", help="project file to load on startup")
+    parser.add_argument("--demo", action="store_true", help="load the bundled demo PD pipeline")
     parser.add_argument("--host", help="attach to an already-running modelmaker-api instead of spawning one")
     parser.add_argument("--port", type=int, default=8001, help="port for --host, or for the spawned server")
     args = parser.parse_args()
+
+    if args.demo:
+        if args.project:
+            parser.error("--demo and a project path are mutually exclusive")
+        demo_dir = _demo_dir()
+        if demo_dir is None:
+            raise SystemExit(
+                "No bundled demo found -- this looks like an editable/dev install. "
+                "From a repo clone, run: modelmaker-tui projects/demo_pd_model.json"
+            )
+        os.chdir(demo_dir)
+        args.project = "demo_pd_model.json"
 
     server_process: subprocess.Popen | None = None
     if args.host:
