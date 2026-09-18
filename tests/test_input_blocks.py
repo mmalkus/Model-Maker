@@ -1,8 +1,10 @@
-"""New file-based input blocks (read_parquet/read_json/read_excel): each
-should behave like read_csv -- infer_dtypes metadata, an mtime-based probe
-for "check for changes", and sample_rows support where a lazy/streaming
-reader exists. See modelmaker/blocks/library.py.
+"""New input blocks (read_parquet/read_json/read_excel/read_sql): each
+should behave like read_csv -- infer_dtypes metadata, a "check for changes"
+probe, and sample_rows support where a lazy/streaming reader exists. See
+modelmaker/blocks/library.py.
 """
+
+import sqlite3
 
 import polars as pl
 
@@ -145,6 +147,95 @@ def test_read_excel_compiles_and_matches_engine_output(tmp_path):
     runner.refresh("b_read")
 
     source = compile_graph(graph, runner=runner)
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["b_read_b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
+
+
+def _sqlite_db(tmp_path, rows):
+    db_path = tmp_path / "data.db"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE loans (id INTEGER, amount REAL)")
+    con.executemany("INSERT INTO loans VALUES (?, ?)", rows)
+    con.commit()
+    con.close()
+    return f"sqlite://{db_path}"
+
+
+def test_read_sql(tmp_path, monkeypatch):
+    uri = _sqlite_db(tmp_path, [(1, 100.0), (2, 200.0), (3, 300.0)])
+    monkeypatch.setenv("MM_TEST_DB_URL", uri)
+
+    graph = _single_input_graph(
+        "b_read", "read_sql", {"connection_env": "MM_TEST_DB_URL", "query": "SELECT * FROM loans ORDER BY id"}
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.status("b_read") == "green"
+    assert _output_of(runner, "b_read")["id"].to_list() == [1, 2, 3]
+
+
+def test_read_sql_never_persists_the_connection_string_in_params(tmp_path, monkeypatch):
+    # The whole point of connection_env: params (which get written into
+    # project files and baked into compiled scripts) hold only an env var
+    # *name*, never the connection string/password itself.
+    uri = _sqlite_db(tmp_path, [(1, 100.0)])
+    monkeypatch.setenv("MM_TEST_DB_URL", uri)
+
+    block = make_block("b_read", "read_sql", params={"connection_env": "MM_TEST_DB_URL", "query": "SELECT * FROM loans"})
+    assert uri not in str(block.params)
+    assert "MM_TEST_DB_URL" in str(block.params)
+
+
+def test_read_sql_probe_uses_probe_query(tmp_path, monkeypatch):
+    uri = _sqlite_db(tmp_path, [(1, 100.0)])
+    monkeypatch.setenv("MM_TEST_DB_URL", uri)
+
+    graph = _single_input_graph(
+        "b_read",
+        "read_sql",
+        {"connection_env": "MM_TEST_DB_URL", "query": "SELECT * FROM loans", "probe_query": "SELECT COUNT(*) AS n FROM loans"},
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.check_for_changes("b_read") is False  # first probe just baselines
+
+    con = sqlite3.connect(uri.removeprefix("sqlite://"))
+    con.execute("INSERT INTO loans VALUES (2, 200.0)")
+    con.commit()
+    con.close()
+
+    assert runner.check_for_changes("b_read") is True
+
+
+def test_read_sql_without_probe_query_never_flags_changed(tmp_path, monkeypatch):
+    uri = _sqlite_db(tmp_path, [(1, 100.0)])
+    monkeypatch.setenv("MM_TEST_DB_URL", uri)
+
+    graph = _single_input_graph("b_read", "read_sql", {"connection_env": "MM_TEST_DB_URL", "query": "SELECT * FROM loans"})
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.check_for_changes("b_read") is False
+    assert runner.check_for_changes("b_read") is False
+
+
+def test_read_sql_compiles_and_matches_engine_output(tmp_path, monkeypatch):
+    uri = _sqlite_db(tmp_path, [(1, 100.0), (2, 200.0)])
+    monkeypatch.setenv("MM_TEST_DB_URL", uri)
+
+    graph = _single_input_graph(
+        "b_read", "read_sql", {"connection_env": "MM_TEST_DB_URL", "query": "SELECT * FROM loans ORDER BY id"}
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    source = compile_graph(graph, runner=runner)
+    assert "os.environ" in source
+    assert uri not in source  # the compiled script must reference the env var, never bake in the connection string
+
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
     assert ns["b_read_b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()

@@ -144,6 +144,53 @@ register_block(
 )
 
 
+def read_sql(connection_env: str, query: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # The connection string itself never lives in params -- it's baked as a
+    # literal into saved project files and (per compiler.py section 7)
+    # compiled scripts, so a raw DB password there would leak into both.
+    # `connection_env` is only the *name* of an env var the user sets
+    # locally (the project already loads .env via api.py); the secret is
+    # read fresh from the environment at run time, live or compiled.
+    uri = os.environ[connection_env]
+    df = pl.read_database_uri(query, uri)
+    # No LIMIT/TOP/FETCH FIRST pushdown for sample_rows -- that syntax
+    # differs per SQL dialect (Postgres/MySQL LIMIT vs. SQL Server TOP vs.
+    # Oracle FETCH FIRST), so this truncates client-side instead. Costs a
+    # full round trip in sample mode; keeps this block dialect-agnostic.
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+def _probe_sql(params: dict) -> str | None:
+    # Optional: only runs if the user gave a cheap probe_query (e.g. a
+    # COUNT(*) or a MAX(updated_at)) -- there's no generic mtime/checksum
+    # equivalent for a database table. No probe_query means no probe;
+    # Runner.check_for_changes already treats spec.probe returning None as
+    # "never flags changed", which is the right default here.
+    query = params.get("probe_query")
+    if not query:
+        return None
+    try:
+        uri = os.environ[params["connection_env"]]
+        result = pl.read_database_uri(query, uri)
+    except Exception:
+        return None
+    return str(result.row(0)) if result.height else ""
+
+
+register_block(
+    BlockSpec(
+        category="read_sql",
+        block_type="input",
+        display_name="Read SQL",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_sql,
+        metadata_transform=infer_dtypes,
+        probe=_probe_sql,
+    )
+)
+
+
 def filter_rows(df: pl.DataFrame, expr: str) -> pl.DataFrame:
     return df.filter(pl.sql_expr(expr))
 

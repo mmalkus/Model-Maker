@@ -32,6 +32,20 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
   ],
   write_csv: [{ key: 'filename', label: 'Output filename', kind: 'text', placeholder: 'output.csv' }],
   read_excel: [{ key: 'sheet', label: 'Sheet name (optional -- defaults to the first sheet)', kind: 'text' }],
+  read_sql: [
+    {
+      key: 'connection_env',
+      label: 'Connection env var (holds the DB URI, e.g. postgresql://user:pass@host/db)',
+      kind: 'text',
+      placeholder: 'WAREHOUSE_DB_URL',
+    },
+    { key: 'query', label: 'SQL query', kind: 'text', placeholder: 'SELECT * FROM loans' },
+    {
+      key: 'probe_query',
+      label: 'Check-for-changes query (optional, e.g. SELECT COUNT(*) FROM loans)',
+      kind: 'text',
+    },
+  ],
   generate_image: [
     { key: 'kind', label: 'Chart type', kind: 'select', options: ['hist', 'bar', 'scatter', 'line'] },
     { key: 'x', label: 'X column', kind: 'column' },
