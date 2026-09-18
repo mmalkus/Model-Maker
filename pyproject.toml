@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantology-modelmaker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Visual pipeline builder for financial model development"
 readme = "README.md"
 license = "Apache-2.0"
