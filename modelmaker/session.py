@@ -463,7 +463,10 @@ class ProjectSession:
         duplicates, the same way re-saving a file overwrites it instead of
         versioning by copy. `source_key` is stamped from this block's
         *current* cache key (see Runner.compute_key) so list_artifacts can
-        later tell whether the block has changed since this was written."""
+        later tell whether the block has changed since this was written.
+        `title` only seeds a brand-new artifact -- refreshing an existing
+        one leaves its title alone, so a user's rename survives re-running
+        the analysis instead of being silently clobbered by the default."""
         existing = next(
             (a for a in self.graph.artifacts.values() if a.kind == "data_analysis" and a.block_id == block_id and a.port == port),
             None,
@@ -471,7 +474,6 @@ class ProjectSession:
         now = datetime.now(timezone.utc).isoformat()
         source_key = self.runner.compute_key(block_id)
         if existing:
-            existing.title = title
             existing.document = document
             existing.source_key = source_key
             existing.updated_at = now

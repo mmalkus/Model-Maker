@@ -2,14 +2,17 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import { DataModal } from './DataModal'
 import { ASSIGNABLE_ROLES, ROLE_LABELS } from './roles'
-import type { PortType, PreviewOut } from './types'
+import type { Artifact, PortType, PreviewOut } from './types'
 
 // The actual look at a port's data (dataframe preview, image, or plain
 // value) -- rendered by PortInspector for whichever output port badge the
 // user clicked on a block. For a dataframe, this is also where AI analysis
 // and column-role tagging live: both are one click away here rather than
 // gated behind opening the full table, since tagging a column or kicking
-// off an analysis doesn't need to see every row.
+// off an analysis doesn't need to see every row. The AI analysis write-up
+// itself is a persistent Artifact (see api.listArtifacts/getArtifact) --
+// this is also where you reopen, rename, or delete this port's own one,
+// rather than hunting for it in a separate project-wide list.
 export function PortDataView({
   blockId,
   port,
@@ -36,8 +39,15 @@ export function PortDataView({
   const [pendingRoles, setPendingRoles] = useState<Record<string, string>>({})
   const [pendingTags, setPendingTags] = useState<Record<string, string[]> | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
-  const [analysis, setAnalysis] = useState<{ document: string; documentPath: string | null } | null>(null)
+
+  // This port's own data-analysis artifact, if one exists -- looked up on
+  // open so a previously-generated write-up shows up again without
+  // re-running the analysis, not just right after generating it.
+  const [artifact, setArtifact] = useState<Artifact | null>(null)
+  const [artifactError, setArtifactError] = useState<string | null>(null)
   const [showDocument, setShowDocument] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [titleInput, setTitleInput] = useState('')
 
   useEffect(() => {
     setPreview(null)
@@ -46,8 +56,10 @@ export function PortDataView({
     setShowTable(false)
     setPendingRoles({})
     setPendingTags(null)
-    setAnalysis(null)
+    setArtifact(null)
+    setArtifactError(null)
     setShowDocument(false)
+    setRenaming(false)
     if (portType === 'image') return
     let cancelled = false
     const load =
@@ -61,6 +73,19 @@ export function PortDataView({
     load.catch((e) => {
       if (!cancelled) setError((e as Error).message)
     })
+    if (portType === 'dataframe') {
+      api
+        .listArtifacts()
+        .then((all) => all.find((a) => a.kind === 'data_analysis' && a.block_id === blockId && a.port === port))
+        .then((match) => (match ? api.getArtifact(match.id) : null))
+        .then((a) => {
+          if (!cancelled && a) setArtifact(a)
+        })
+        .catch(() => {
+          // No existing artifact, or it failed to load -- not fatal, "AI
+          // analyze data" below still works to generate a fresh one.
+        })
+    }
     return () => {
       cancelled = true
     }
@@ -87,12 +112,44 @@ export function PortDataView({
       .analyzeData(blockId, port)
       .then((result) => {
         setPendingTags(result.tags)
-        setAnalysis({ document: result.document, documentPath: result.document_path })
-        setShowDocument(true)
         onChanged?.()
+        return api.getArtifact(result.artifact_id)
+      })
+      .then((a) => {
+        setArtifact(a)
+        setTitleInput(a.title)
+        setShowDocument(true)
       })
       .catch((e) => alert((e as Error).message))
       .finally(() => setAnalyzing(false))
+  }
+
+  const saveRename = () => {
+    if (!artifact) return
+    const nextTitle = titleInput.trim()
+    if (!nextTitle || nextTitle === artifact.title) {
+      setRenaming(false)
+      return
+    }
+    api
+      .renameArtifact(artifact.id, nextTitle)
+      .then((a) => {
+        setArtifact(a)
+        setRenaming(false)
+      })
+      .catch((e) => {
+        setArtifactError((e as Error).message)
+        setRenaming(false)
+      })
+  }
+
+  const deleteArtifact = () => {
+    if (!artifact) return
+    if (!confirm('Delete this data analysis? This does not affect the block or its tags.')) return
+    api
+      .deleteArtifact(artifact.id)
+      .then(() => setArtifact(null))
+      .catch((e) => setArtifactError((e as Error).message))
   }
 
   return (
@@ -107,27 +164,65 @@ export function PortDataView({
               <button
                 disabled={analyzing}
                 onClick={analyzeData}
-                title="Look at this data's column names and summary statistics, tag columns worth flagging, and write a short description, saved as an Artifact you can reopen later."
+                title="Look at this data's column names and summary statistics, tag columns worth flagging, and write a short description, kept here as this port's data-analysis artifact."
               >
-                {analyzing ? 'Analyzing…' : 'AI analyze data'}
+                {analyzing ? 'Analyzing…' : artifact ? 'Re-analyze' : 'AI analyze data'}
               </button>
               <button onClick={() => setShowTable(true)}>View full table</button>
             </div>
 
-            {analysis && (
+            {artifact && (
               <div style={{ marginBottom: 8, border: '1px solid #e5e7eb', borderRadius: 6, background: '#f9fafb' }}>
-                <button
-                  onClick={() => setShowDocument((s) => !s)}
-                  style={{ width: '100%', textAlign: 'left', border: 'none', background: 'transparent', padding: 6, fontSize: 11, fontWeight: 600 }}
-                >
-                  {showDocument ? '▾' : '▸'} Data analysis
-                  {analysis.documentPath && <span style={{ fontWeight: 400, color: '#6b7280' }}> — saved as an artifact</span>}
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 6px 0' }}>
+                  <button
+                    onClick={() => setShowDocument((s) => !s)}
+                    style={{ flex: 1, textAlign: 'left', border: 'none', background: 'transparent', padding: 0, fontSize: 11, fontWeight: 600 }}
+                  >
+                    {showDocument ? '▾' : '▸'}{' '}
+                    {renaming ? (
+                      <input
+                        autoFocus
+                        value={titleInput}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setTitleInput(e.target.value)}
+                        onBlur={saveRename}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveRename()
+                          if (e.key === 'Escape') {
+                            setTitleInput(artifact.title)
+                            setRenaming(false)
+                          }
+                        }}
+                        style={{ fontSize: 11, fontWeight: 600 }}
+                      />
+                    ) : (
+                      <span
+                        title="Click to rename"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setTitleInput(artifact.title)
+                          setRenaming(true)
+                        }}
+                      >
+                        {artifact.title}
+                      </span>
+                    )}
+                  </button>
+                  <button onClick={deleteArtifact} style={{ fontSize: 10, color: '#b91c1c' }}>
+                    Delete
+                  </button>
+                </div>
+                {artifact.stale && (
+                  <div style={{ padding: '0 6px', fontSize: 10, color: 'var(--brand-dark, #b45309)' }}>
+                    source data has changed since this was written
+                  </div>
+                )}
+                {artifactError && <div style={{ padding: '0 6px', fontSize: 10, color: '#b91c1c' }}>{artifactError}</div>}
                 {showDocument && (
                   <pre
-                    style={{ margin: 0, padding: '0 6px 6px', fontSize: 11, whiteSpace: 'pre-wrap', fontFamily: 'inherit', maxHeight: 200, overflow: 'auto' }}
+                    style={{ margin: 0, padding: '4px 6px 6px', fontSize: 11, whiteSpace: 'pre-wrap', fontFamily: 'inherit', maxHeight: 200, overflow: 'auto' }}
                   >
-                    {analysis.document}
+                    {artifact.document}
                   </pre>
                 )}
               </div>

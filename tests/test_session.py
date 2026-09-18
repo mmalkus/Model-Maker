@@ -291,9 +291,23 @@ def test_upsert_data_analysis_artifact_creates_then_updates_in_place(session):
     # same (block, port) -- refreshed in place, not duplicated
     assert len(session.graph.artifacts) == 1
     assert second.id == first.id
-    assert second.title == "Second title"
     assert second.document == "second document"
     assert second.updated_at >= first.created_at
+
+
+def test_upsert_data_analysis_artifact_preserves_a_renamed_title(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        artifact = session.upsert_data_analysis_artifact(block.id, "out", "Default title", "doc")
+    with session.edit():
+        session.rename_artifact(artifact.id, "My custom title")
+
+    with session.edit():
+        refreshed = session.upsert_data_analysis_artifact(block.id, "out", "Default title", "new doc")
+
+    assert refreshed.title == "My custom title"
+    assert refreshed.document == "new doc"
 
 
 def test_upsert_data_analysis_artifact_is_independent_per_port(session):
