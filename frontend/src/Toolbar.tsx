@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AutosaveStatus } from './App'
 import { api } from './api'
+import { Artifacts } from './Artifacts'
 import { CodeEditor } from './CodeEditor'
 import { FileBrowser } from './FileBrowser'
 import { GitPanel } from './GitPanel'
@@ -58,6 +59,7 @@ export function Toolbar({
   const [compileStreaming, setCompileStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showGit, setShowGit] = useState(false)
+  const [showArtifacts, setShowArtifacts] = useState(false)
   const [showSave, setShowSave] = useState(false)
   const [showLoad, setShowLoad] = useState(false)
   const [defaultProjectsDir, setDefaultProjectsDir] = useState<string | null>(null)
@@ -281,6 +283,13 @@ export function Toolbar({
           Git
         </button>
         {showGit && <GitPanel projectPath={projectPath} onClose={() => setShowGit(false)} />}
+      </div>
+
+      <div style={{ position: 'relative' }}>
+        <button onClick={() => setShowArtifacts((s) => !s)} title="Generated documents (e.g. AI data-analysis write-ups) across the whole project">
+          Artifacts
+        </button>
+        {showArtifacts && <Artifacts onClose={() => setShowArtifacts(false)} />}
       </div>
 
       <div style={{ position: 'relative' }}>

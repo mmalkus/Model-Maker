@@ -115,10 +115,37 @@ def _compile_code_to_fn(code: str):
 
 
 @dataclass
+class Artifact:
+    """A generated document attached to one block's output port -- today
+    only the AI data-analysis write-up (see api.analyze_data), but `kind`
+    is deliberately open for future report types (e.g. a validation
+    summary). Unlike column_tags/port_names, which mutate a BlockInstance
+    in place, an artifact is its own addressable object: it has an id that
+    survives a rename, shows up in a project-wide list (see
+    session.list_artifacts), and can be deleted independently of the block
+    that produced it. `source_key` is the producing block's cache key (see
+    Runner.compute_key) at generation time -- compared against that block's
+    *current* key wherever artifacts are listed, so a stale write-up (the
+    block re-ran with different data/params since) can be flagged instead
+    of silently read as still-current."""
+
+    id: str
+    kind: str
+    title: str
+    block_id: str
+    port: str
+    document: str
+    source_key: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
 class Graph:
     lanes: dict[str, Lane] = field(default_factory=dict)
     blocks: dict[str, BlockInstance] = field(default_factory=dict)
     wires: dict[str, Wire] = field(default_factory=dict)
+    artifacts: dict[str, Artifact] = field(default_factory=dict)
 
     def input_wires(self, block_id: str) -> dict[str, Wire]:
         return {w.to_port: w for w in self.wires.values() if w.to_block == block_id}

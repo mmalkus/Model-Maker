@@ -167,6 +167,28 @@ export interface AnalyzeDataOut {
   // Where the document was written under the project's files/ folder, or
   // null when no project has been saved yet.
   document_path: string | null
+  // The persistent Artifact this analysis was saved/updated as -- see
+  // ArtifactSummary/Artifact below.
+  artifact_id: string
+}
+
+export interface ArtifactSummary {
+  id: string
+  kind: string
+  title: string
+  block_id: string
+  block_name: string | null
+  port: string
+  created_at: string
+  updated_at: string
+  // True once the source block has changed (re-run with different
+  // params/code/upstream data) since this artifact was generated -- see
+  // session.artifact_is_stale.
+  stale: boolean
+}
+
+export interface Artifact extends ArtifactSummary {
+  document: string
 }
 
 export interface SuggestNamesOut {

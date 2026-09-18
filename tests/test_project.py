@@ -1,7 +1,7 @@
 import json
 
 from modelmaker.blocks.base import PortSpec
-from modelmaker.graph import Graph, Lane, Wire
+from modelmaker.graph import Artifact, Graph, Lane, Wire
 from modelmaker.project import ensure_project_scaffold, load_project, save_project
 
 from .helpers import make_block
@@ -47,6 +47,32 @@ def test_save_then_load_round_trips(tmp_path):
     assert loaded.blocks["b_002"].port_names == {"out": "income_bucketed"}
     assert loaded.wires["w_001"].from_block == "b_001"
     assert loaded.lanes["lane_feat"].order == 1
+
+
+def test_save_then_load_round_trips_artifacts(tmp_path):
+    graph = _build_graph()
+    graph.artifacts["art_001"] = Artifact(
+        id="art_001",
+        kind="data_analysis",
+        title="b_001 :: out -- data analysis",
+        block_id="b_001",
+        port="out",
+        document="# Analysis\nLooks fine.",
+        source_key="abc123",
+        created_at="2024-01-01T00:00:00+00:00",
+        updated_at="2024-01-01T00:00:00+00:00",
+    )
+    project_path = tmp_path / "project.json"
+    save_project(graph, project_path)
+
+    loaded = load_project(project_path)
+
+    assert set(loaded.artifacts) == {"art_001"}
+    loaded_artifact = loaded.artifacts["art_001"]
+    assert loaded_artifact.title == "b_001 :: out -- data analysis"
+    assert loaded_artifact.document == "# Analysis\nLooks fine."
+    assert loaded_artifact.block_id == "b_001"
+    assert loaded_artifact.source_key == "abc123"
 
 
 def test_saved_json_has_no_run_state_and_is_sorted(tmp_path):
