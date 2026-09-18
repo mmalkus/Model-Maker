@@ -39,11 +39,17 @@ Repository = "https://github.com/mmalkus/Model-Maker"
 Issues = "https://github.com/mmalkus/Model-Maker/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "httpx>=0.27.0"]
+# xlsxwriter is test-only (writing fixture .xlsx files); reading Excel at
+# runtime goes through the "excel" extra below.
+dev = ["pytest>=8.0.0", "httpx>=0.27.0", "fastexcel>=0.10.0", "xlsxwriter>=3.0.0"]
 anthropic = ["anthropic>=0.70.0"]
 # Terminal UI. Pinned below 6 -- plotext 6.x restructured the package and
 # dropped the top-level plot()/build()/save_fig() functions charts.py uses.
 tui = ["textual>=0.80.0", "httpx>=0.27.0", "plotext>=5.2.0,<6"]
+# Needed only by the Read Excel block (polars' default "calamine" engine).
+# Left optional since not every install needs Excel support; running Read
+# Excel without it raises polars' own clear ModuleNotFoundError.
+excel = ["fastexcel>=0.10.0"]
 
 [project.scripts]
 modelmaker-api = "modelmaker.api:main"

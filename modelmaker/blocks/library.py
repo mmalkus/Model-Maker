@@ -32,7 +32,11 @@ def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
     return pl.read_csv(path)
 
 
-def _probe_read_csv(params: dict) -> float | None:
+def _probe_path_mtime(params: dict) -> float | None:
+    # Shared "check for changes" probe for every file-based input block
+    # (read_csv/read_parquet/read_json/read_excel): cheap, read-only, and
+    # good enough to flag "source changed" without touching the cached
+    # packet (see plan section 6).
     try:
         return os.path.getmtime(params["path"])
     except OSError:
@@ -60,7 +64,82 @@ register_block(
         fn=read_csv,
         lazy_fn=_read_csv_lazy,
         metadata_transform=infer_dtypes,
-        probe=_probe_read_csv,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_parquet(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    if sample_rows is not None:
+        return pl.scan_parquet(path).head(sample_rows).collect()
+    return pl.read_parquet(path)
+
+
+def _read_parquet_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
+    # Lazy twin of read_parquet, same reasoning as read_csv's (see
+    # BlockSpec.lazy_fn) -- polars has no `n_rows` kwarg on scan_parquet, so
+    # sampling goes through a `.head()` the query optimizer pushes down.
+    lf = pl.scan_parquet(path)
+    return lf.head(sample_rows) if sample_rows is not None else lf
+
+
+register_block(
+    BlockSpec(
+        category="read_parquet",
+        block_type="input",
+        display_name="Read Parquet",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_parquet,
+        lazy_fn=_read_parquet_lazy,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_json(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # Newline-delimited JSON has a real lazy/streaming reader; a plain JSON
+    # array does not (polars must load it whole to find its structure), so
+    # this block -- unlike read_csv/read_parquet -- has no lazy_fn twin and
+    # simply never joins a streaming run's fusion group.
+    if path.lower().endswith((".jsonl", ".ndjson")):
+        if sample_rows is not None:
+            return pl.scan_ndjson(path).head(sample_rows).collect()
+        return pl.read_ndjson(path)
+    df = pl.read_json(path)
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+register_block(
+    BlockSpec(
+        category="read_json",
+        block_type="input",
+        display_name="Read JSON",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_json,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_excel(path: str, sheet: str | None = None, sample_rows: int | None = None) -> pl.DataFrame:
+    df = pl.read_excel(path, sheet_name=sheet) if sheet else pl.read_excel(path)
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+register_block(
+    BlockSpec(
+        category="read_excel",
+        block_type="input",
+        display_name="Read Excel",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_excel,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
     )
 )
 

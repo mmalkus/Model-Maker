@@ -31,6 +31,7 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'seed', label: 'Random seed', kind: 'number' },
   ],
   write_csv: [{ key: 'filename', label: 'Output filename', kind: 'text', placeholder: 'output.csv' }],
+  read_excel: [{ key: 'sheet', label: 'Sheet name (optional -- defaults to the first sheet)', kind: 'text' }],
   generate_image: [
     { key: 'kind', label: 'Chart type', kind: 'select', options: ['hist', 'bar', 'scatter', 'line'] },
     { key: 'x', label: 'X column', kind: 'column' },
