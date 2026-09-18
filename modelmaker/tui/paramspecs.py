@@ -96,6 +96,35 @@ PARAM_SPECS: dict[str, list[FieldSpec]] = {
         FieldSpec("grade_col", "Grade column", "column"),
         FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
     ],
+    "lgd_regression": [
+        FieldSpec("target", "Target column (LGD or CCF, in [0, 1])", "column", auto_role="target"),
+        FieldSpec("features", "Feature columns", "columns"),
+        FieldSpec("max_iter", "Max iterations", "number"),
+        FieldSpec("tol", "Convergence tolerance", "number", step=1e-8),
+    ],
+    "compute_lgd": [
+        FieldSpec("ead_col", "EAD column", "column"),
+        FieldSpec("recovered_col", "Recovered amount column", "column"),
+        FieldSpec("cost_col", "Workout cost column (optional)", "column"),
+        FieldSpec("floor", "Floor", "number", step=0.05),
+        FieldSpec("cap", "Cap", "number", step=0.05),
+    ],
+    "compute_ccf": [
+        FieldSpec("limit_col", "Limit column", "column"),
+        FieldSpec("balance_ref_col", "Balance at reference date column", "column"),
+        FieldSpec("balance_default_col", "Balance at default column", "column"),
+        FieldSpec("floor", "Floor", "number", step=0.05),
+        FieldSpec("cap", "Cap", "number", step=0.05),
+    ],
+    "continuous_accuracy": [
+        FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
+        FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
+    ],
+    "bucketed_calibration": [
+        FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
+        FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
+        FieldSpec("bins", "Bins", "number"),
+    ],
 }
 
 
