@@ -12,7 +12,7 @@ import pytest
 from modelmaker.session import ProjectSession
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEMO = REPO_ROOT / "projects" / "demo_pd_model.json"
+DEMO = REPO_ROOT / "projects" / "demo_pd_model" / "model.json"
 
 
 @pytest.fixture

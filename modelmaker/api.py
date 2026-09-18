@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
-from . import gitops
+from . import gitops, project
 from .blocks import library as _library  # noqa: F401
 from .blocks import modelling as _modelling  # noqa: F401
 from .blocks import stat_tests as _stat_tests  # noqa: F401
@@ -198,10 +198,13 @@ class SampleModeUpdate(BaseModel):
 
 
 class LoadRequest(BaseModel):
+    # A project *folder* -- valid only if it holds project.PROJECT_FILENAME.
     path: str
 
 
 class SaveRequest(BaseModel):
+    # A project *folder* to save into (created if it doesn't exist yet);
+    # None reuses whatever folder the session is already saved to.
     path: str | None = None
 
 
@@ -315,11 +318,20 @@ def _graph_out() -> dict[str, Any]:
     run_error, _LAST_RUN_ERROR = _LAST_RUN_ERROR, None
     return {
         "project_name": SESSION.project_name,
-        "project_path": str(SESSION.project_path) if SESSION.project_path else None,
+        # The project *folder*, not the PROJECT_FILENAME inside it -- that's
+        # the unit Save/Load/the Git panel all operate on; SESSION.project_path
+        # itself stays the full file path internally (see project.py).
+        "project_path": str(SESSION.project_path.parent) if SESSION.project_path else None,
         "dirty": SESSION.dirty,
         "can_undo": SESSION.can_undo,
         "can_redo": SESSION.can_redo,
         "sample_rows": SESSION.runner.sample_rows,
+        # True only while a Run all/Force run all sweep is actually in
+        # flight (see Runner._sweep) -- keeps the frontend polling through
+        # the gaps between one block's dispatch ending and the next one
+        # starting, so per-block status colors visibly progress through the
+        # sweep instead of jumping straight from all-grey to done.
+        "sweep_running": SESSION.runner.sweep_running,
         "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in SESSION.graph.lanes.items()},
         "blocks": {bid: _block_out(bid) for bid in SESSION.graph.blocks},
         "run_error": run_error,
@@ -442,7 +454,14 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
                 continue
             if not e.is_dir() and ext and not e.name.lower().endswith(ext.lower()):
                 continue
-            entries.append({"name": e.name, "path": str(e), "is_dir": e.is_dir()})
+            entry: dict[str, Any] = {"name": e.name, "path": str(e), "is_dir": e.is_dir()}
+            # Flagged so a project-folder picker (Save/Load) can tell a
+            # folder that already holds a project from one that's just a
+            # plain directory to browse into -- harmless, and ignored, for
+            # every other use of this endpoint (e.g. read_csv's path picker).
+            if e.is_dir():
+                entry["is_project"] = project.is_project_dir(e)
+            entries.append(entry)
     except PermissionError:
         pass
 
@@ -472,8 +491,11 @@ def new_project_ep() -> dict[str, Any]:
 
 @app.post("/api/project/load")
 def load_project_ep(req: LoadRequest) -> dict[str, Any]:
+    folder = Path(req.path)
+    if not project.is_project_dir(folder):
+        raise HTTPException(404, f"not a project folder (no {project.PROJECT_FILENAME} in it): {req.path}")
     try:
-        SESSION.load(Path(req.path))
+        SESSION.load(folder / project.PROJECT_FILENAME)
     except FileNotFoundError:
         raise HTTPException(404, f"project file not found: {req.path}")
     return _graph_out()
@@ -481,11 +503,12 @@ def load_project_ep(req: LoadRequest) -> dict[str, Any]:
 
 @app.post("/api/project/save")
 def save_project_ep(req: SaveRequest) -> dict[str, Any]:
+    target = Path(req.path) / project.PROJECT_FILENAME if req.path else None
     try:
-        path = SESSION.save(Path(req.path) if req.path else None)
+        path = SESSION.save(target)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"path": str(path)}
+    return {"path": str(path.parent)}
 
 
 def _project_dir() -> Path:

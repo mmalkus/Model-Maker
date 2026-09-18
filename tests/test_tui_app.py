@@ -85,10 +85,11 @@ def server_base_url():
 @pytest.fixture
 def demo_project_path(tmp_path):
     # A private copy so the test never writes back into the tracked demo
-    # project file, however it drives the app (Ctrl+S, autosave-on-load, ...).
-    src = os.path.join(os.path.dirname(__file__), "..", "projects", "demo_pd_model.json")
-    dest = tmp_path / "demo_pd_model.json"
-    shutil.copy(src, dest)
+    # project folder, however it drives the app (Ctrl+S, autosave-on-load,
+    # ...). Save/Load operate on the whole folder, not just model.json.
+    src = os.path.join(os.path.dirname(__file__), "..", "projects", "demo_pd_model")
+    dest = tmp_path / "demo_pd_model"
+    shutil.copytree(src, dest)
     return str(dest)
 
 

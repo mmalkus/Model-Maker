@@ -6,6 +6,7 @@ export function FileBrowser({
   startPath,
   ext,
   mode = 'open',
+  folders = false,
   defaultName,
   onPick,
   onClose,
@@ -18,6 +19,11 @@ export function FileBrowser({
   // and a Save button combines it with the current directory into the path
   // handed to onPick, since the target file need not exist yet.
   mode?: 'open' | 'save'
+  // Project-folder picker instead of a file picker: only directories are
+  // listed, and a folder that already holds a project (BrowseEntry.is_project
+  // -- see project.PROJECT_FILENAME) is a pickable/reusable leaf rather than
+  // something to navigate into, the way a file is in the ext-filtered picker.
+  folders?: boolean
   defaultName?: string
   onPick: (path: string) => void
   onClose: () => void
@@ -28,7 +34,7 @@ export function FileBrowser({
 
   const load = (path?: string) => {
     api
-      .browse(path, ext)
+      .browse(path, folders ? undefined : ext)
       .then((l) => {
         setListing(l)
         setError(null)
@@ -48,8 +54,29 @@ export function FileBrowser({
 
   const doSave = () => {
     if (!listing || !fileName.trim()) return
-    const name = ext && !fileName.trim().toLowerCase().endsWith(ext.toLowerCase()) ? `${fileName.trim()}${ext}` : fileName.trim()
+    const trimmed = fileName.trim()
+    const name = !folders && ext && !trimmed.toLowerCase().endsWith(ext.toLowerCase()) ? `${trimmed}${ext}` : trimmed
     onPick(joinPath(listing.path, name))
+  }
+
+  const entries = folders ? (listing?.entries.filter((e) => e.is_dir) ?? []) : (listing?.entries ?? [])
+
+  const onEntryClick = (e: BrowseOut['entries'][number]) => {
+    if (folders) {
+      // A folder that's already a project is the pickable leaf here (like a
+      // file in the ext-filtered picker); a plain folder is just somewhere
+      // to browse through on the way to one.
+      if (e.is_project) {
+        if (mode === 'save') setFileName(e.name)
+        else onPick(e.path)
+      } else {
+        load(e.path)
+      }
+      return
+    }
+    if (e.is_dir) load(e.path)
+    else if (mode === 'save') setFileName(e.name)
+    else onPick(e.path)
   }
 
   return (
@@ -90,22 +117,24 @@ export function FileBrowser({
         </div>
         <div style={{ overflowY: 'auto', flex: 1 }}>
           {error && <div style={{ padding: 10, color: '#b91c1c' }}>{error}</div>}
-          {listing?.entries.length === 0 && <div style={{ padding: 10, color: '#9ca3af' }}>(empty)</div>}
-          {listing?.entries.map((e) => (
+          {entries.length === 0 && <div style={{ padding: 10, color: '#9ca3af' }}>(empty)</div>}
+          {entries.map((e) => (
             <div
               key={e.path}
-              onClick={() => (e.is_dir ? load(e.path) : mode === 'save' ? setFileName(e.name) : onPick(e.path))}
+              onClick={() => onEntryClick(e)}
+              title={folders && e.is_project ? 'Project folder' : undefined}
               style={{
                 padding: '6px 10px',
                 cursor: 'pointer',
                 display: 'flex',
                 gap: 6,
                 borderBottom: '1px solid #f3f4f6',
+                fontWeight: folders && e.is_project ? 600 : undefined,
               }}
               onMouseEnter={(ev) => (ev.currentTarget.style.background = '#f9fafb')}
               onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
             >
-              <span>{e.is_dir ? '\u{1F4C1}' : '\u{1F4C4}'}</span>
+              <span>{folders ? (e.is_project ? '\u{1F4E6}' : '\u{1F4C1}') : e.is_dir ? '\u{1F4C1}' : '\u{1F4C4}'}</span>
               <span>{e.name}</span>
             </div>
           ))}
@@ -117,7 +146,7 @@ export function FileBrowser({
               value={fileName}
               onChange={(e) => setFileName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && doSave()}
-              placeholder="filename"
+              placeholder={folders ? 'folder name' : 'filename'}
               style={{ flex: 1, fontFamily: 'monospace', fontSize: 12, boxSizing: 'border-box' }}
             />
             <button disabled={!fileName.trim()} onClick={doSave}>

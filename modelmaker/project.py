@@ -9,6 +9,11 @@ from . import gitops
 from .blocks.base import PortSpec
 from .graph import BlockInstance, Graph, Lane, Position, Wire
 
+# The fixed filename Save/Load look for inside a project folder -- the
+# folder itself is "the project" (it's what gets versioned, git-inited, and
+# pushed); this file is just where its graph lives within it.
+PROJECT_FILENAME = "model.json"
+
 # Written into a project folder's .gitignore the first time it's given one
 # (see ensure_project_scaffold) -- covers the regenerable local cache and
 # common Python/editor cruft; the project JSON, its code sidecars, and
@@ -40,6 +45,13 @@ def ensure_project_scaffold(project_dir: Path) -> None:
         # No git on PATH, or some other local git failure -- the project
         # folder itself is still perfectly usable without version control.
         pass
+
+
+def is_project_dir(path: Path) -> bool:
+    """Whether `path` is a folder holding a saved project -- i.e. it has a
+    PROJECT_FILENAME in it. Used to validate a folder picked for Load and to
+    let the browse endpoint flag which subfolders are project folders."""
+    return (path / PROJECT_FILENAME).is_file()
 
 
 def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Graph:

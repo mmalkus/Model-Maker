@@ -130,8 +130,14 @@ def test_run_all_and_compile(client, tmp_path):
         json={"from_block": read["id"], "from_port": "out", "to_block": filt["id"], "to_port": "df"},
     )
 
+    assert client.get("/api/graph").json()["sweep_running"] is False
+
     report = client.post("/api/run_all").json()
     assert report[filt["id"]] == "green"
+    # Sweep-only state -- cleared again once the (background-thread) sweep
+    # this request waited on has actually finished, not left dangling for
+    # the next unrelated poll to misread.
+    assert client.get("/api/graph").json()["sweep_running"] is False
 
     report2 = client.post("/api/run_all").json()
     assert report2[filt["id"]] == "green"
@@ -184,14 +190,14 @@ def test_save_and_load_round_trip(client, tmp_path):
     csv_path.write_text("a,b\n1,10\n")
     client.post("/api/blocks", json={"category": "read_csv", "name": "Load data", "params": {"path": str(csv_path)}})
 
-    project_path = tmp_path / "project.json"
-    save_resp = client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "project"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
     assert save_resp.status_code == 200
-    assert project_path.exists()
+    assert (project_dir / "model.json").exists()
 
     api_module.SESSION = ProjectSession()
     client2 = TestClient(api_module.app)
-    load_resp = client2.post("/api/project/load", json={"path": str(project_path)})
+    load_resp = client2.post("/api/project/load", json={"path": str(project_dir)})
     assert load_resp.status_code == 200
     blocks = load_resp.json()["blocks"]
     assert len(blocks) == 1
@@ -202,8 +208,8 @@ def test_new_project_clears_the_graph_without_touching_the_saved_file(client, tm
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")
     client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}})
-    project_path = tmp_path / "project.json"
-    client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "project"
+    client.post("/api/project/save", json={"path": str(project_dir)})
 
     resp = client.post("/api/project/new")
     assert resp.status_code == 200
@@ -211,7 +217,7 @@ def test_new_project_clears_the_graph_without_touching_the_saved_file(client, tm
     assert body["blocks"] == {}
     assert body["project_path"] is None
     assert body["dirty"] is False
-    assert project_path.exists()
+    assert (project_dir / "model.json").exists()
 
 
 def test_git_status_before_any_project_is_saved(client):
@@ -227,8 +233,8 @@ def test_git_endpoints_require_a_saved_project(client):
 
 
 def test_git_status_commit_and_remote_round_trip(client, tmp_path):
-    project_path = tmp_path / "proj" / "model.json"
-    save_resp = client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "proj"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
     assert save_resp.status_code == 200
 
     status = client.get("/api/project/git/status").json()
@@ -244,6 +250,34 @@ def test_git_status_commit_and_remote_round_trip(client, tmp_path):
 
     # nothing left to commit
     assert client.post("/api/project/git/commit", json={"message": "again"}).status_code == 400
+
+
+def test_save_exposes_the_folder_not_the_model_json_file(client, tmp_path):
+    project_dir = tmp_path / "my_pd_model"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
+    assert save_resp.json()["path"] == str(project_dir)
+
+    graph = client.get("/api/graph").json()
+    assert graph["project_path"] == str(project_dir)
+    assert graph["project_name"] == "my_pd_model"
+
+
+def test_load_rejects_a_folder_with_no_model_json(client, tmp_path):
+    empty_dir = tmp_path / "not_a_project"
+    empty_dir.mkdir()
+    resp = client.post("/api/project/load", json={"path": str(empty_dir)})
+    assert resp.status_code == 404
+    assert "model.json" in resp.json()["detail"]
+
+
+def test_browse_flags_which_subfolders_are_projects(client, tmp_path):
+    project_dir = tmp_path / "a_project"
+    client.post("/api/project/save", json={"path": str(project_dir)})
+    (tmp_path / "just_a_folder").mkdir()
+
+    entries = {e["name"]: e for e in client.get("/api/browse", params={"path": str(tmp_path)}).json()["entries"]}
+    assert entries["a_project"]["is_project"] is True
+    assert entries["just_a_folder"]["is_project"] is False
 
 
 def test_delete_block_removes_dependent_wires(client, tmp_path):

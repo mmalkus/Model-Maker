@@ -79,7 +79,9 @@ export interface GraphOut {
   project_name: string
   project_path: string | null
   // Whether there are edits the project file doesn't have yet. Edits are
-  // always snapshotted for crash recovery, but saving stays explicit.
+  // always snapshotted for crash recovery, and autosave catches the project
+  // file itself up a couple of seconds later once it has somewhere to save
+  // to (see App.tsx) -- this is true in the gap before that happens.
   dirty: boolean
   can_undo: boolean
   can_redo: boolean
@@ -95,6 +97,10 @@ export interface GraphOut {
   // soon as a GET /api/graph reads it.
   run_error: string | null
   wires: Record<string, WireOut>
+  // True only while a Run all/Force run all sweep is in flight (see
+  // Runner._sweep) -- see App.tsx's polling effect for why this matters
+  // beyond the per-block `running` status.
+  sweep_running: boolean
 }
 
 export interface PreviewColumn {
@@ -134,6 +140,9 @@ export interface BrowseEntry {
   name: string
   path: string
   is_dir: boolean
+  // Set (true/false) for directory entries only: whether this folder
+  // already holds a saved project (see project.PROJECT_FILENAME).
+  is_project?: boolean
 }
 
 export interface BrowseOut {
