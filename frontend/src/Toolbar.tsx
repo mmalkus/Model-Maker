@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { AutosaveStatus } from './App'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
 import { FileBrowser } from './FileBrowser'
@@ -32,6 +33,7 @@ export function Toolbar({
   onUndo,
   onRedo,
   sampleRows,
+  autosave,
 }: {
   onChanged: () => void
   projectPath: string | null
@@ -49,6 +51,7 @@ export function Toolbar({
   onUndo: () => void
   onRedo: () => void
   sampleRows: number | null
+  autosave: AutosaveStatus
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
@@ -65,6 +68,22 @@ export function Toolbar({
       .then((d) => setDefaultProjectsDir(d.path))
       .catch(() => setDefaultProjectsDir(null))
   }, [])
+
+  // Run all/Force run all/etc. POST and wait server-side for the whole
+  // sweep to finish (up to 20s -- see api.py's _start_background_run)
+  // before their promise resolves at all, so `run()`'s own onChanged()
+  // below is too late to show anything mid-sweep: for any sweep that
+  // finishes inside that window (i.e. almost all of them), the frontend
+  // would otherwise jump straight from all-grey to done with nothing
+  // in between. Polling for as long as *any* run() is in flight -- not
+  // just once App's own graph state says a block is "running" -- closes
+  // that gap: it starts the instant the button is clicked, well before the
+  // first real status update could possibly come back.
+  useEffect(() => {
+    if (!busy) return
+    const id = setInterval(onChanged, 200)
+    return () => clearInterval(id)
+  }, [busy, onChanged])
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -100,11 +119,12 @@ export function Toolbar({
     run(() => api.load(path))
   }
 
-  // Both dialogs default to wherever the currently-open project lives; with
-  // no project open yet they fall back to the server's default projects
+  // Both dialogs default to wherever the currently-open project folder
+  // lives (one level up, so its siblings are what's listed); with no
+  // project open yet they fall back to the server's default projects
   // subdirectory (see /api/project/default_dir), so Save always lands
   // somewhere sensible instead of the server's raw working directory.
-  const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: 'model.json' }
+  const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: '' }
   const browseStartPath = openDir || defaultProjectsDir
 
   return (
@@ -232,7 +252,24 @@ export function Toolbar({
       </button>
       <span style={{ fontSize: 12, color: dirty ? '#92400e' : '#6b7280' }}>
         {projectPath ?? '(unsaved)'}
-        {dirty && <span title="Edits not yet written to the project file (they are snapshotted for recovery)"> · unsaved changes</span>}
+        {dirty && (
+          <span title="Edits not yet written to the project file (always snapshotted for crash recovery; autosaves shortly if the project has a save location)">
+            {' '}
+            · unsaved changes{autosave.state === 'saving' ? ' — autosaving…' : ''}
+          </span>
+        )}
+        {!dirty && autosave.state === 'saved' && (
+          <span title="Automatically written to the project file after your last edit" style={{ color: '#6b7280' }}>
+            {' '}
+            · autosaved {new Date(autosave.at).toLocaleTimeString()}
+          </span>
+        )}
+        {autosave.state === 'error' && (
+          <span title={autosave.message} style={{ color: '#b91c1c' }}>
+            {' '}
+            · autosave failed
+          </span>
+        )}
       </span>
 
       <div style={{ position: 'relative' }}>
@@ -281,7 +318,7 @@ export function Toolbar({
       {showSave && (
         <FileBrowser
           mode="save"
-          ext=".json"
+          folders
           startPath={browseStartPath}
           defaultName={openName}
           onPick={doSavePick}
@@ -289,7 +326,7 @@ export function Toolbar({
         />
       )}
       {showLoad && (
-        <FileBrowser ext=".json" startPath={browseStartPath} onPick={doLoadPick} onClose={() => setShowLoad(false)} />
+        <FileBrowser folders startPath={browseStartPath} onPick={doLoadPick} onClose={() => setShowLoad(false)} />
       )}
     </div>
   )

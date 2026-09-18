@@ -30,6 +30,28 @@ export function DataModal({
   // the click did nothing. Tracked here rather than bumping preview itself,
   // since there's nothing valid to bump it to before that re-run happens.
   const [pendingRoles, setPendingRoles] = useState<Record<string, string>>({})
+  // Same staleness problem as pendingRoles above: tags apply immediately
+  // server-side, but `preview` won't reflect them until this block is
+  // re-run, so the just-applied tags are tracked here for instant feedback.
+  const [pendingTags, setPendingTags] = useState<Record<string, string[]> | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysis, setAnalysis] = useState<{ document: string; documentPath: string | null } | null>(null)
+  const [showDocument, setShowDocument] = useState(false)
+
+  const analyzeData = () => {
+    if (!blockId) return
+    setAnalyzing(true)
+    api
+      .analyzeData(blockId)
+      .then((result) => {
+        setPendingTags(result.tags)
+        setAnalysis({ document: result.document, documentPath: result.document_path })
+        setShowDocument(true)
+        onChanged?.()
+      })
+      .catch((e) => alert((e as Error).message))
+      .finally(() => setAnalyzing(false))
+  }
 
   const setRole = (column: string, role: string) => {
     if (!blockId) return
@@ -76,8 +98,55 @@ export function DataModal({
             {preview.row_count} rows shown &middot; lineage: {preview.lineage.join(' -> ') || '(none)'}
           </span>
         </div>
-        <button onClick={onClose}>Close</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {blockId && (
+            <button
+              disabled={analyzing}
+              onClick={analyzeData}
+              title="Look at this data's column names and summary statistics, tag columns worth flagging, and write a short description -- see the Data Analysis panel below once it's done."
+            >
+              {analyzing ? 'Analyzing…' : 'AI analyze data'}
+            </button>
+          )}
+          <button onClick={onClose}>Close</button>
+        </div>
       </div>
+      {analysis && (
+        <div style={{ marginBottom: 8, border: '1px solid #e5e7eb', borderRadius: 6, background: '#f9fafb' }}>
+          <button
+            onClick={() => setShowDocument((s) => !s)}
+            style={{
+              width: '100%',
+              textAlign: 'left',
+              border: 'none',
+              background: 'transparent',
+              padding: 8,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {showDocument ? '▾' : '▸'} Data analysis
+            {analysis.documentPath && (
+              <span style={{ fontWeight: 400, color: '#6b7280' }}> — saved to {analysis.documentPath}</span>
+            )}
+          </button>
+          {showDocument && (
+            <pre
+              style={{
+                margin: 0,
+                padding: '0 8px 8px',
+                fontSize: 12,
+                whiteSpace: 'pre-wrap',
+                fontFamily: 'inherit',
+                maxHeight: 240,
+                overflow: 'auto',
+              }}
+            >
+              {analysis.document}
+            </pre>
+          )}
+        </div>
+      )}
       <div style={{ overflow: 'auto', flex: 1, border: '1px solid #e5e7eb', borderRadius: 6 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>
           <thead style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 1 }}>
@@ -86,6 +155,7 @@ export function DataModal({
                 const s = preview.summary?.[c.name]
                 const pending = pendingRoles[c.name]
                 const displayedRole = pending ?? c.role
+                const displayedTags = pendingTags ? (pendingTags[c.name] ?? []) : c.tags
                 return (
                   <th key={c.name} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid #e5e7eb' }}>
                     {c.name}
@@ -111,6 +181,9 @@ export function DataModal({
                     </div>
                     {pending !== undefined && pending !== c.role && (
                       <div style={{ fontWeight: 400, color: 'var(--brand-dark, #b45309)' }}>re-run to apply</div>
+                    )}
+                    {displayedTags.length > 0 && (
+                      <div style={{ fontWeight: 400, color: '#7c3aed', fontSize: 10 }}>{displayedTags.join(', ')}</div>
                     )}
                     {s && (
                       <div style={{ fontWeight: 400, color: '#9ca3af' }}>

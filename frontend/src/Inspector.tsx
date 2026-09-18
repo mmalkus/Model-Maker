@@ -38,6 +38,8 @@ export function Inspector({
   const [dynamicImagePorts, setDynamicImagePorts] = useState<Set<string>>(new Set())
   const [groupBy, setGroupBy] = useState<string>('')
   const [maxWorkers, setMaxWorkers] = useState<string>('')
+  const [namingBusy, setNamingBusy] = useState(false)
+  const [namesExplanation, setNamesExplanation] = useState<string | null>(null)
   const instructionRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
@@ -247,6 +249,22 @@ export function Inspector({
         applyDraft(await api.suggestFix(block.id, undefined, provider ?? undefined))
       } finally {
         setDrafting(false)
+      }
+    })
+
+  // Unlike draftWithAI/suggestFix, this applies immediately server-side
+  // (see api.py's suggest_names -- names are purely descriptive, and every
+  // port name is already collision-checked there) rather than filling an
+  // editable draft for review, so there's nothing to apply here beyond
+  // reloading and showing why it chose what it chose.
+  const suggestNames = () =>
+    run(async () => {
+      setNamingBusy(true)
+      try {
+        const result = await api.suggestNames(block.id, provider ?? undefined)
+        setNamesExplanation(result.explanation)
+      } finally {
+        setNamingBusy(false)
       }
     })
 
@@ -515,7 +533,15 @@ export function Inspector({
               Suggest fix
             </button>
           )}
+          <button
+            disabled={busy || namingBusy}
+            onClick={suggestNames}
+            title="Propose a better display name for this block and a name for each of its output ports, from its category and (once it's been run) its actual output columns. Applied immediately -- purely descriptive, and collision-checked against every other port name already in this graph."
+          >
+            {namingBusy ? 'Naming…' : 'Suggest names'}
+          </button>
         </div>
+        {namesExplanation && <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>{namesExplanation}</div>}
         {drafting && (
           <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftElapsed < 5

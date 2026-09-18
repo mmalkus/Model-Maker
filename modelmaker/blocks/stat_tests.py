@@ -131,3 +131,103 @@ register_block(
         metadata_transform=lambda *_a, **_k: {},
     )
 )
+
+
+def roc_curve(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
+    """The full ROC curve -- false/true positive rate at each distinct
+    score threshold -- not just the scalar AUC that auc_gini reports, for
+    plotting or a closer look at where a model's discrimination actually
+    comes from."""
+    from sklearn.metrics import roc_auc_score, roc_curve as _roc_curve
+
+    y = df[target_col].to_numpy()
+    scores = df[score_col].to_numpy()
+    fpr, tpr, thresholds = _roc_curve(y, scores)
+    auc = float(roc_auc_score(y, scores))
+    return {
+        "kind": "roc_curve",
+        "auc": auc,
+        # sklearn's first threshold is a synthetic max(score)+1 (not a real
+        # cutoff, just "reject everything") and can come back as +inf --
+        # nulled out rather than left as a non-JSON float.
+        "points": [
+            {"fpr": float(f), "tpr": float(t), "threshold": float(th) if th == th and th != float("inf") else None}
+            for f, t, th in zip(fpr, tpr, thresholds)
+        ],
+    }
+
+
+register_block(
+    BlockSpec(
+        category="roc_curve",
+        block_type="output",
+        group="tests",
+        display_name="ROC curve",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=roc_curve,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)
+
+
+def calibration_test(df: pl.DataFrame, score_col: str, target_col: str, bins: int = 10) -> dict:
+    """Hosmer-Lemeshow goodness-of-fit test: buckets rows into `bins`
+    quantile groups by predicted probability (`score_col`), then compares
+    each bucket's observed event count to its expected count (the sum of
+    predicted probabilities in it). A large HL statistic (low p-value)
+    means the model's predicted probabilities don't match reality well,
+    even when discrimination (AUC/KS) looks fine -- calibration and
+    discrimination are different things, and this is what checks the
+    former."""
+    from scipy.stats import chi2
+
+    bucketed = df.with_columns(pl.col(score_col).qcut(bins, allow_duplicates=True).alias("_bucket"))
+    stats = bucketed.group_by("_bucket").agg(
+        n=pl.len(),
+        observed=pl.col(target_col).sum(),
+        expected=pl.col(score_col).sum(),
+    ).sort("expected")
+    rows = stats.to_dicts()
+
+    hl_statistic = 0.0
+    for r in rows:
+        n, observed, expected = r["n"], float(r["observed"]), float(r["expected"])
+        # A bucket with nothing expected/expected==n contributes an
+        # undefined (0/0) term -- excluded rather than let it poison the
+        # sum, the same way psi_test/iv_table smooth an empty bucket away
+        # instead of blowing up on it.
+        if expected <= 0 or expected >= n:
+            continue
+        hl_statistic += (observed - expected) ** 2 / (expected * (1 - expected / n))
+    degrees_of_freedom = max(len(rows) - 2, 1)
+
+    return {
+        "kind": "calibration_test",
+        "hl_statistic": float(hl_statistic),
+        "p_value": float(chi2.sf(hl_statistic, degrees_of_freedom)),
+        "degrees_of_freedom": degrees_of_freedom,
+        "buckets": [
+            {
+                "bucket": str(r["_bucket"]),
+                "n": r["n"],
+                "observed_count": float(r["observed"]),
+                "expected_count": float(r["expected"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+register_block(
+    BlockSpec(
+        category="calibration_test",
+        block_type="output",
+        group="tests",
+        display_name="Calibration (Hosmer-Lemeshow)",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=calibration_test,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)

@@ -254,3 +254,106 @@ def test_gemini_provider_requires_api_key_and_model(monkeypatch):
 
     with pytest.raises(RuntimeError, match="model"):
         get_provider("gemini", api_key="key-abc")
+
+
+def test_stub_provider_analyze_data_mode_proposes_tags_and_a_document():
+    ctx = DraftContext(
+        instruction="analyze",
+        function_name="n/a",
+        input_ports={"columns": [ColumnInfo(name="age", dtype="Int64", role="feature", count=100, null_count=2)]},
+        mode="analyze_data",
+    )
+    result = get_provider("stub").draft(ctx)
+    assert result.params == {"age": "stub-tag"}
+    assert "Stub provider" in result.explanation
+
+
+def test_analyze_data_endpoint_applies_tags_and_returns_document(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("age,income\n25,50000\n40,80000\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    resp = client.post(f"/api/blocks/{read['id']}/analyze_data")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tags"] == {"age": ["stub-tag"], "income": ["stub-tag"]}
+    assert "Stub provider" in body["document"]
+    assert body["document_path"] is None  # no project has been saved yet
+
+    preview = client.get(f"/api/blocks/{read['id']}/preview").json()
+    tags_by_column = {c["name"]: c["tags"] for c in preview["columns"]}
+    assert tags_by_column == {"age": ["stub-tag"], "income": ["stub-tag"]}
+
+
+def test_analyze_data_writes_the_document_into_the_saved_projects_files_dir(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("age\n25\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    project_dir = tmp_path / "proj"
+    client.post("/api/project/save", json={"path": str(project_dir)})
+
+    body = client.post(f"/api/blocks/{read['id']}/analyze_data").json()
+    assert body["document_path"] is not None
+    from pathlib import Path
+
+    assert Path(body["document_path"]).read_text(encoding="utf-8") == body["document"]
+    assert Path(body["document_path"]).parent == project_dir / "files"
+
+
+def test_analyze_data_requires_a_dataframe_output(client):
+    display = client.post("/api/blocks", json={"category": "display_value"}).json()
+    resp = client.post(f"/api/blocks/{display['id']}/analyze_data")
+    assert resp.status_code in (400, 409)  # no output at all yet, or wrong type once run
+
+
+def test_stub_provider_rename_mode_proposes_block_and_port_names():
+    ctx = DraftContext(
+        instruction="rename",
+        function_name="n/a",
+        input_ports={"out": [ColumnInfo(name="a", dtype="Int64", role="feature")]},
+        mode="rename",
+    )
+    result = get_provider("stub").draft(ctx)
+    assert result.params == {"name": "stub_renamed_block", "out": "stub_out"}
+    assert "Stub provider" in result.explanation
+
+
+def test_suggest_names_endpoint_applies_block_name_and_port_names(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    resp = client.post(f"/api/blocks/{read['id']}/suggest_names")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "stub_renamed_block"
+    assert body["port_names"] == {"out": "stub_out"}
+    assert "explanation" in body
+
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][read["id"]]["name"] == "stub_renamed_block"
+    assert graph["blocks"][read["id"]]["port_names"] == {"out": "stub_out"}
+
+
+def test_suggest_names_resolves_a_collision_with_a_numeric_suffix(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    first = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    second = client.post(
+        "/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}, "x": 200}
+    ).json()
+
+    # The stub provider always proposes the same "stub_out" name -- taking
+    # it on the first block leaves nothing but a collision for the second.
+    client.post(f"/api/blocks/{first['id']}/suggest_names")
+    resp = client.post(f"/api/blocks/{second['id']}/suggest_names")
+    assert resp.status_code == 200
+    assert resp.json()["port_names"] == {"out": "stub_out_2"}
+
+    # both stick -- no collision ever reached the graph
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][first["id"]]["port_names"] == {"out": "stub_out"}
+    assert graph["blocks"][second["id"]]["port_names"] == {"out": "stub_out_2"}

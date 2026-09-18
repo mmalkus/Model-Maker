@@ -95,14 +95,14 @@ def test_sample_mode_round_trip(isolated_session):
 
 
 def test_save_and_load_project(isolated_session, tmp_path):
-    path = tmp_path / "proj.json"
+    path = tmp_path / "proj"
 
     async def go():
         async with ModelMakerClient() as c:
             await c.create_block("filter", params={"expr": "a > 1"})
             saved = await c.save_project(str(path))
             assert saved["path"] == str(path)
-            assert path.exists()
+            assert (path / "model.json").exists()
 
             await c.create_block("select", params={"cols": ["a"]})
             assert len((await c.get_graph())["blocks"]) == 2

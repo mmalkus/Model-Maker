@@ -51,19 +51,29 @@ it. It creates a `.venv` next to itself if missing, installs/upgrades
 `quantology-modelmaker` into it, and starts `modelmaker-api` at
 `http://127.0.0.1:8001`. Safe to re-run any time to pick up updates.
 
+## Projects
+
+A project is a folder, not a file: **Save**/**Load** browse for a folder
+rather than a filename, and a folder is a project once it holds a
+`model.json` (everything else in it -- `files/`, a `.gitignore`, custom
+block code sidecars -- is the project's own working area, versioned
+alongside it). Saving for the first time scaffolds that folder (see
+[The demo project](#the-demo-project) for an example) and git-inits it, so
+it's ready to commit and push right away from the **Git** panel.
+
 ## The demo project
 
-[`projects/demo_pd_model.json`](projects/demo_pd_model.json) is a complete,
-runnable PD pipeline over [`sample_data/pd_model_data.csv`](sample_data):
-load → clean → weight-of-evidence → train/test split → logistic regression →
-Gini, KS and PSI. Open it with **Load** (it's what the file dialog opens on),
+[`projects/demo_pd_model/`](projects/demo_pd_model) is a complete, runnable
+PD pipeline over [`sample_data/pd_model_data.csv`](sample_data): load →
+clean → weight-of-evidence → train/test split → logistic regression → Gini,
+KS and PSI. Open it with **Load** (it's what the folder dialog opens on),
 then **Run all** — it reads the CSV source itself since it's never been read
 before, then runs the rest of the pipeline.
 
 It's the quickest way to see what a finished graph looks like, and the test
-suite runs it end to end so it can't rot. These files live in the git
+suite runs it end to end so it can't rot. This folder lives in the git
 repository rather than the PyPI package — clone the repo (or just download
-those two files) to try it.
+it) to try it.
 
 ## Working in the tool
 
@@ -83,11 +93,16 @@ A few things worth knowing beyond the canvas itself.
   their own undo. Undo restores the graph, not what you've run: reverting a
   param lands back on a cache key that's already computed, so results you
   already have aren't thrown away.
-- **Unsaved work** — saving to the project file stays explicit (a `•` on the
-  Save button marks unsaved edits), but every edit is snapshotted to
-  `.modelmaker-cache/recovery.json`. After a crash or a closed browser, the
-  app offers to restore it on next start. Nothing ever writes your project
-  file behind your back.
+- **Unsaved work** — once a project has a folder to save into, a dirty edit
+  autosaves back to it a couple of seconds after you stop typing/dragging (a
+  `•` on the Save button marks the brief window before that happens; the bar
+  says "autosaved HH:MM:SS" once it has). Every edit is also snapshotted to
+  `.modelmaker-cache/recovery.json` regardless -- crash recovery doesn't wait
+  on the debounce, and it's what covers a project that's never been saved at
+  all yet. After a crash or a closed browser, the app offers to restore it on
+  next start. Autosave only ever writes to your project's own `model.json`;
+  it never stages or commits anything -- git stays entirely manual, via the
+  Git panel.
 - **Editing during a run** — a run is pinned to the graph as it stood when
   it started, so you can keep editing (or undo, or toggle sample mode) while
   a long sweep executes. The run finishes against its own version; anything
@@ -110,7 +125,7 @@ can be saved to a `.txt`/`.html` file alongside the block's own PNG.
 
 ```bash
 modelmaker-tui                          # spawns its own modelmaker-api, zero setup
-modelmaker-tui projects/demo_pd_model.json   # ...and loads a project on startup
+modelmaker-tui projects/demo_pd_model   # ...and loads a project (a folder) on startup
 modelmaker-tui --host 127.0.0.1 --port 8001  # attach to an already-running modelmaker-api instead
 ```
 

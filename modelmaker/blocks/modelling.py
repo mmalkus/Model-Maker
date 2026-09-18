@@ -372,3 +372,55 @@ register_block(
         metadata_transform=_woe_meta,
     )
 )
+
+
+def scorecard_scale(model: dict, base_score: float = 600.0, base_odds: float = 50.0, pdo: float = 20.0) -> dict:
+    """Turns a fitted logistic_regression model's coefficients into a
+    points-based scorecard: the standard points-to-double-odds (PDO)
+    scaling used in retail credit scoring. `base_odds` (good:bad) maps to
+    `base_score` points, and every `pdo` points doubles the odds.
+
+    Assumes `model`'s features are already in the units you want scored on
+    the card (e.g. WoE-transformed categories -- see woe_transform); for a
+    raw continuous feature this still gives a correct scaling, just as
+    points *per unit* of that feature rather than points per category."""
+    import math
+
+    if model.get("kind") != "logistic_regression":
+        raise ValueError(f"scorecard_scale needs a logistic_regression model, got {model.get('kind')!r}")
+
+    # Odds of the *good* outcome (not the target's own 1=bad encoding) rise
+    # with score, so the model's own bad-odds logit gets negated below.
+    factor = pdo / math.log(2)
+    offset = base_score - factor * math.log(base_odds)
+
+    coefficients: dict[str, float] = model["coefficients"]
+    intercept_points = offset - factor * model["intercept"]
+    rows = [
+        {"feature": feature, "coefficient": coef, "points_per_unit": -coef * factor}
+        for feature, coef in coefficients.items()
+    ]
+    return {
+        "kind": "scorecard_scale",
+        "base_score": base_score,
+        "base_odds": base_odds,
+        "pdo": pdo,
+        "factor": factor,
+        "offset": offset,
+        "intercept_points": intercept_points,
+        "rows": rows,
+    }
+
+
+register_block(
+    BlockSpec(
+        category="scorecard_scale",
+        block_type="output",
+        group="modelling",
+        display_name="Scorecard scaling",
+        inputs=[PortSpec("model", type="model")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=scorecard_scale,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)

@@ -93,6 +93,30 @@ def test_run_all_reads_a_never_touched_source_then_succeeds(tmp_path):
     assert report2["b_filter"] == "green"
 
 
+def test_run_all_flags_sweep_running_while_in_flight(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    assert runner.sweep_running is False
+
+    seen_during: list[bool] = []
+    real_run_block = runner.run_block
+
+    def _spying_run_block(*args, **kwargs):
+        seen_during.append(runner.sweep_running)
+        return real_run_block(*args, **kwargs)
+
+    runner.run_block = _spying_run_block
+    runner.run_all()
+
+    # Two blocks (the source + the filter) -- run_block is called for both,
+    # each time with sweep_running already true.
+    assert seen_during == [True, True]
+    # Cleared once the sweep itself returns, same as before it started --
+    # this is sweep-only state, not left lying around for a later poll to
+    # misread against an unrelated single-block run.
+    assert runner.sweep_running is False
+
+
 def test_run_all_does_not_reread_a_source_already_read_but_stale(tmp_path):
     graph, csv_path = _csv_graph(tmp_path)
     runner = Runner(graph, CacheStore())

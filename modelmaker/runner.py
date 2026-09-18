@@ -270,6 +270,10 @@ class Runner:
         # further blocks; each cascade entry point clears it first, so a
         # previous cancellation never leaks into the next run.
         self._cancel_requested = threading.Event()
+        # True for the duration of a _sweep() (run_all/force_run_all) -- see
+        # _sweep's own comment. False outside of one, including during a
+        # single-block run (where is_running()/_active already cover it).
+        self.sweep_running = False
 
     def _st(self, block_id: str) -> RunState:
         return self.state.setdefault(block_id, RunState())
@@ -1033,35 +1037,47 @@ class Runner:
 
     def _sweep(self, plan: RunPlan, force: bool) -> dict[str, str]:
         report: dict[str, str] = {}
-        for bid in plan.graph.topo_order():
-            if self._cancel_requested.is_set():
-                report[bid] = "cancelled"
-                continue
-            block = plan.graph.blocks[bid]
-            if block.block_type == "input":
-                # A source that's *never* been read blocks every downstream
-                # block anyway (see _blocked_on_unread_input) -- reporting
-                # the whole rest of the pipeline as permanently "blocked"
-                # instead of just reading it isn't useful to anyone, so the
-                # first read happens here automatically. A source that has
-                # been read before but is merely stale (an edited param,
-                # sample mode toggled, ...) is left alone: re-reading it is
-                # a deliberate, sometimes expensive action (Refresh sources),
-                # not something a plain Run all should decide to do on its
-                # own once data has already been pulled in once.
-                if self._st(bid).last_successful_key is None:
+        # Read by api.py's _graph_out() (as "sweep_running") while a sweep is
+        # in flight: individual blocks each go "running" only for their own
+        # dispatch (see _active/is_running), so there's a real gap between
+        # one block finishing and the next one starting where nothing in the
+        # graph looks like it's mid-run. Keeps the frontend polling through
+        # those gaps instead of stopping early, so every block's grey ->
+        # running -> green/red transition is visible as the sweep goes,
+        # rather than the canvas jumping straight from all-grey to done.
+        self.sweep_running = True
+        try:
+            for bid in plan.graph.topo_order():
+                if self._cancel_requested.is_set():
+                    report[bid] = "cancelled"
+                    continue
+                block = plan.graph.blocks[bid]
+                if block.block_type == "input":
+                    # A source that's *never* been read blocks every downstream
+                    # block anyway (see _blocked_on_unread_input) -- reporting
+                    # the whole rest of the pipeline as permanently "blocked"
+                    # instead of just reading it isn't useful to anyone, so the
+                    # first read happens here automatically. A source that has
+                    # been read before but is merely stale (an edited param,
+                    # sample mode toggled, ...) is left alone: re-reading it is
+                    # a deliberate, sometimes expensive action (Refresh sources),
+                    # not something a plain Run all should decide to do on its
+                    # own once data has already been pulled in once.
+                    if self._st(bid).last_successful_key is None:
+                        self.run_block(bid, plan)
+                    continue
+                if self._blocked_on_unread_input(bid, plan):
+                    report[bid] = "blocked: upstream input block has never been read"
+                    continue
+                if force or not self._is_current(bid, plan):
                     self.run_block(bid, plan)
-                continue
-            if self._blocked_on_unread_input(bid, plan):
-                report[bid] = "blocked: upstream input block has never been read"
-                continue
-            if force or not self._is_current(bid, plan):
-                self.run_block(bid, plan)
-            # Reported against the live graph, which is what the user is
-            # looking at -- a block they edited mid-sweep really is stale
-            # now, however well its run went.
-            report[bid] = self.status(bid) if bid in self.graph.blocks else "deleted during run"
-        return report
+                # Reported against the live graph, which is what the user is
+                # looking at -- a block they edited mid-sweep really is stale
+                # now, however well its run went.
+                report[bid] = self.status(bid) if bid in self.graph.blocks else "deleted during run"
+            return report
+        finally:
+            self.sweep_running = False
 
     def run_all(self) -> dict[str, str]:
         """Topological order; skips blocks already current under this run's

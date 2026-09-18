@@ -341,7 +341,7 @@ class ModelMakerTUI(App):
             self.notify("project saved")
             await self.refresh_all()
             return
-        path = await self.push_screen_wait(TextInputScreen("Save project as", placeholder="projects/my_model.json"))
+        path = await self.push_screen_wait(TextInputScreen("Save project as", placeholder="projects/my_model"))
         if not path:
             return
         try:
@@ -354,7 +354,7 @@ class ModelMakerTUI(App):
 
     @work(exclusive=True)
     async def action_open_project(self) -> None:
-        path = await self.push_screen_wait(TextInputScreen("Load project", placeholder="projects/demo_pd_model.json"))
+        path = await self.push_screen_wait(TextInputScreen("Load project", placeholder="projects/demo_pd_model"))
         if not path:
             return
         try:
@@ -751,7 +751,7 @@ def main() -> None:
     the web UI already relies on, just pointed at by this process instead
     of a browser."""
     parser = argparse.ArgumentParser(prog="modelmaker-tui", description="Terminal UI for Model-Maker.")
-    parser.add_argument("project", nargs="?", help="project file to load on startup")
+    parser.add_argument("project", nargs="?", help="project folder to load on startup")
     parser.add_argument("--host", help="attach to an already-running modelmaker-api instead of spawning one")
     parser.add_argument("--port", type=int, default=8001, help="port for --host, or for the spawned server")
     args = parser.parse_args()

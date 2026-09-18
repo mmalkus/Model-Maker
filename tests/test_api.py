@@ -82,6 +82,26 @@ def test_rename_port_sets_and_clears_a_data_name(client, tmp_path):
     assert bad_port.status_code == 400
 
 
+def test_rename_port_rejects_a_name_already_used_elsewhere(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    first = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    second = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}, "x": 200}).json()
+
+    client.patch(f"/api/blocks/{first['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    resp = client.patch(f"/api/blocks/{second['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    assert resp.status_code == 400
+    assert "already used" in resp.json()["detail"]
+
+    # unaffected -- the second block's port is still unnamed
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][second["id"]]["port_names"] == {}
+
+    # renaming the first block's own port to its own current name is a no-op, not a self-collision
+    same = client.patch(f"/api/blocks/{first['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    assert same.status_code == 200
+
+
 def test_invalid_wire_type_mismatch_is_flagged_not_rejected(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")
@@ -130,8 +150,14 @@ def test_run_all_and_compile(client, tmp_path):
         json={"from_block": read["id"], "from_port": "out", "to_block": filt["id"], "to_port": "df"},
     )
 
+    assert client.get("/api/graph").json()["sweep_running"] is False
+
     report = client.post("/api/run_all").json()
     assert report[filt["id"]] == "green"
+    # Sweep-only state -- cleared again once the (background-thread) sweep
+    # this request waited on has actually finished, not left dangling for
+    # the next unrelated poll to misread.
+    assert client.get("/api/graph").json()["sweep_running"] is False
 
     report2 = client.post("/api/run_all").json()
     assert report2[filt["id"]] == "green"
@@ -184,14 +210,14 @@ def test_save_and_load_round_trip(client, tmp_path):
     csv_path.write_text("a,b\n1,10\n")
     client.post("/api/blocks", json={"category": "read_csv", "name": "Load data", "params": {"path": str(csv_path)}})
 
-    project_path = tmp_path / "project.json"
-    save_resp = client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "project"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
     assert save_resp.status_code == 200
-    assert project_path.exists()
+    assert (project_dir / "model.json").exists()
 
     api_module.SESSION = ProjectSession()
     client2 = TestClient(api_module.app)
-    load_resp = client2.post("/api/project/load", json={"path": str(project_path)})
+    load_resp = client2.post("/api/project/load", json={"path": str(project_dir)})
     assert load_resp.status_code == 200
     blocks = load_resp.json()["blocks"]
     assert len(blocks) == 1
@@ -202,8 +228,8 @@ def test_new_project_clears_the_graph_without_touching_the_saved_file(client, tm
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")
     client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}})
-    project_path = tmp_path / "project.json"
-    client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "project"
+    client.post("/api/project/save", json={"path": str(project_dir)})
 
     resp = client.post("/api/project/new")
     assert resp.status_code == 200
@@ -211,7 +237,7 @@ def test_new_project_clears_the_graph_without_touching_the_saved_file(client, tm
     assert body["blocks"] == {}
     assert body["project_path"] is None
     assert body["dirty"] is False
-    assert project_path.exists()
+    assert (project_dir / "model.json").exists()
 
 
 def test_git_status_before_any_project_is_saved(client):
@@ -227,8 +253,8 @@ def test_git_endpoints_require_a_saved_project(client):
 
 
 def test_git_status_commit_and_remote_round_trip(client, tmp_path):
-    project_path = tmp_path / "proj" / "model.json"
-    save_resp = client.post("/api/project/save", json={"path": str(project_path)})
+    project_dir = tmp_path / "proj"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
     assert save_resp.status_code == 200
 
     status = client.get("/api/project/git/status").json()
@@ -244,6 +270,34 @@ def test_git_status_commit_and_remote_round_trip(client, tmp_path):
 
     # nothing left to commit
     assert client.post("/api/project/git/commit", json={"message": "again"}).status_code == 400
+
+
+def test_save_exposes_the_folder_not_the_model_json_file(client, tmp_path):
+    project_dir = tmp_path / "my_pd_model"
+    save_resp = client.post("/api/project/save", json={"path": str(project_dir)})
+    assert save_resp.json()["path"] == str(project_dir)
+
+    graph = client.get("/api/graph").json()
+    assert graph["project_path"] == str(project_dir)
+    assert graph["project_name"] == "my_pd_model"
+
+
+def test_load_rejects_a_folder_with_no_model_json(client, tmp_path):
+    empty_dir = tmp_path / "not_a_project"
+    empty_dir.mkdir()
+    resp = client.post("/api/project/load", json={"path": str(empty_dir)})
+    assert resp.status_code == 404
+    assert "model.json" in resp.json()["detail"]
+
+
+def test_browse_flags_which_subfolders_are_projects(client, tmp_path):
+    project_dir = tmp_path / "a_project"
+    client.post("/api/project/save", json={"path": str(project_dir)})
+    (tmp_path / "just_a_folder").mkdir()
+
+    entries = {e["name"]: e for e in client.get("/api/browse", params={"path": str(tmp_path)}).json()["entries"]}
+    assert entries["a_project"]["is_project"] is True
+    assert entries["just_a_folder"]["is_project"] is False
 
 
 def test_delete_block_removes_dependent_wires(client, tmp_path):
@@ -467,6 +521,138 @@ def test_psi_test_compares_two_inputs(client, tmp_path):
         api_module.SESSION.runner.state[psi["id"]].last_successful_key
     ).outputs["metric"]
     assert metric["psi"] == pytest.approx(0.0, abs=1e-9)
+
+
+def _run_and_get_metric(client, block_id):
+    resp = client.post(f"/api/blocks/{block_id}/run")
+    assert resp.json()["status"] == "green", resp.json()
+    return api_module.SESSION.runner.cache.get(
+        api_module.SESSION.runner.state[block_id].last_successful_key
+    ).outputs["metric"]
+
+
+def test_roc_curve_reports_auc_and_curve_points(client, tmp_path):
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    roc = client.post(
+        "/api/blocks", json={"category": "roc_curve", "params": {"score_col": "predicted_proba", "target_col": "y"}}
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "predictions", "to_block": roc["id"], "to_port": "df"},
+    )
+
+    metric = _run_and_get_metric(client, roc["id"])
+    assert 0.5 < metric["auc"] <= 1  # clearly-separable synthetic data
+    assert len(metric["points"]) >= 2
+    for point in metric["points"]:
+        assert 0 <= point["fpr"] <= 1
+        assert 0 <= point["tpr"] <= 1
+
+
+def test_calibration_test_reports_hl_statistic_and_buckets(client, tmp_path):
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    calib = client.post(
+        "/api/blocks",
+        json={
+            "category": "calibration_test",
+            "params": {"score_col": "predicted_proba", "target_col": "y", "bins": 4},
+        },
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "predictions", "to_block": calib["id"], "to_port": "df"},
+    )
+
+    metric = _run_and_get_metric(client, calib["id"])
+    assert metric["hl_statistic"] >= 0
+    assert 0 <= metric["p_value"] <= 1
+    assert len(metric["buckets"]) >= 1
+    assert sum(b["n"] for b in metric["buckets"]) == 20
+
+
+def test_iv_table_ranks_a_predictive_feature_above_pure_noise(client, tmp_path):
+    # x is (mostly) perfectly separating; noise is independent of y -- a
+    # correct IV ranking must put x well above it.
+    y = [0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    noise = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+    csv_path = tmp_path / "iv.csv"
+    rows = ["x,noise,y"] + [f"{x},{n},{yi}" for x, n, yi in zip(range(1, 21), noise, y)]
+    csv_path.write_text("\n".join(rows) + "\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    iv = client.post("/api/blocks", json={"category": "iv_table", "params": {"target": "y"}}).json()
+    client.post(
+        "/api/wires", json={"from_block": read["id"], "from_port": "out", "to_block": iv["id"], "to_port": "df"}
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    metric = _run_and_get_metric(client, iv["id"])
+    by_feature = {r["feature"]: r for r in metric["rows"]}
+    assert by_feature["x"]["iv"] > by_feature["noise"]["iv"]
+    # rows come back sorted highest-IV first
+    assert metric["rows"][0]["feature"] == "x"
+
+
+def test_correlation_matrix_reports_correlation_and_vif(client, tmp_path):
+    # b is exactly 2*a -- perfectly collinear, so its VIF should come back
+    # null (undefined) rather than some huge-but-finite number.
+    csv_path = tmp_path / "corr.csv"
+    rows = ["a,b,c"] + [f"{i},{2 * i},{(i * 7) % 5}" for i in range(1, 21)]
+    csv_path.write_text("\n".join(rows) + "\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    corr = client.post("/api/blocks", json={"category": "correlation_matrix", "params": {}}).json()
+    client.post(
+        "/api/wires", json={"from_block": read["id"], "from_port": "out", "to_block": corr["id"], "to_port": "df"}
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    metric = _run_and_get_metric(client, corr["id"])
+    assert metric["features"] == ["a", "b", "c"]
+    for i in range(3):
+        assert metric["correlation"][i][i] == pytest.approx(1.0, abs=1e-6)
+    assert metric["correlation"][0][1] == pytest.approx(1.0, abs=1e-6)  # a vs b
+    vif_by_feature = {row["feature"]: row["vif"] for row in metric["vif"]}
+    assert vif_by_feature["a"] is None  # perfectly explained by b
+
+
+def test_scorecard_scale_turns_coefficients_into_points(client, tmp_path):
+    import math
+
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    scale = client.post(
+        "/api/blocks",
+        json={
+            "category": "scorecard_scale",
+            "params": {"base_score": 600, "base_odds": 50, "pdo": 20},
+        },
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "model", "to_block": scale["id"], "to_port": "model"},
+    )
+
+    metric = _run_and_get_metric(client, scale["id"])
+    expected_factor = 20 / math.log(2)
+    assert metric["factor"] == pytest.approx(expected_factor)
+    assert metric["offset"] == pytest.approx(600 - expected_factor * math.log(50))
+    assert [row["feature"] for row in metric["rows"]] == ["x"]
+    assert metric["rows"][0]["points_per_unit"] != 0
 
 
 def test_input_schema_lists_all_declared_ports_even_when_unwired(client):

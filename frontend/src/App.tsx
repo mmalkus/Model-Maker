@@ -25,6 +25,18 @@ import type { BlockOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInf
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
 const edgeTypes = { dataWire: DataWireEdge }
 
+// How long to sit idle after the last edit before writing the project file.
+// Short enough that a save is never more than a few clicks stale, long
+// enough that dragging a block across the canvas or stepping through a
+// dozen param tweaks coalesces into one write instead of one per edit.
+const AUTOSAVE_DEBOUNCE_MS = 2000
+
+export type AutosaveStatus =
+  | { state: 'idle' }
+  | { state: 'saving' }
+  | { state: 'saved'; at: number }
+  | { state: 'error'; message: string }
+
 type FlowNode = BlockFlowNode | LaneBandNode
 
 function toBlockNodes(
@@ -71,6 +83,7 @@ function AppInner() {
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [llmSettings, setLlmSettings] = useState<LLMSettingsOut | null>(null)
   const [recovery, setRecovery] = useState<RecoveryInfo | null>(null)
+  const [autosave, setAutosave] = useState<AutosaveStatus>({ state: 'idle' })
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
@@ -150,9 +163,11 @@ function AppInner() {
     return () => window.removeEventListener('keydown', onKey)
   }, [undo, redo])
 
-  // Edits are always snapshotted server-side for crash recovery, but the
-  // project file is only written when the user saves -- so leaving with
-  // unsaved edits is worth one confirmation.
+  // Edits are always snapshotted server-side for crash recovery, and
+  // autosave (below) catches up the project file itself within a couple of
+  // seconds -- but that write is debounced and best-effort (e.g. it never
+  // fires for a project with no save location yet), so leaving mid-debounce
+  // or mid-failure is still worth one confirmation.
   useEffect(() => {
     if (!graph?.dirty) return
     const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault()
@@ -160,16 +175,55 @@ function AppInner() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [graph?.dirty])
 
+  // Autosave: once a project has somewhere to write to, dirty edits write
+  // themselves back after a short idle debounce, same target file as a
+  // manual Save. This writes the working tree only -- it never stages or
+  // commits -- so it doesn't interact with the project's own git history;
+  // nothing here composes a commit, only `git commit` (via the Git panel)
+  // does that. Unsaved-with-nowhere-to-write (no project_path yet) still
+  // relies on crash recovery alone, same as before.
+  const autosaveInFlight = useRef(false)
+  useEffect(() => {
+    if (!graph?.dirty || !graph.project_path) return
+    const timer = setTimeout(() => {
+      if (autosaveInFlight.current) return
+      autosaveInFlight.current = true
+      setAutosave({ state: 'saving' })
+      api
+        .save()
+        .then(() => {
+          setAutosave({ state: 'saved', at: Date.now() })
+          reload()
+        })
+        .catch((e) => setAutosave({ state: 'error', message: (e as Error).message }))
+        .finally(() => {
+          autosaveInFlight.current = false
+        })
+    }, AUTOSAVE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [graph?.dirty, graph?.project_path, reload])
+
   // Runs (a single block, a cascade, or a full sweep) execute on the server
   // in the background -- see api.py -- so a block that's still "running"
   // by the time reload() above returns means the run outlived its bounded
   // wait and is genuinely still in flight. Keep polling until nothing is,
   // so status badges (see BlockNode) and the Stop button (see Toolbar)
-  // stay live without the user having to manually refresh.
-  const anyRunning = useMemo(() => (graph ? Object.values(graph.blocks).some((b) => b.status === 'running') : false), [graph])
+  // stay live without the user having to manually refresh. sweep_running is
+  // included too: between one block's dispatch ending and the next one
+  // starting there's a real gap where nothing is individually "running" yet
+  // the sweep itself is still going -- without it, polling could stop mid-
+  // sweep and the canvas would sit on a half-updated, stale-looking state.
+  const anyRunning = useMemo(
+    () => (graph ? Object.values(graph.blocks).some((b) => b.status === 'running') || graph.sweep_running : false),
+    [graph],
+  )
   useEffect(() => {
     if (!anyRunning) return
-    const id = setInterval(reload, 700)
+    // Faster than the steady-state UI needs on its own, so each block's
+    // grey -> running -> green/red transition during a Run all/Force run
+    // all sweep is actually visible rather than the canvas jumping straight
+    // from all-grey to done between two 700ms-apart polls.
+    const id = setInterval(reload, 200)
     return () => clearInterval(id)
   }, [anyRunning, reload])
 
@@ -402,6 +456,7 @@ function AppInner() {
         onUndo={undo}
         onRedo={redo}
         sampleRows={graph?.sample_rows ?? null}
+        autosave={autosave}
       />
       {graph?.sample_rows != null && (
         <div

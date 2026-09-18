@@ -12,14 +12,26 @@ class ColumnInfo:
     name: str
     dtype: str
     role: str
+    # Summary statistics (see packet.ColumnStats) -- optional and unused by
+    # "author"/"params_only" drafting, populated only for "analyze_data" (see
+    # DraftContext.mode) so the model has more than names/dtypes to go on
+    # without ever being handed actual row data.
+    count: int | None = None
+    null_count: int | None = None
+    n_unique: int | None = None
+    mean: float | None = None
+    std: float | None = None
+    min: Any = None
+    max: Any = None
 
 
 @dataclass
 class DraftContext:
-    """Everything a provider needs to draft or fix a block's code. Column
-    schemas are passed as plain metadata (names/dtypes/roles) -- never row
-    data -- matching the plan's "schema, not necessarily full data" rule for
-    the AI-assisted fix action."""
+    """Everything a provider needs to draft or fix a block's code, or (see
+    mode="analyze_data") to analyze one block's output columns instead.
+    Column schemas are passed as plain metadata (names/dtypes/roles/stats)
+    -- never row data -- matching the plan's "schema, not necessarily full
+    data" rule for the AI-assisted fix action, and now the analysis one too."""
 
     instruction: str
     function_name: str
@@ -31,7 +43,18 @@ class DraftContext:
     # flow). "params_only": the block's code is fixed (a standard/input/
     # output block from the registry) -- the model may only choose values
     # for its existing parameters, given the fixed source for context.
-    mode: Literal["author", "params_only"] = "author"
+    # "analyze_data": not drafting anything -- `code`/`metadata_transform`
+    # come back as fixed placeholders (see prompts.CONTRACT_ANALYZE_DATA),
+    # `params` carries per-column tag suggestions instead of parameter
+    # values, and `explanation` carries the write-up itself rather than a
+    # one-sentence note. Reuses the same DraftContext/DraftResult shape (and
+    # every existing provider's draft() unchanged) for an otherwise
+    # unrelated task, rather than adding a second provider-facing method.
+    # "rename": same reuse, for proposing a block's display name and its
+    # output ports' names instead -- `params["name"]` is the block name,
+    # `params[<port>]` each port's proposed name (see
+    # prompts.CONTRACT_RENAME).
+    mode: Literal["author", "params_only", "analyze_data", "rename"] = "author"
     fixed_source: str | None = None
     # Off by default: appends a condensed Polars API cheat sheet + worked
     # example to the system prompt. Costs extra tokens on every call, so it's

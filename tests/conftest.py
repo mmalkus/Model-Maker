@@ -11,4 +11,4 @@ import modelmaker  # noqa: E402,F401
 # importing these for their registration side effect is what makes
 # BLOCK_REGISTRY complete, so a test module run on its own sees the same
 # catalog as one run as part of the whole suite.
-from modelmaker.blocks import library, modelling, stat_tests  # noqa: E402,F401
+from modelmaker.blocks import feature_analysis, library, modelling, stat_tests  # noqa: E402,F401

@@ -1,4 +1,5 @@
 import type {
+  AnalyzeDataOut,
   BlockOut,
   BlockType,
   BrowseOut,
@@ -10,6 +11,7 @@ import type {
   PreviewOut,
   RecoveryInfo,
   RegistryEntry,
+  SuggestNamesOut,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -164,4 +166,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ instruction: instruction ?? '', provider }),
     }),
+  analyzeData: (id: string, port?: string, provider?: string) =>
+    request<AnalyzeDataOut>(`/blocks/${id}/analyze_data`, { method: 'POST', body: JSON.stringify({ port, provider }) }),
+  suggestNames: (id: string, provider?: string) =>
+    request<SuggestNamesOut>(`/blocks/${id}/suggest_names`, { method: 'POST', body: JSON.stringify({ provider }) }),
 }

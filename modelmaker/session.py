@@ -145,10 +145,13 @@ class ProjectSession:
     def _write_recovery(self) -> None:
         """Snapshot the graph to the recovery file after every edit.
 
-        Deliberately never writes the user's own project file: an editor
-        that silently rewrites the thing under version control turns every
-        idle session into a git diff. Save stays explicit; this exists only
-        so a crash or a closed browser can't lose work."""
+        Deliberately never writes the user's own project file itself -- that
+        stays the frontend's job (a debounced autosave calls this same
+        save() below, the way a manual Save does, once the project has
+        somewhere to write to). This snapshot is the unconditional half: it
+        fires on every single edit, with no debounce and no dependency on
+        the project ever having been saved, so a crash or a closed browser
+        can't lose work even before autosave has anywhere to write to."""
         if self.recovery_path is None:
             return
         try:
@@ -228,7 +231,10 @@ class ProjectSession:
         self.graph = load_project(path)
         self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)
         self.project_path = path
-        self.project_name = path.stem
+        # `path` is always <project folder>/PROJECT_FILENAME -- the folder is
+        # the project, so its name is the project's name, not the fixed
+        # filename's stem.
+        self.project_name = path.parent.name
         # A different project is a different edit history.
         self._undo.clear()
         self._redo.clear()
@@ -241,6 +247,7 @@ class ProjectSession:
             raise ValueError("no project path set; provide one to save")
         save_project(self.graph, target, project_name=self.project_name)
         self.project_path = target
+        self.project_name = target.parent.name
         self.saved_revision = self.revision
         # The work this snapshot exists to protect is now safely on disk in
         # the user's own project file -- leaving it behind would just nag
@@ -369,6 +376,23 @@ class ProjectSession:
         block.column_role_overrides = overrides
         return block
 
+    def set_column_tags(self, block_id: str, tags: dict[str, list[str]]) -> BlockInstance:
+        """Replace this block's column_tags wholesale (see BlockInstance.
+        column_tags) -- the caller (an AI analysis proposal, or a future
+        hand-edit UI) always has the complete set it wants, not one column
+        at a time like set_column_role, so there's no merge-with-existing
+        step here. An empty list for a column clears its tags; a column
+        left out entirely keeps whatever tags it already had."""
+        block = self.graph.blocks[block_id]
+        merged = dict(block.column_tags)
+        for column, column_tags in tags.items():
+            if column_tags:
+                merged[column] = list(column_tags)
+            else:
+                merged.pop(column, None)
+        block.column_tags = merged
+        return block
+
     def delete_block(self, block_id: str) -> None:
         self.graph.blocks.pop(block_id, None)
         dead_wires = [wid for wid, w in self.graph.wires.items() if w.from_block == block_id or w.to_block == block_id]
@@ -392,9 +416,25 @@ class ProjectSession:
         self.graph.wires.pop(wire_id, None)
 
     def rename_port(self, block_id: str, port: str, name: str | None) -> BlockInstance:
+        """Name (or clear the name of) the data on one of this block's
+        output ports (see BlockInstance.port_names) -- used by the compiler
+        as the compiled script's variable name for it. Two ports sharing a
+        name would otherwise silently fall back to the auto-generated one
+        at compile time instead of actually colliding (see compiler.py's
+        _alloc_output_vars), which just means the name you picked quietly
+        doesn't stick -- rejected upfront here instead."""
         block = self.graph.blocks[block_id]
         if not any(p.name == port for p in block.outputs):
             raise ValueError(f"no such output port: {port}")
+        if name:
+            for other_id, other in self.graph.blocks.items():
+                for other_port, other_name in other.port_names.items():
+                    if (other_id, other_port) == (block_id, port):
+                        continue
+                    if other_name == name:
+                        raise ValueError(
+                            f"'{name}' is already used as the name for {other.name!r}'s '{other_port}' output"
+                        )
         port_names = dict(block.port_names)
         if name:
             port_names[port] = name
