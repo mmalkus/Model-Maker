@@ -6,6 +6,7 @@ import type {
   BlockType,
   BrowseOut,
   DraftOut,
+  EnvVarStatus,
   GitStatusOut,
   GraphOut,
   InputSchemaOut,
@@ -149,6 +150,11 @@ export const api = {
     const qs = q.toString()
     return request<BrowseOut>(`/browse${qs ? `?${qs}` : ''}`)
   },
+
+  envVar: (name: string) => request<EnvVarStatus>(`/env_vars/${encodeURIComponent(name)}`),
+  setEnvVar: (name: string, value: string) =>
+    request<EnvVarStatus>(`/env_vars/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+  clearEnvVar: (name: string) => request<EnvVarStatus>(`/env_vars/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   llmSettings: () => request<LLMSettingsOut>('/llm/settings'),
   updateLlmSettings: (body: {

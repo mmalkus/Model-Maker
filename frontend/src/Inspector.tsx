@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
+import { EnvVarField } from './EnvVarField'
 import { FileBrowser } from './FileBrowser'
 import { PARAM_SPECS, ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
@@ -431,6 +432,8 @@ export function Inspector({
           </div>
         </div>
       )}
+
+      {block.category === 'read_sql' && <EnvVarField name={(block.params.connection_env as string) ?? ''} />}
 
       {block.category !== 'display_table' && (
         <div style={{ marginBottom: 12 }}>

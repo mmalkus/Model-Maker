@@ -213,6 +213,16 @@ export interface LLMSettingsOut {
   settings: Record<string, LLMProviderSettings>
 }
 
+export interface EnvVarStatus {
+  name: string
+  // Whether the var is currently set -- the value itself is never sent to
+  // the client (see api.EnvVarUpdate). 'override' means it was set via
+  // PUT /api/env_vars/{name} for this server process; 'env' means it was
+  // already present (shell env or .env) before that.
+  is_set: boolean
+  source: 'override' | 'env' | null
+}
+
 export interface GitChange {
   status: string
   path: string
