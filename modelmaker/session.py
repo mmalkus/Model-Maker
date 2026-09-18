@@ -209,6 +209,21 @@ class ProjectSession:
             saved_path = payload.get("project_path")
             self.project_path = Path(saved_path) if saved_path else None
 
+    def new(self) -> None:
+        """Start a brand-new, empty project -- the in-memory equivalent of a
+        fresh server start, callable mid-session: an empty graph/runner, no
+        project path, and a clean edit history. Never touches the
+        filesystem; nothing exists on disk until the next Save."""
+        self.graph = Graph()
+        self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)
+        self.project_path = None
+        self.project_name = "untitled"
+        self._undo.clear()
+        self._redo.clear()
+        self.revision = 0
+        self.saved_revision = 0
+        self.clear_recovery()
+
     def load(self, path: Path) -> None:
         self.graph = load_project(path)
         self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)

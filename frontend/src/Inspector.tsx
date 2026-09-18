@@ -168,6 +168,19 @@ export function Inspector({
     }
   }
 
+  const saveAndRunParams = () => {
+    try {
+      const parsed = JSON.parse(paramsText || '{}')
+      setParamsError(null)
+      run(async () => {
+        await api.updateBlock(block.id, { params: parsed })
+        await api.run(block.id)
+      })
+    } catch {
+      setParamsError('invalid JSON')
+    }
+  }
+
   const dataframePort = block.outputs.find((p) => p.type === 'dataframe' || dynamicDataframePorts.has(p.name))?.name
 
   let currentParams: Record<string, unknown> = {}
@@ -425,9 +438,14 @@ export function Inspector({
             </>
           )}
           {paramsError && <div style={{ color: '#b91c1c' }}>{paramsError}</div>}
-          <button disabled={busy} onClick={saveParams} style={{ marginTop: 4 }}>
-            Save params
-          </button>
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <button disabled={busy} onClick={saveParams}>
+              Save params
+            </button>
+            <button disabled={busy || block.status === 'running'} onClick={saveAndRunParams} title="Save params, then run this block">
+              Save &amp; run
+            </button>
+          </div>
         </div>
       )}
 
