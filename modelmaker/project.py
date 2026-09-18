@@ -89,6 +89,7 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
             port_names=b.get("port_names", {}),
             group_by=b.get("group_by"),
             max_workers=b.get("max_workers"),
+            column_tags=b.get("column_tags", {}),
         )
 
     wires = {
@@ -137,6 +138,7 @@ def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path
             "port_names": b.port_names,
             "group_by": b.group_by,
             "max_workers": b.max_workers,
+            "column_tags": b.column_tags,
             "ports": {
                 "inputs": [asdict(p) for p in b.inputs],
                 "outputs": [asdict(p) for p in b.outputs],

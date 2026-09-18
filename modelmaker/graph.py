@@ -82,6 +82,14 @@ class BlockInstance:
     # group_by is set. None means "use the runner's default" (see
     # Runner.MAX_GROUP_WORKERS). Ignored for ungrouped blocks.
     max_workers: int | None = None
+    # column name -> free-text tags (e.g. "likely-id", "mostly-null"),
+    # hand-set or AI-suggested (see api.py's /analyze_data) on top of
+    # whatever this block's own metadata_transform computed. Purely
+    # descriptive, like port_names above -- unlike column_role_overrides,
+    # never affects validation or param auto-binding, so it's deliberately
+    # left out of Runner.compute_key's hash basis: retagging a column is not
+    # a reason to invalidate this block or anything downstream.
+    column_tags: dict[str, list[str]] = field(default_factory=dict)
 
     def resolved_fn(self):
         if self.is_custom:

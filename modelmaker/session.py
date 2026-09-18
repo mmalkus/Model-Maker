@@ -376,6 +376,23 @@ class ProjectSession:
         block.column_role_overrides = overrides
         return block
 
+    def set_column_tags(self, block_id: str, tags: dict[str, list[str]]) -> BlockInstance:
+        """Replace this block's column_tags wholesale (see BlockInstance.
+        column_tags) -- the caller (an AI analysis proposal, or a future
+        hand-edit UI) always has the complete set it wants, not one column
+        at a time like set_column_role, so there's no merge-with-existing
+        step here. An empty list for a column clears its tags; a column
+        left out entirely keeps whatever tags it already had."""
+        block = self.graph.blocks[block_id]
+        merged = dict(block.column_tags)
+        for column, column_tags in tags.items():
+            if column_tags:
+                merged[column] = list(column_tags)
+            else:
+                merged.pop(column, None)
+        block.column_tags = merged
+        return block
+
     def delete_block(self, block_id: str) -> None:
         self.graph.blocks.pop(block_id, None)
         dead_wires = [wid for wid, w in self.graph.wires.items() if w.from_block == block_id or w.to_block == block_id]
@@ -399,9 +416,25 @@ class ProjectSession:
         self.graph.wires.pop(wire_id, None)
 
     def rename_port(self, block_id: str, port: str, name: str | None) -> BlockInstance:
+        """Name (or clear the name of) the data on one of this block's
+        output ports (see BlockInstance.port_names) -- used by the compiler
+        as the compiled script's variable name for it. Two ports sharing a
+        name would otherwise silently fall back to the auto-generated one
+        at compile time instead of actually colliding (see compiler.py's
+        _alloc_output_vars), which just means the name you picked quietly
+        doesn't stick -- rejected upfront here instead."""
         block = self.graph.blocks[block_id]
         if not any(p.name == port for p in block.outputs):
             raise ValueError(f"no such output port: {port}")
+        if name:
+            for other_id, other in self.graph.blocks.items():
+                for other_port, other_name in other.port_names.items():
+                    if (other_id, other_port) == (block_id, port):
+                        continue
+                    if other_name == name:
+                        raise ValueError(
+                            f"'{name}' is already used as the name for {other.name!r}'s '{other_port}' output"
+                        )
         port_names = dict(block.port_names)
         if name:
             port_names[port] = name

@@ -82,6 +82,26 @@ def test_rename_port_sets_and_clears_a_data_name(client, tmp_path):
     assert bad_port.status_code == 400
 
 
+def test_rename_port_rejects_a_name_already_used_elsewhere(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    first = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    second = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}, "x": 200}).json()
+
+    client.patch(f"/api/blocks/{first['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    resp = client.patch(f"/api/blocks/{second['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    assert resp.status_code == 400
+    assert "already used" in resp.json()["detail"]
+
+    # unaffected -- the second block's port is still unnamed
+    graph = client.get("/api/graph").json()
+    assert graph["blocks"][second["id"]]["port_names"] == {}
+
+    # renaming the first block's own port to its own current name is a no-op, not a self-collision
+    same = client.patch(f"/api/blocks/{first['id']}/port_name", json={"port": "out", "name": "raw applications"})
+    assert same.status_code == 200
+
+
 def test_invalid_wire_type_mismatch_is_flagged_not_rejected(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n")
@@ -501,6 +521,138 @@ def test_psi_test_compares_two_inputs(client, tmp_path):
         api_module.SESSION.runner.state[psi["id"]].last_successful_key
     ).outputs["metric"]
     assert metric["psi"] == pytest.approx(0.0, abs=1e-9)
+
+
+def _run_and_get_metric(client, block_id):
+    resp = client.post(f"/api/blocks/{block_id}/run")
+    assert resp.json()["status"] == "green", resp.json()
+    return api_module.SESSION.runner.cache.get(
+        api_module.SESSION.runner.state[block_id].last_successful_key
+    ).outputs["metric"]
+
+
+def test_roc_curve_reports_auc_and_curve_points(client, tmp_path):
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    roc = client.post(
+        "/api/blocks", json={"category": "roc_curve", "params": {"score_col": "predicted_proba", "target_col": "y"}}
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "predictions", "to_block": roc["id"], "to_port": "df"},
+    )
+
+    metric = _run_and_get_metric(client, roc["id"])
+    assert 0.5 < metric["auc"] <= 1  # clearly-separable synthetic data
+    assert len(metric["points"]) >= 2
+    for point in metric["points"]:
+        assert 0 <= point["fpr"] <= 1
+        assert 0 <= point["tpr"] <= 1
+
+
+def test_calibration_test_reports_hl_statistic_and_buckets(client, tmp_path):
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    calib = client.post(
+        "/api/blocks",
+        json={
+            "category": "calibration_test",
+            "params": {"score_col": "predicted_proba", "target_col": "y", "bins": 4},
+        },
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "predictions", "to_block": calib["id"], "to_port": "df"},
+    )
+
+    metric = _run_and_get_metric(client, calib["id"])
+    assert metric["hl_statistic"] >= 0
+    assert 0 <= metric["p_value"] <= 1
+    assert len(metric["buckets"]) >= 1
+    assert sum(b["n"] for b in metric["buckets"]) == 20
+
+
+def test_iv_table_ranks_a_predictive_feature_above_pure_noise(client, tmp_path):
+    # x is (mostly) perfectly separating; noise is independent of y -- a
+    # correct IV ranking must put x well above it.
+    y = [0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    noise = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+    csv_path = tmp_path / "iv.csv"
+    rows = ["x,noise,y"] + [f"{x},{n},{yi}" for x, n, yi in zip(range(1, 21), noise, y)]
+    csv_path.write_text("\n".join(rows) + "\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    iv = client.post("/api/blocks", json={"category": "iv_table", "params": {"target": "y"}}).json()
+    client.post(
+        "/api/wires", json={"from_block": read["id"], "from_port": "out", "to_block": iv["id"], "to_port": "df"}
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    metric = _run_and_get_metric(client, iv["id"])
+    by_feature = {r["feature"]: r for r in metric["rows"]}
+    assert by_feature["x"]["iv"] > by_feature["noise"]["iv"]
+    # rows come back sorted highest-IV first
+    assert metric["rows"][0]["feature"] == "x"
+
+
+def test_correlation_matrix_reports_correlation_and_vif(client, tmp_path):
+    # b is exactly 2*a -- perfectly collinear, so its VIF should come back
+    # null (undefined) rather than some huge-but-finite number.
+    csv_path = tmp_path / "corr.csv"
+    rows = ["a,b,c"] + [f"{i},{2 * i},{(i * 7) % 5}" for i in range(1, 21)]
+    csv_path.write_text("\n".join(rows) + "\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+
+    corr = client.post("/api/blocks", json={"category": "correlation_matrix", "params": {}}).json()
+    client.post(
+        "/api/wires", json={"from_block": read["id"], "from_port": "out", "to_block": corr["id"], "to_port": "df"}
+    )
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    metric = _run_and_get_metric(client, corr["id"])
+    assert metric["features"] == ["a", "b", "c"]
+    for i in range(3):
+        assert metric["correlation"][i][i] == pytest.approx(1.0, abs=1e-6)
+    assert metric["correlation"][0][1] == pytest.approx(1.0, abs=1e-6)  # a vs b
+    vif_by_feature = {row["feature"]: row["vif"] for row in metric["vif"]}
+    assert vif_by_feature["a"] is None  # perfectly explained by b
+
+
+def test_scorecard_scale_turns_coefficients_into_points(client, tmp_path):
+    import math
+
+    logreg = client.post(
+        "/api/blocks", json={"category": "logistic_regression", "params": {"target": "y", "features": ["x"]}}
+    ).json()
+    _wired_classification_csv(client, tmp_path, logreg["id"])
+    client.post(f"/api/blocks/{logreg['id']}/run")
+
+    scale = client.post(
+        "/api/blocks",
+        json={
+            "category": "scorecard_scale",
+            "params": {"base_score": 600, "base_odds": 50, "pdo": 20},
+        },
+    ).json()
+    client.post(
+        "/api/wires",
+        json={"from_block": logreg["id"], "from_port": "model", "to_block": scale["id"], "to_port": "model"},
+    )
+
+    metric = _run_and_get_metric(client, scale["id"])
+    expected_factor = 20 / math.log(2)
+    assert metric["factor"] == pytest.approx(expected_factor)
+    assert metric["offset"] == pytest.approx(600 - expected_factor * math.log(50))
+    assert [row["feature"] for row in metric["rows"]] == ["x"]
+    assert metric["rows"][0]["points_per_unit"] != 0
 
 
 def test_input_schema_lists_all_declared_ports_even_when_unwired(client):

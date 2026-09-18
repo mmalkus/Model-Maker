@@ -108,6 +108,9 @@ export interface PreviewColumn {
   dtype: string
   role: string
   description: string | null
+  // Free-text tags, hand-set or AI-suggested (see api.analyzeData) --
+  // BlockInstance.column_tags.
+  tags: string[]
 }
 
 export interface PreviewSummary {
@@ -155,6 +158,20 @@ export interface DraftOut {
   code: string
   metadata_transform: Record<string, unknown>
   params: Record<string, unknown>
+  explanation: string
+}
+
+export interface AnalyzeDataOut {
+  document: string
+  tags: Record<string, string[]>
+  // Where the document was written under the project's files/ folder, or
+  // null when no project has been saved yet.
+  document_path: string | null
+}
+
+export interface SuggestNamesOut {
+  name: string
+  port_names: Record<string, string>
   explanation: string
 }
 

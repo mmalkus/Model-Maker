@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
+from .blocks import feature_analysis as _feature_analysis  # noqa: F401
 from .blocks import library as _library  # noqa: F401
 from .blocks import modelling as _modelling  # noqa: F401
 from .blocks import stat_tests as _stat_tests  # noqa: F401
@@ -231,6 +232,15 @@ class DraftRequest(BaseModel):
     provider: str | None = None
 
 
+class AnalyzeDataRequest(BaseModel):
+    port: str | None = None
+    provider: str | None = None
+
+
+class SuggestNamesRequest(BaseModel):
+    provider: str | None = None
+
+
 class LLMSettingsUpdate(BaseModel):
     active_provider: str | None = None
     # Global toggle for including the Polars API reference in the system
@@ -348,7 +358,9 @@ def _graph_out() -> dict[str, Any]:
     }
 
 
-def _packet_preview(packet: DataFramePacket, rows: int, with_summary: bool) -> dict[str, Any]:
+def _packet_preview(
+    packet: DataFramePacket, rows: int, with_summary: bool, tags: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
     if with_summary:
         packet = packet.compute_summary()
     columns = [
@@ -357,6 +369,7 @@ def _packet_preview(packet: DataFramePacket, rows: int, with_summary: bool) -> d
             "dtype": meta.dtype,
             "role": meta.role.value if hasattr(meta.role, "value") else meta.role,
             "description": meta.description,
+            "tags": (tags or {}).get(name, []),
         }
         for name, meta in packet.schema_meta.items()
     ]
@@ -722,7 +735,7 @@ def preview_block(block_id: str, port: str | None = None, rows: int = 20, summar
     value = _get_cached_output(block_id, port)
     if not isinstance(value, DataFramePacket):
         raise HTTPException(400, "output port is not a dataframe")
-    return _packet_preview(value, rows=rows, with_summary=summary)
+    return _packet_preview(value, rows=rows, with_summary=summary, tags=SESSION.graph.blocks[block_id].column_tags)
 
 
 @app.get("/api/blocks/{block_id}/image")
@@ -1155,6 +1168,151 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
         "params": result.params,
         "explanation": result.explanation,
     }
+
+
+def _slug(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_") or "block"
+
+
+@app.post("/api/blocks/{block_id}/analyze_data")
+def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) -> dict[str, Any]:
+    """AI-assisted data profiling: looks at this block's own output columns
+    (names, dtypes, current roles, summary stats -- never row data, see
+    DraftContext.mode="analyze_data") and proposes per-column tags plus a
+    written description of the dataset.
+
+    Tags are applied immediately rather than returned for review-then-save
+    like a code draft: they're purely descriptive (see
+    BlockInstance.column_tags), so there's nothing to validate or risk
+    breaking a run over. The document itself is always returned, and also
+    written into the project's files/ folder when one has been saved, so
+    it's there to reopen later rather than only living in this one response."""
+    _require_block(block_id)
+    block = SESSION.graph.blocks[block_id]
+    packet = _get_cached_output(block_id, req.port)
+    if not isinstance(packet, DataFramePacket):
+        raise HTTPException(400, "output port is not a dataframe")
+    packet = packet.compute_summary()
+    summary = packet.summary or {}
+
+    columns = [
+        ColumnInfo(
+            name=name,
+            dtype=meta.dtype,
+            role=meta.role.value if hasattr(meta.role, "value") else meta.role,
+            count=summary[name].count if name in summary else None,
+            null_count=summary[name].null_count if name in summary else None,
+            n_unique=summary[name].n_unique if name in summary else None,
+            mean=summary[name].mean if name in summary else None,
+            std=summary[name].std if name in summary else None,
+            min=summary[name].min if name in summary else None,
+            max=summary[name].max if name in summary else None,
+        )
+        for name, meta in packet.schema_meta.items()
+    ]
+    ctx = DraftContext(
+        instruction="Analyze these columns as described in the system prompt: write the document and propose tags.",
+        function_name="(not applicable to this action -- see the system prompt)",
+        input_ports={"columns": columns},
+        mode="analyze_data",
+    )
+    try:
+        provider = _provider_for(req.provider)
+        result = provider.draft(ctx)
+    except Exception as e:
+        raise HTTPException(502, f"LLM analyze_data failed: {e}")
+
+    tags = {
+        column: [t.strip() for t in value.split(",") if t.strip()]
+        for column, value in (result.params or {}).items()
+        if isinstance(value, str) and column in packet.schema_meta
+    }
+    with SESSION.edit():
+        SESSION.set_column_tags(block_id, tags)
+
+    document_path = None
+    if SESSION.project_path is not None and result.explanation.strip():
+        files_dir = SESSION.project_path.parent / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        doc_file = files_dir / f"{_slug(block.name)}_data_analysis.md"
+        doc_file.write_text(result.explanation, encoding="utf-8")
+        document_path = str(doc_file)
+
+    return {"document": result.explanation, "tags": tags, "document_path": document_path}
+
+
+@app.post("/api/blocks/{block_id}/suggest_names")
+def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest()) -> dict[str, Any]:
+    """AI-assisted naming: proposes a better display name for this block
+    and a name for each of its output ports (see DraftContext.mode="rename"),
+    from its category and -- once it's been run -- its actual output
+    schema(s). Applied immediately, same as analyze_data: names are purely
+    descriptive, so there's nothing to review before accepting the way a
+    code change needs. Every proposed port name still goes through
+    ProjectSession.rename_port's collision check; a colliding proposal gets
+    a numeric suffix appended until it's unique rather than being dropped,
+    so this can never silently fail to apply or clash with a name already
+    used elsewhere in the graph."""
+    _require_block(block_id)
+    block = SESSION.graph.blocks[block_id]
+
+    entry = None
+    st = SESSION.runner.state.get(block_id)
+    if st and st.last_successful_key:
+        entry = SESSION.runner.cache.get(st.last_successful_key)
+
+    input_ports: dict[str, list[ColumnInfo]] = {}
+    for port_spec in block.outputs:
+        packet = entry.outputs.get(port_spec.name) if entry else None
+        input_ports[port_spec.name] = (
+            [
+                ColumnInfo(name=name, dtype=meta.dtype, role=meta.role.value if hasattr(meta.role, "value") else meta.role)
+                for name, meta in packet.schema_meta.items()
+            ]
+            if isinstance(packet, DataFramePacket)
+            else []
+        )
+
+    used_elsewhere = sorted(
+        {name for bid, other in SESSION.graph.blocks.items() if bid != block_id for name in other.port_names.values()}
+    )
+    ctx = DraftContext(
+        instruction=(
+            f"Current block name: {block.name!r} (category: {block.category!r}). "
+            f"Current output port names: {block.port_names or '(none set)'}. "
+            f"Names already in use elsewhere in this graph -- never propose any of these: "
+            f"{used_elsewhere or '(none)'}."
+        ),
+        function_name=block.category,
+        input_ports=input_ports,
+        mode="rename",
+    )
+    try:
+        provider = _provider_for(req.provider)
+        result = provider.draft(ctx)
+    except Exception as e:
+        raise HTTPException(502, f"LLM suggest_names failed: {e}")
+
+    proposed_name = result.params.get("name")
+    with SESSION.edit():
+        if isinstance(proposed_name, str) and proposed_name.strip():
+            SESSION.update_block(block_id, name=proposed_name.strip())
+        for port_spec in block.outputs:
+            proposal = result.params.get(port_spec.name)
+            if not isinstance(proposal, str) or not proposal.strip():
+                continue
+            base = proposal.strip()
+            candidate = base
+            suffix = 2
+            while suffix <= 50:
+                try:
+                    SESSION.rename_port(block_id, port_spec.name, candidate)
+                    break
+                except ValueError:
+                    candidate = f"{base}_{suffix}"
+                    suffix += 1
+
+    return {**_block_out(block_id), "explanation": result.explanation}
 
 
 # Serve the built frontend (from `npm run build` in frontend/, which emits

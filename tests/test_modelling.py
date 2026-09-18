@@ -62,3 +62,24 @@ def test_predict_raises_on_unsupported_model_kind():
 
     with pytest.raises(ValueError, match="unsupported model kind"):
         modelling.predict(df, model)
+
+
+def test_scorecard_scale_matches_the_pdo_formula_directly():
+    import math
+
+    model = {"kind": "logistic_regression", "features": ["x"], "coefficients": {"x": -0.5}, "intercept": 0.3}
+    result = modelling.scorecard_scale(model, base_score=600.0, base_odds=50.0, pdo=20.0)
+
+    factor = 20.0 / math.log(2)
+    offset = 600.0 - factor * math.log(50.0)
+    assert result["factor"] == pytest.approx(factor)
+    assert result["offset"] == pytest.approx(offset)
+    assert result["intercept_points"] == pytest.approx(offset - factor * 0.3)
+    assert result["rows"] == [{"feature": "x", "coefficient": -0.5, "points_per_unit": pytest.approx(0.5 * factor)}]
+
+
+def test_scorecard_scale_raises_on_a_non_logistic_model():
+    model = {"kind": "glm", "family": "gaussian", "features": ["x"], "coefficients": {"x": 1.0}, "intercept": 0.0}
+
+    with pytest.raises(ValueError, match="logistic_regression"):
+        modelling.scorecard_scale(model)

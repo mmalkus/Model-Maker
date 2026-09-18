@@ -82,6 +82,51 @@ closely as possible. Do not rewrite unrelated behavior.
 - Keep `explanation` to one or two plain-English sentences describing what \
 the function does or what you changed and why."""
 
+CONTRACT_ANALYZE_DATA = """You are analyzing one block's output columns in \
+a visual, Polars-based data pipeline tool, given only column names, dtypes, \
+current role tags, and summary statistics -- never the full data. You are \
+not writing or configuring any code; ignore the "Function name"/"Fixed \
+function source" framing below, it's an artifact of a shared request format. \
+Follow the contract exactly:
+
+- Leave `code` as an empty string and `metadata_transform` as \
+`{"kind": "passthrough"}` -- both are ignored for this action.
+- In `params`, add one entry per column worth flagging, keyed by that \
+column's exact name, whose value is a short comma-separated list of \
+lowercase, hyphen-separated tags (e.g. "likely-id, high-cardinality" or \
+"mostly-null, candidate-target"). Only include a column where you have \
+something worth saying; omit the rest entirely rather than giving them an \
+empty or filler tag.
+- In `explanation`, write a short Markdown write-up (a few short \
+paragraphs) describing what this dataset appears to be and what's worth \
+knowing about it -- going well beyond the one-sentence limit used \
+elsewhere in this tool, since a real write-up is the whole point of this \
+action. Call out anything the statistics suggest is worth flagging (a \
+column that's mostly null, a near-constant column, an id-shaped column, a \
+column whose name/values suggest it's the modelling target), and be \
+explicit that this is inferred from column names and statistics only, not \
+the actual data."""
+
+CONTRACT_RENAME = """You are proposing better names for one block in a \
+visual, Polars-based data pipeline tool: its own display name, and a name \
+for each of its output ports (used as the variable name for that data in \
+the compiled script, and shown wherever that data is wired elsewhere on \
+the canvas). You are not writing or configuring any code; ignore the \
+"Function name"/"Fixed function source" framing below, it's an artifact of \
+a shared request format. Follow the contract exactly:
+
+- Leave `code` as an empty string and `metadata_transform` as \
+`{"kind": "passthrough"}` -- both are ignored for this action.
+- In `params`, propose a name for the block itself under the key "name", \
+and a name for each output port under a key exactly matching that port's \
+own name (e.g. "out"). Base each on what the block's instruction/category \
+says it does and, when given, the columns its actual output shows -- \
+short, lowercase, space- or underscore-separated, at most a few words \
+(e.g. "clean applications", "scored_customers"). The instruction below \
+lists names already used elsewhere in this graph -- never propose one of \
+those; pick a different, still-descriptive name instead.
+- In `explanation`, one sentence on why you chose these names."""
+
 CONTRACT_PARAMS_ONLY = """You are configuring one block in a visual, \
 Polars-based data pipeline tool. This block's Python function is fixed -- \
 you cannot change its code, only choose values for the parameters it \
@@ -149,13 +194,36 @@ would be `{"income_col": "income"}`, and this adds one boolean column, so \
 def contract_for(mode: str, include_reference: bool = False) -> str:
     if mode == "params_only":
         return CONTRACT_PARAMS_ONLY
+    if mode == "analyze_data":
+        return CONTRACT_ANALYZE_DATA
+    if mode == "rename":
+        return CONTRACT_RENAME
     return CONTRACT + ("\n" + POLARS_REFERENCE if include_reference else "")
 
 
 def format_columns(columns: list[ColumnInfo]) -> str:
     if not columns:
         return "    (unknown -- this input hasn't been run yet, so its columns aren't available)"
-    return "\n".join(f"    - {c.name}: {c.dtype}, role={c.role}" for c in columns)
+    lines = []
+    for c in columns:
+        stats = []
+        if c.count is not None:
+            stats.append(f"count={c.count}")
+        if c.null_count:
+            stats.append(f"nulls={c.null_count}")
+        if c.n_unique is not None:
+            stats.append(f"distinct={c.n_unique}")
+        if c.mean is not None:
+            stats.append(f"mean={c.mean:.4g}")
+        if c.std is not None:
+            stats.append(f"std={c.std:.4g}")
+        if c.min is not None:
+            stats.append(f"min={c.min}")
+        if c.max is not None:
+            stats.append(f"max={c.max}")
+        suffix = f" ({', '.join(stats)})" if stats else ""
+        lines.append(f"    - {c.name}: {c.dtype}, role={c.role}{suffix}")
+    return "\n".join(lines)
 
 
 def build_user_prompt(ctx: DraftContext) -> str:
