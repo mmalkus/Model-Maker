@@ -7,7 +7,7 @@ from typing import Any
 
 from . import gitops
 from .blocks.base import PortSpec
-from .graph import BlockInstance, Graph, Lane, Position, Wire
+from .graph import Artifact, BlockInstance, Graph, Lane, Position, Wire
 
 # The fixed filename Save/Load look for inside a project folder -- the
 # folder itself is "the project" (it's what gets versioned, git-inited, and
@@ -103,7 +103,22 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
         for wid, w in data.get("wires", {}).items()
     }
 
-    return Graph(lanes=lanes, blocks=blocks, wires=wires)
+    artifacts = {
+        aid: Artifact(
+            id=aid,
+            kind=a["kind"],
+            title=a["title"],
+            block_id=a["block_id"],
+            port=a["port"],
+            document=a["document"],
+            source_key=a.get("source_key"),
+            created_at=a["created_at"],
+            updated_at=a["updated_at"],
+        )
+        for aid, a in data.get("artifacts", {}).items()
+    }
+
+    return Graph(lanes=lanes, blocks=blocks, wires=wires, artifacts=artifacts)
 
 
 def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path | None = None) -> dict[str, Any]:
@@ -163,6 +178,7 @@ def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path
             }
             for wid, w in sorted(graph.wires.items())
         },
+        "artifacts": {aid: asdict(a) for aid, a in sorted(graph.artifacts.items())},
     }
 
 

@@ -11,7 +11,7 @@ from typing import Any, Iterator
 
 from .blocks.base import BLOCK_REGISTRY, PortSpec
 from .cache import CacheStore
-from .graph import BlockInstance, Graph, Lane, Position, Wire
+from .graph import Artifact, BlockInstance, Graph, Lane, Position, Wire
 from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
 from .project import graph_from_dict, graph_to_dict, load_project, save_project
 from .runner import RunState, Runner
@@ -453,3 +453,81 @@ class ProjectSession:
         for b in self.graph.blocks.values():
             if b.lane == lane_id:
                 b.lane = None
+
+    # ---- artifacts -------------------------------------------------------
+
+    def upsert_data_analysis_artifact(self, block_id: str, port: str, title: str, document: str) -> Artifact:
+        """Create or refresh the one data-analysis artifact for this
+        (block, port) -- re-running "AI analyze data" on the same port
+        updates its existing write-up in place rather than piling up
+        duplicates, the same way re-saving a file overwrites it instead of
+        versioning by copy. `source_key` is stamped from this block's
+        *current* cache key (see Runner.compute_key) so list_artifacts can
+        later tell whether the block has changed since this was written.
+        `title` only seeds a brand-new artifact -- refreshing an existing
+        one leaves its title alone, so a user's rename survives re-running
+        the analysis instead of being silently clobbered by the default."""
+        existing = next(
+            (a for a in self.graph.artifacts.values() if a.kind == "data_analysis" and a.block_id == block_id and a.port == port),
+            None,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        source_key = self.runner.compute_key(block_id)
+        if existing:
+            existing.document = document
+            existing.source_key = source_key
+            existing.updated_at = now
+            return existing
+        artifact = Artifact(
+            id=new_id("art"),
+            kind="data_analysis",
+            title=title,
+            block_id=block_id,
+            port=port,
+            document=document,
+            source_key=source_key,
+            created_at=now,
+            updated_at=now,
+        )
+        self.graph.artifacts[artifact.id] = artifact
+        return artifact
+
+    def rename_artifact(self, artifact_id: str, title: str) -> Artifact:
+        artifact = self.graph.artifacts[artifact_id]
+        artifact.title = title
+        artifact.updated_at = datetime.now(timezone.utc).isoformat()
+        return artifact
+
+    def delete_artifact(self, artifact_id: str) -> None:
+        self.graph.artifacts.pop(artifact_id, None)
+
+    def artifact_is_stale(self, artifact: Artifact) -> bool:
+        """Whether the block that produced this artifact has changed since
+        (different params/code/upstream data -- see Runner.compute_key)
+        -- the same notion of staleness a block's own orange status uses,
+        applied to a document derived from its output instead of the
+        output itself. A block that no longer exists counts as stale too,
+        since there's nothing left to compare against or re-analyze."""
+        if artifact.block_id not in self.graph.blocks:
+            return True
+        return self.runner.compute_key(artifact.block_id) != artifact.source_key
+
+    def list_artifacts(self) -> list[dict[str, Any]]:
+        result = []
+        for artifact in self.graph.artifacts.values():
+            block = self.graph.blocks.get(artifact.block_id)
+            result.append(
+                {
+                    "id": artifact.id,
+                    "kind": artifact.kind,
+                    "title": artifact.title,
+                    "block_id": artifact.block_id,
+                    "block_name": block.name if block else None,
+                    "port": artifact.port,
+                    "created_at": artifact.created_at,
+                    "updated_at": artifact.updated_at,
+                    "stale": self.artifact_is_stale(artifact),
+                }
+            )
+        result.sort(key=lambda a: a["updated_at"], reverse=True)
+        return result

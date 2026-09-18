@@ -241,6 +241,10 @@ class SuggestNamesRequest(BaseModel):
     provider: str | None = None
 
 
+class ArtifactRename(BaseModel):
+    title: str
+
+
 class LLMSettingsUpdate(BaseModel):
     active_provider: str | None = None
     # Global toggle for including the Polars API reference in the system
@@ -1227,8 +1231,11 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
         for column, value in (result.params or {}).items()
         if isinstance(value, str) and column in packet.schema_meta
     }
+    port = req.port or block.outputs[0].name
+    artifact_title = f"{block.name} :: {port} -- data analysis"
     with SESSION.edit():
         SESSION.set_column_tags(block_id, tags)
+        artifact = SESSION.upsert_data_analysis_artifact(block_id, port, artifact_title, result.explanation)
 
     document_path = None
     if SESSION.project_path is not None and result.explanation.strip():
@@ -1238,7 +1245,62 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
         doc_file.write_text(result.explanation, encoding="utf-8")
         document_path = str(doc_file)
 
-    return {"document": result.explanation, "tags": tags, "document_path": document_path}
+    return {
+        "document": result.explanation,
+        "tags": tags,
+        "document_path": document_path,
+        "artifact_id": artifact.id,
+    }
+
+
+@app.get("/api/artifacts")
+def list_artifacts() -> list[dict[str, Any]]:
+    """Every generated document attached to a block's output (today: AI
+    data-analysis write-ups -- see analyze_data above), newest-updated
+    first, each flagged `stale` when its source block has since changed."""
+    return SESSION.list_artifacts()
+
+
+def _require_artifact(artifact_id: str) -> None:
+    if artifact_id not in SESSION.graph.artifacts:
+        raise HTTPException(404, f"no such artifact: {artifact_id}")
+
+
+@app.get("/api/artifacts/{artifact_id}")
+def get_artifact(artifact_id: str) -> dict[str, Any]:
+    _require_artifact(artifact_id)
+    artifact = SESSION.graph.artifacts[artifact_id]
+    block = SESSION.graph.blocks.get(artifact.block_id)
+    return {
+        "id": artifact.id,
+        "kind": artifact.kind,
+        "title": artifact.title,
+        "block_id": artifact.block_id,
+        "block_name": block.name if block else None,
+        "port": artifact.port,
+        "document": artifact.document,
+        "created_at": artifact.created_at,
+        "updated_at": artifact.updated_at,
+        "stale": SESSION.artifact_is_stale(artifact),
+    }
+
+
+@app.patch("/api/artifacts/{artifact_id}")
+def rename_artifact(artifact_id: str, req: ArtifactRename) -> dict[str, Any]:
+    _require_artifact(artifact_id)
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(400, "title must not be empty")
+    with SESSION.edit():
+        SESSION.rename_artifact(artifact_id, title)
+    return get_artifact(artifact_id)
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+def delete_artifact(artifact_id: str) -> None:
+    _require_artifact(artifact_id)
+    with SESSION.edit():
+        SESSION.delete_artifact(artifact_id)
 
 
 @app.post("/api/blocks/{block_id}/suggest_names")

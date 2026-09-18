@@ -1,5 +1,7 @@
 import type {
   AnalyzeDataOut,
+  Artifact,
+  ArtifactSummary,
   BlockOut,
   BlockType,
   BrowseOut,
@@ -170,4 +172,10 @@ export const api = {
     request<AnalyzeDataOut>(`/blocks/${id}/analyze_data`, { method: 'POST', body: JSON.stringify({ port, provider }) }),
   suggestNames: (id: string, provider?: string) =>
     request<SuggestNamesOut>(`/blocks/${id}/suggest_names`, { method: 'POST', body: JSON.stringify({ provider }) }),
+
+  listArtifacts: () => request<ArtifactSummary[]>('/artifacts'),
+  getArtifact: (id: string) => request<Artifact>(`/artifacts/${id}`),
+  renameArtifact: (id: string, title: string) =>
+    request<Artifact>(`/artifacts/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteArtifact: (id: string) => request<void>(`/artifacts/${id}`, { method: 'DELETE' }),
 }

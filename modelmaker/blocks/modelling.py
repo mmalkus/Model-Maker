@@ -126,6 +126,78 @@ register_block(
 )
 
 
+def lgd_regression(
+    df: pl.DataFrame,
+    target: str,
+    features: list[str],
+    max_iter: int = 100,
+    tol: float = 1e-8,
+) -> tuple[pl.DataFrame, dict]:
+    """Fractional logit (quasi-binomial GLM, Papke & Wooldridge 1996) for a
+    continuous target bounded to [0, 1] -- LGD and CCF both take this shape.
+    Unlike beta regression, the logit link handles observations sitting
+    exactly at 0 or 1 (a full cure, a total loss) natively, which is the
+    common case for both targets, so no boundary-value workaround is
+    needed. Fit by IRLS: at each step, reweight by the working variance
+    mu*(1-mu) of the current fit and solve a weighted least-squares update,
+    same iteration logistic regression itself would converge to if `target`
+    were binary rather than continuous -- fractional response is the same
+    mean model and link, estimated by quasi-likelihood instead of true
+    likelihood."""
+    import numpy as np
+
+    x = df.select(features).to_numpy()
+    y = df[target].to_numpy().astype(float)
+    if np.any((y < 0.0) | (y > 1.0)):
+        raise ValueError(f"'{target}' must be within [0, 1] for a fractional-response (LGD/CCF) regression")
+
+    n = x.shape[0]
+    design = np.column_stack([np.ones(n), x])
+    beta = np.zeros(design.shape[1])
+    eps = 1e-6
+    converged = False
+    n_iter = 0
+    for n_iter in range(1, max_iter + 1):
+        eta = design @ beta
+        mu = np.clip(1.0 / (1.0 + np.exp(-eta)), eps, 1.0 - eps)
+        weight = mu * (1.0 - mu)
+        working_response = eta + (y - mu) / weight
+        weighted_design = design.T * weight
+        beta_new = np.linalg.solve(weighted_design @ design, weighted_design @ working_response)
+        if np.max(np.abs(beta_new - beta)) < tol:
+            beta = beta_new
+            converged = True
+            break
+        beta = beta_new
+
+    predicted = 1.0 / (1.0 + np.exp(-(design @ beta)))
+    predictions = df.with_columns(pl.Series("predicted", predicted))
+    artifact = {
+        "kind": "lgd_regression",
+        "target": target,
+        "features": features,
+        "coefficients": dict(zip(features, [float(c) for c in beta[1:]])),
+        "intercept": float(beta[0]),
+        "n_iter": n_iter,
+        "converged": converged,
+    }
+    return predictions, artifact
+
+
+register_block(
+    BlockSpec(
+        category="lgd_regression",
+        block_type="standard",
+        group="modelling",
+        display_name="LGD / CCF regression (fractional logit)",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
+        fn=lgd_regression,
+        metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
+    )
+)
+
+
 def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
     """Applies a model artifact produced by glm_fit/logistic_regression (see
     their `model` output port) to a different dataframe -- the held-out/test
@@ -155,6 +227,9 @@ def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
         # log for every other family (poisson/gamma/inverse_gaussian) -- see
         # glm_fit above.
         pred = linear if model.get("family", "gaussian") == "gaussian" else np.exp(linear)
+        return df.with_columns(pl.Series("predicted", pred))
+    if kind == "lgd_regression":
+        pred = 1.0 / (1.0 + np.exp(-linear))
         return df.with_columns(pl.Series("predicted", pred))
     raise ValueError(f"unsupported model kind for predict: {kind!r}")
 
@@ -370,6 +445,114 @@ register_block(
         outputs=[PortSpec("out")],
         fn=woe_transform,
         metadata_transform=_woe_meta,
+    )
+)
+
+
+def compute_lgd(
+    df: pl.DataFrame,
+    ead_col: str,
+    recovered_col: str,
+    cost_col: str | None = None,
+    floor: float | None = 0.0,
+    cap: float | None = 1.0,
+) -> pl.DataFrame:
+    """LGD = 1 - recovery rate = (EAD - recoveries + workout costs) / EAD,
+    the standard definition once recovery cash flows have already been
+    aggregated and discounted to the default date upstream (that
+    aggregation/discounting is not this block's job). `cost_col` is
+    optional -- omit it if workout costs are already netted into
+    `recovered_col`. An account with EAD <= 0 has no meaningful recovery
+    rate and gets a null LGD rather than a divide-by-zero. `floor`/`cap`
+    truncate the result to a plausible range (LGD outside [0, 1] is a data
+    issue, not a real observation -- see model-developer-review.md §1.1);
+    pass None to skip either truncation."""
+    costs = pl.col(cost_col) if cost_col is not None else pl.lit(0.0)
+    lgd = pl.when(pl.col(ead_col) > 0).then(
+        (pl.col(ead_col) - pl.col(recovered_col) + costs) / pl.col(ead_col)
+    ).otherwise(None)
+    if floor is not None:
+        lgd = lgd.clip(lower_bound=floor)
+    if cap is not None:
+        lgd = lgd.clip(upper_bound=cap)
+    return df.with_columns(lgd.alias("lgd"))
+
+
+def _compute_lgd_meta(input_metas, outputs, params):
+    (in_meta,) = input_metas.values()
+    (df,) = outputs.values()
+    result = dict(in_meta)
+    result["lgd"] = ColumnMeta(dtype=str(df.schema["lgd"]), role=ColumnRole.FEATURE)
+    return {"out": {name: result[name] for name in df.columns if name in result}}
+
+
+register_block(
+    BlockSpec(
+        category="compute_lgd",
+        block_type="standard",
+        group="modelling",
+        display_name="Compute LGD",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=compute_lgd,
+        metadata_transform=_compute_lgd_meta,
+    )
+)
+
+
+def compute_ccf(
+    df: pl.DataFrame,
+    limit_col: str,
+    balance_ref_col: str,
+    balance_default_col: str,
+    floor: float | None = 0.0,
+    cap: float | None = 1.0,
+) -> pl.DataFrame:
+    """Credit conversion factor observed on a defaulted account: the
+    fraction of the undrawn commitment at a reference date (typically 12
+    months, or the cohort start, before default -- which convention is used
+    is a modelling decision made upstream, in how `balance_ref_col` was
+    picked) that got drawn down by the time of default.
+
+        undrawn_at_reference = max(limit - balance_at_reference, 0)
+        ccf = (balance_at_default - balance_at_reference) / undrawn_at_reference
+
+    An account already at or over its limit at the reference date has zero
+    undrawn headroom and gets a zero CCF rather than a divide-by-zero.
+    `floor`/`cap` truncate the result (a real observation can be negative --
+    balance fell before default -- or exceed 1 if the limit itself changed;
+    truncating to [0, 1] is the common convention, but pass None to keep the
+    raw value and inspect it instead)."""
+    undrawn = (pl.col(limit_col) - pl.col(balance_ref_col)).clip(lower_bound=0.0)
+    ccf = pl.when(undrawn > 0).then(
+        (pl.col(balance_default_col) - pl.col(balance_ref_col)) / undrawn
+    ).otherwise(0.0)
+    if floor is not None:
+        ccf = ccf.clip(lower_bound=floor)
+    if cap is not None:
+        ccf = ccf.clip(upper_bound=cap)
+    return df.with_columns(undrawn.alias("undrawn_at_reference"), ccf.alias("ccf"))
+
+
+def _compute_ccf_meta(input_metas, outputs, params):
+    (in_meta,) = input_metas.values()
+    (df,) = outputs.values()
+    result = dict(in_meta)
+    result["undrawn_at_reference"] = ColumnMeta(dtype=str(df.schema["undrawn_at_reference"]), role=ColumnRole.FEATURE)
+    result["ccf"] = ColumnMeta(dtype=str(df.schema["ccf"]), role=ColumnRole.FEATURE)
+    return {"out": {name: result[name] for name in df.columns if name in result}}
+
+
+register_block(
+    BlockSpec(
+        category="compute_ccf",
+        block_type="standard",
+        group="modelling",
+        display_name="Compute CCF",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=compute_ccf,
+        metadata_transform=_compute_ccf_meta,
     )
 )
 

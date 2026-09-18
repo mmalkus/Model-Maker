@@ -909,3 +909,87 @@ def test_recovery_is_offered_after_edits_and_rebuilds_the_graph(client, tmp_path
     assert client.get("/api/graph").json()["blocks"] == {}
     graph = client.post("/api/project/recover").json()
     assert len(graph["blocks"]) == 1
+
+
+def _green_read_csv_block(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n2,20\n3,30\n")
+    read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
+    client.post(f"/api/blocks/{read['id']}/refresh")
+    return read
+
+
+def test_analyze_data_creates_an_artifact_and_returns_its_id(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+
+    resp = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["artifact_id"]
+    assert "Stub provider" in body["document"]
+
+    listed = client.get("/api/artifacts").json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == body["artifact_id"]
+    assert listed[0]["block_name"] == read["name"]
+    assert listed[0]["port"] == "out"
+    assert listed[0]["stale"] is False
+
+    full = client.get(f"/api/artifacts/{body['artifact_id']}").json()
+    assert full["document"] == body["document"]
+
+
+def test_analyze_data_run_twice_updates_the_same_artifact(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+
+    first = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()
+    second = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()
+
+    assert first["artifact_id"] == second["artifact_id"]
+    assert len(client.get("/api/artifacts").json()) == 1
+
+
+def test_artifact_becomes_stale_after_its_source_block_changes(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+    artifact_id = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()["artifact_id"]
+
+    other_csv = tmp_path / "other.csv"
+    other_csv.write_text("a,b\n9,9\n")
+    client.patch(f"/api/blocks/{read['id']}", json={"params": {"path": str(other_csv)}})
+
+    assert client.get(f"/api/artifacts/{artifact_id}").json()["stale"] is True
+    assert client.get("/api/artifacts").json()[0]["stale"] is True
+
+
+def test_rename_artifact(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+    artifact_id = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()["artifact_id"]
+
+    resp = client.patch(f"/api/artifacts/{artifact_id}", json={"title": "My renamed report"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "My renamed report"
+    assert client.get(f"/api/artifacts/{artifact_id}").json()["title"] == "My renamed report"
+
+
+def test_rename_artifact_rejects_blank_title(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+    artifact_id = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()["artifact_id"]
+
+    resp = client.patch(f"/api/artifacts/{artifact_id}", json={"title": "   "})
+    assert resp.status_code == 400
+
+
+def test_delete_artifact(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+    artifact_id = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()["artifact_id"]
+
+    resp = client.delete(f"/api/artifacts/{artifact_id}")
+    assert resp.status_code == 200
+    assert client.get("/api/artifacts").json() == []
+    assert client.get(f"/api/artifacts/{artifact_id}").status_code == 404
+
+
+def test_artifact_endpoints_404_on_unknown_id(client):
+    assert client.get("/api/artifacts/nope").status_code == 404
+    assert client.patch("/api/artifacts/nope", json={"title": "x"}).status_code == 404
+    assert client.delete("/api/artifacts/nope").status_code == 404

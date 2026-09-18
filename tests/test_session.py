@@ -274,3 +274,106 @@ def test_new_clears_the_recovery_snapshot(session, tmp_path):
     session.new()
 
     assert session.recovery_info() is None
+
+
+def test_upsert_data_analysis_artifact_creates_then_updates_in_place(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+
+    with session.edit():
+        first = session.upsert_data_analysis_artifact(block.id, "out", "First title", "first document")
+    assert len(session.graph.artifacts) == 1
+    assert first.kind == "data_analysis"
+
+    with session.edit():
+        second = session.upsert_data_analysis_artifact(block.id, "out", "Second title", "second document")
+
+    # same (block, port) -- refreshed in place, not duplicated
+    assert len(session.graph.artifacts) == 1
+    assert second.id == first.id
+    assert second.document == "second document"
+    assert second.updated_at >= first.created_at
+
+
+def test_upsert_data_analysis_artifact_preserves_a_renamed_title(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        artifact = session.upsert_data_analysis_artifact(block.id, "out", "Default title", "doc")
+    with session.edit():
+        session.rename_artifact(artifact.id, "My custom title")
+
+    with session.edit():
+        refreshed = session.upsert_data_analysis_artifact(block.id, "out", "Default title", "new doc")
+
+    assert refreshed.title == "My custom title"
+    assert refreshed.document == "new doc"
+
+
+def test_upsert_data_analysis_artifact_is_independent_per_port(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+
+    with session.edit():
+        session.upsert_data_analysis_artifact(block.id, "out", "A", "doc a")
+        session.upsert_data_analysis_artifact(block.id, "other_port", "B", "doc b")
+
+    assert len(session.graph.artifacts) == 2
+
+
+def test_rename_and_delete_artifact(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        artifact = session.upsert_data_analysis_artifact(block.id, "out", "Title", "doc")
+
+    with session.edit():
+        renamed = session.rename_artifact(artifact.id, "New title")
+    assert renamed.title == "New title"
+    assert session.graph.artifacts[artifact.id].title == "New title"
+
+    with session.edit():
+        session.delete_artifact(artifact.id)
+    assert artifact.id not in session.graph.artifacts
+
+
+def test_artifact_is_stale_once_the_source_block_changes(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        artifact = session.upsert_data_analysis_artifact(block.id, "out", "Title", "doc")
+
+    assert session.artifact_is_stale(artifact) is False
+
+    with session.edit():
+        session.update_block(block.id, params={"path": "other.csv"})
+
+    assert session.artifact_is_stale(artifact) is True
+
+
+def test_artifact_is_stale_when_its_block_no_longer_exists(session):
+    with session.edit():
+        block = session.add_block("read_csv", params={"path": "data.csv"})
+    with session.edit():
+        artifact = session.upsert_data_analysis_artifact(block.id, "out", "Title", "doc")
+
+    with session.edit():
+        session.delete_block(block.id)
+
+    assert session.artifact_is_stale(artifact) is True
+
+
+def test_list_artifacts_sorts_newest_updated_first_and_reports_block_name(session):
+    with session.edit():
+        block = session.add_block("read_csv", name="My source", params={"path": "data.csv"})
+    with session.edit():
+        older = session.upsert_data_analysis_artifact(block.id, "out", "Older", "doc")
+        older.updated_at = "2020-01-01T00:00:00+00:00"
+        newer = session.upsert_data_analysis_artifact(block.id, "other_port", "Newer", "doc")
+        newer.updated_at = "2030-01-01T00:00:00+00:00"
+
+    listed = session.list_artifacts()
+
+    assert [a["id"] for a in listed] == [newer.id, older.id]
+    assert listed[0]["block_name"] == "My source"
+    assert listed[0]["stale"] is False

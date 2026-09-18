@@ -83,6 +83,35 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'grade_col', label: 'Grade column', kind: 'column' },
     { key: 'target_col', label: 'Target column (binary)', kind: 'column', autoRole: 'target' },
   ],
+  lgd_regression: [
+    { key: 'target', label: 'Target column (LGD or CCF, in [0, 1])', kind: 'column', autoRole: 'target' },
+    { key: 'features', label: 'Feature columns', kind: 'columns' },
+    { key: 'max_iter', label: 'Max iterations', kind: 'number' },
+    { key: 'tol', label: 'Convergence tolerance', kind: 'number', step: 1e-8 },
+  ],
+  compute_lgd: [
+    { key: 'ead_col', label: 'EAD column', kind: 'column' },
+    { key: 'recovered_col', label: 'Recovered amount column', kind: 'column' },
+    { key: 'cost_col', label: 'Workout cost column (optional)', kind: 'column' },
+    { key: 'floor', label: 'Floor', kind: 'number', step: 0.05 },
+    { key: 'cap', label: 'Cap', kind: 'number', step: 0.05 },
+  ],
+  compute_ccf: [
+    { key: 'limit_col', label: 'Limit column', kind: 'column' },
+    { key: 'balance_ref_col', label: 'Balance at reference date column', kind: 'column' },
+    { key: 'balance_default_col', label: 'Balance at default column', kind: 'column' },
+    { key: 'floor', label: 'Floor', kind: 'number', step: 0.05 },
+    { key: 'cap', label: 'Cap', kind: 'number', step: 0.05 },
+  ],
+  continuous_accuracy: [
+    { key: 'actual_col', label: 'Actual column', kind: 'column', autoRole: 'target' },
+    { key: 'predicted_col', label: 'Predicted column', kind: 'column', autoRole: 'predicted' },
+  ],
+  bucketed_calibration: [
+    { key: 'actual_col', label: 'Actual column', kind: 'column', autoRole: 'target' },
+    { key: 'predicted_col', label: 'Predicted column', kind: 'column', autoRole: 'predicted' },
+    { key: 'bins', label: 'Bins', kind: 'number' },
+  ],
 }
 
 function prettifyColumnParamLabel(key: string): string {

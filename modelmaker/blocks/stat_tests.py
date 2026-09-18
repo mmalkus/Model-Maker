@@ -231,3 +231,82 @@ register_block(
         metadata_transform=lambda *_a, **_k: {},
     )
 )
+
+
+def continuous_accuracy(df: pl.DataFrame, actual_col: str, predicted_col: str) -> dict:
+    """MAE/MSE/RMSE/R^2 between a continuous bounded target (LGD, CCF, EAD)
+    and its prediction -- the accuracy battery a continuous target needs
+    instead of the discrimination metrics above (Gini/KS/AUC only make
+    sense for a binary target; a validator will ask for this, not those,
+    on an LGD or EAD model)."""
+    import numpy as np
+
+    actual = df[actual_col].to_numpy().astype(float)
+    predicted = df[predicted_col].to_numpy().astype(float)
+    errors = predicted - actual
+    mse = float(np.mean(errors**2))
+    ss_res = float(np.sum(errors**2))
+    ss_tot = float(np.sum((actual - actual.mean()) ** 2))
+    return {
+        "kind": "continuous_accuracy",
+        "mae": float(np.mean(np.abs(errors))),
+        "mse": mse,
+        "rmse": float(np.sqrt(mse)),
+        "r2": float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None,
+    }
+
+
+register_block(
+    BlockSpec(
+        category="continuous_accuracy",
+        block_type="output",
+        group="tests",
+        display_name="Continuous accuracy (MAE/MSE/RMSE)",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=continuous_accuracy,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)
+
+
+def bucketed_calibration(df: pl.DataFrame, actual_col: str, predicted_col: str, bins: int = 10) -> dict:
+    """Observed-vs-expected by bucket for a continuous bounded target (LGD,
+    CCF, EAD): quantile-buckets rows by their predicted value, then compares
+    each bucket's mean observed value to its mean predicted value -- the
+    standard LGD/EAD validation check, distinct from calibration_test above
+    (which is Hosmer-Lemeshow, built for a binary target's predicted
+    probability, not a continuous one)."""
+    bucketed = df.with_columns(pl.col(predicted_col).qcut(bins, allow_duplicates=True).alias("_bucket"))
+    stats = bucketed.group_by("_bucket").agg(
+        n=pl.len(),
+        observed_mean=pl.col(actual_col).mean(),
+        predicted_mean=pl.col(predicted_col).mean(),
+    ).sort("predicted_mean")
+    rows = stats.to_dicts()
+    return {
+        "kind": "bucketed_calibration",
+        "buckets": [
+            {
+                "bucket": str(r["_bucket"]),
+                "n": r["n"],
+                "observed_mean": float(r["observed_mean"]),
+                "predicted_mean": float(r["predicted_mean"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+register_block(
+    BlockSpec(
+        category="bucketed_calibration",
+        block_type="output",
+        group="tests",
+        display_name="Bucketed O vs E",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("metric", type="scalar_metric")],
+        fn=bucketed_calibration,
+        metadata_transform=lambda *_a, **_k: {},
+    )
+)
