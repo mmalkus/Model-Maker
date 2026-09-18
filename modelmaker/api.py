@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import os
+import re
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -55,6 +56,17 @@ app.add_middleware(
 
 SESSION = ProjectSession()
 LLM_SETTINGS = LLMSettingsStore()
+
+# Names set via PUT /api/env_vars (see below) -- lets the Settings-style
+# "is this set, and from where" distinction (env vs. override) extend to
+# arbitrary env vars too, e.g. a Read SQL block's connection_env. The value
+# itself lives only in os.environ, exactly where a block reading it (live
+# or compiled) already looks, and is never stored or echoed anywhere else.
+# Maps name -> whatever os.environ held right before the first override (or
+# None if it was unset), so DELETE can restore that instead of just wiping
+# a name that happened to already be set from the shell/.env.
+_ENV_VAR_OVERRIDES: dict[str, str | None] = {}
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Run orchestration: at most one run (a single block, a cascade, or a full
 # sweep) is active at a time, executed on a background thread so a run that
@@ -1025,6 +1037,58 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
         raise HTTPException(400, f"unknown LLM provider: {req.active_provider}")
     LLM_SETTINGS.update(req.active_provider, req.include_reference, req.settings)
     return _effective_llm_settings()
+
+
+class EnvVarUpdate(BaseModel):
+    value: str
+
+
+def _env_var_status(name: str) -> dict[str, Any]:
+    """Whether-and-where a given env var is set -- never the value itself.
+    Same write-only shape as an LLM provider's api_key_set/api_key_source
+    (see _redacted_provider_settings): 'override' means this endpoint set
+    it for the running server process; 'env' means it was already present
+    (shell env or .env) before that."""
+    if name not in os.environ:
+        return {"name": name, "is_set": False, "source": None}
+    return {"name": name, "is_set": True, "source": "override" if name in _ENV_VAR_OVERRIDES else "env"}
+
+
+@app.get("/api/env_vars/{name}")
+def get_env_var(name: str) -> dict[str, Any]:
+    return _env_var_status(name)
+
+
+@app.put("/api/env_vars/{name}")
+def set_env_var(name: str, req: EnvVarUpdate) -> dict[str, Any]:
+    """Sets an env var for the rest of this server process's lifetime --
+    e.g. a Read SQL block's connection string. Deliberately writes straight
+    into os.environ (unlike LLM_SETTINGS' own separate override dict):
+    block functions run in a spawned subprocess (see runner.MP_CONTEXT),
+    which inherits the parent's *current* os.environ at spawn time, so this
+    is what actually makes the value visible there. Never written to disk,
+    never persisted in a project file, and never echoed back by any
+    endpoint -- gone on restart, exactly like an LLM API key override."""
+    if not _ENV_VAR_NAME_RE.match(name):
+        raise HTTPException(400, f"not a valid environment variable name: {name!r}")
+    if name not in _ENV_VAR_OVERRIDES:
+        _ENV_VAR_OVERRIDES[name] = os.environ.get(name)
+    os.environ[name] = req.value
+    return _env_var_status(name)
+
+
+@app.delete("/api/env_vars/{name}")
+def clear_env_var(name: str) -> dict[str, Any]:
+    # Restores whatever this name held before it was first overridden
+    # (possibly nothing) -- a name that was already present in the
+    # shell/.env before any PUT here is left alone entirely.
+    if name in _ENV_VAR_OVERRIDES:
+        prior = _ENV_VAR_OVERRIDES.pop(name)
+        if prior is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior
+    return _env_var_status(name)
 
 
 @app.get("/api/llm/models")

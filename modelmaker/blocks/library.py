@@ -32,7 +32,11 @@ def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
     return pl.read_csv(path)
 
 
-def _probe_read_csv(params: dict) -> float | None:
+def _probe_path_mtime(params: dict) -> float | None:
+    # Shared "check for changes" probe for every file-based input block
+    # (read_csv/read_parquet/read_json/read_excel): cheap, read-only, and
+    # good enough to flag "source changed" without touching the cached
+    # packet (see plan section 6).
     try:
         return os.path.getmtime(params["path"])
     except OSError:
@@ -60,7 +64,129 @@ register_block(
         fn=read_csv,
         lazy_fn=_read_csv_lazy,
         metadata_transform=infer_dtypes,
-        probe=_probe_read_csv,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_parquet(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    if sample_rows is not None:
+        return pl.scan_parquet(path).head(sample_rows).collect()
+    return pl.read_parquet(path)
+
+
+def _read_parquet_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
+    # Lazy twin of read_parquet, same reasoning as read_csv's (see
+    # BlockSpec.lazy_fn) -- polars has no `n_rows` kwarg on scan_parquet, so
+    # sampling goes through a `.head()` the query optimizer pushes down.
+    lf = pl.scan_parquet(path)
+    return lf.head(sample_rows) if sample_rows is not None else lf
+
+
+register_block(
+    BlockSpec(
+        category="read_parquet",
+        block_type="input",
+        display_name="Read Parquet",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_parquet,
+        lazy_fn=_read_parquet_lazy,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_json(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # Newline-delimited JSON has a real lazy/streaming reader; a plain JSON
+    # array does not (polars must load it whole to find its structure), so
+    # this block -- unlike read_csv/read_parquet -- has no lazy_fn twin and
+    # simply never joins a streaming run's fusion group.
+    if path.lower().endswith((".jsonl", ".ndjson")):
+        if sample_rows is not None:
+            return pl.scan_ndjson(path).head(sample_rows).collect()
+        return pl.read_ndjson(path)
+    df = pl.read_json(path)
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+register_block(
+    BlockSpec(
+        category="read_json",
+        block_type="input",
+        display_name="Read JSON",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_json,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_excel(path: str, sheet: str | None = None, sample_rows: int | None = None) -> pl.DataFrame:
+    df = pl.read_excel(path, sheet_name=sheet) if sheet else pl.read_excel(path)
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+register_block(
+    BlockSpec(
+        category="read_excel",
+        block_type="input",
+        display_name="Read Excel",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_excel,
+        metadata_transform=infer_dtypes,
+        probe=_probe_path_mtime,
+    )
+)
+
+
+def read_sql(connection_env: str, query: str, sample_rows: int | None = None) -> pl.DataFrame:
+    # The connection string itself never lives in params -- it's baked as a
+    # literal into saved project files and (per compiler.py section 7)
+    # compiled scripts, so a raw DB password there would leak into both.
+    # `connection_env` is only the *name* of an env var the user sets
+    # locally (the project already loads .env via api.py); the secret is
+    # read fresh from the environment at run time, live or compiled.
+    uri = os.environ[connection_env]
+    df = pl.read_database_uri(query, uri)
+    # No LIMIT/TOP/FETCH FIRST pushdown for sample_rows -- that syntax
+    # differs per SQL dialect (Postgres/MySQL LIMIT vs. SQL Server TOP vs.
+    # Oracle FETCH FIRST), so this truncates client-side instead. Costs a
+    # full round trip in sample mode; keeps this block dialect-agnostic.
+    return df.head(sample_rows) if sample_rows is not None else df
+
+
+def _probe_sql(params: dict) -> str | None:
+    # Optional: only runs if the user gave a cheap probe_query (e.g. a
+    # COUNT(*) or a MAX(updated_at)) -- there's no generic mtime/checksum
+    # equivalent for a database table. No probe_query means no probe;
+    # Runner.check_for_changes already treats spec.probe returning None as
+    # "never flags changed", which is the right default here.
+    query = params.get("probe_query")
+    if not query:
+        return None
+    try:
+        uri = os.environ[params["connection_env"]]
+        result = pl.read_database_uri(query, uri)
+    except Exception:
+        return None
+    return str(result.row(0)) if result.height else ""
+
+
+register_block(
+    BlockSpec(
+        category="read_sql",
+        block_type="input",
+        display_name="Read SQL",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=read_sql,
+        metadata_transform=infer_dtypes,
+        probe=_probe_sql,
     )
 )
 

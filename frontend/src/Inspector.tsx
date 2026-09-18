@@ -2,9 +2,20 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
+import { EnvVarField } from './EnvVarField'
 import { FileBrowser } from './FileBrowser'
 import { PARAM_SPECS, ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
+
+// File-based input blocks that read a single `path` param off disk (see
+// modelmaker/blocks/library.py) -- each gets the same "Browse..." file
+// picker in the inspector, filtered to its own extension.
+const FILE_INPUT_BLOCKS: Record<string, { label: string; ext: string }> = {
+  read_csv: { label: 'CSV file', ext: '.csv' },
+  read_parquet: { label: 'Parquet file', ext: '.parquet' },
+  read_json: { label: 'JSON file', ext: '.json' },
+  read_excel: { label: 'Excel file', ext: '.xlsx' },
+}
 
 export function Inspector({
   block,
@@ -405,9 +416,9 @@ export function Inspector({
         <MetricView key={name} name={name} value={value} />
       ))}
 
-      {block.category === 'read_csv' && (
+      {FILE_INPUT_BLOCKS[block.category] && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>CSV file</div>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{FILE_INPUT_BLOCKS[block.category].label}</div>
           <div style={{ display: 'flex', gap: 6 }}>
             <input
               readOnly
@@ -421,6 +432,8 @@ export function Inspector({
           </div>
         </div>
       )}
+
+      {block.category === 'read_sql' && <EnvVarField name={(block.params.connection_env as string) ?? ''} />}
 
       {block.category !== 'display_table' && (
         <div style={{ marginBottom: 12 }}>
@@ -618,7 +631,9 @@ export function Inspector({
         />
       )}
 
-      {showBrowser && <FileBrowser ext=".csv" onPick={pickPath} onClose={() => setShowBrowser(false)} />}
+      {showBrowser && (
+        <FileBrowser ext={FILE_INPUT_BLOCKS[block.category]?.ext ?? '.csv'} onPick={pickPath} onClose={() => setShowBrowser(false)} />
+      )}
     </div>
   )
 }
