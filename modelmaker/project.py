@@ -5,8 +5,41 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from . import gitops
 from .blocks.base import PortSpec
 from .graph import BlockInstance, Graph, Lane, Position, Wire
+
+# Written into a project folder's .gitignore the first time it's given one
+# (see ensure_project_scaffold) -- covers the regenerable local cache and
+# common Python/editor cruft; the project JSON, its code sidecars, and
+# whatever the user drops in files/ are meant to be versioned.
+DEFAULT_GITIGNORE = """\
+.modelmaker-cache/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+"""
+
+
+def ensure_project_scaffold(project_dir: Path) -> None:
+    """Give a project folder the standard layout the first time it's saved
+    to: a `files/` subdirectory for data/artifacts the project owns, a
+    .gitignore, and a git repo so the folder is ready to version and push
+    right away. Idempotent -- never overwrites a .gitignore the user has
+    since edited, never re-inits an existing repo, safe to call on every
+    save."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "files").mkdir(exist_ok=True)
+    gitignore = project_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(DEFAULT_GITIGNORE, encoding="utf-8")
+    try:
+        gitops.init(project_dir)
+    except gitops.GitError:
+        # No git on PATH, or some other local git failure -- the project
+        # folder itself is still perfectly usable without version control.
+        pass
 
 
 def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Graph:
@@ -124,6 +157,6 @@ def load_project(path: Path) -> Graph:
 
 
 def save_project(graph: Graph, path: Path, project_name: str = "project") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_project_scaffold(path.parent)
     data = graph_to_dict(graph, project_name=project_name, project_dir=path.parent)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -164,3 +164,17 @@ export interface LLMSettingsOut {
   include_reference: boolean | null
   settings: Record<string, LLMProviderSettings>
 }
+
+export interface GitChange {
+  status: string
+  path: string
+}
+
+export interface GitStatusOut {
+  is_repo: boolean
+  branch: string | null
+  remote: string | null
+  changes: GitChange[]
+  ahead: number
+  behind: number
+}

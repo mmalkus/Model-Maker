@@ -3,6 +3,7 @@ import type {
   BlockType,
   BrowseOut,
   DraftOut,
+  GitStatusOut,
   GraphOut,
   InputSchemaOut,
   LLMSettingsOut,
@@ -117,7 +118,20 @@ export const api = {
 
   save: (path?: string) => request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }),
   load: (path: string) => request<GraphOut>('/project/load', { method: 'POST', body: JSON.stringify({ path }) }),
+  new: () => request<GraphOut>('/project/new', { method: 'POST' }),
   projectDefaultDir: () => request<{ path: string }>('/project/default_dir'),
+
+  // Git status/commit/push for the currently-open project's folder -- see
+  // gitops.py. Every write endpoint 404s (well, 400s) until a project has
+  // been saved at least once, since there's no folder to operate on yet.
+  gitStatus: () => request<GitStatusOut>('/project/git/status'),
+  gitInit: () => request<GitStatusOut>('/project/git/init', { method: 'POST' }),
+  gitSetRemote: (url: string) =>
+    request<GitStatusOut>('/project/git/remote', { method: 'POST', body: JSON.stringify({ url }) }),
+  gitCommit: (message: string) =>
+    request<GitStatusOut>('/project/git/commit', { method: 'POST', body: JSON.stringify({ message }) }),
+  gitPush: () => request<GitStatusOut>('/project/git/push', { method: 'POST' }),
+  gitPull: () => request<GitStatusOut>('/project/git/pull', { method: 'POST' }),
 
   imageUrl: (id: string, port: string, cacheBust?: string | null) =>
     `/api/blocks/${id}/image?port=${encodeURIComponent(port)}${cacheBust ? `&t=${encodeURIComponent(cacheBust)}` : ''}`,

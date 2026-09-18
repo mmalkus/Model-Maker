@@ -126,6 +126,68 @@ register_block(
 )
 
 
+def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
+    """Applies a model artifact produced by glm_fit/logistic_regression (see
+    their `model` output port) to a different dataframe -- the held-out/test
+    half of a train_test_split, typically -- without refitting anything.
+    Reads the coefficients straight out of the JSON artifact, so no pickled
+    estimator is ever needed."""
+    import numpy as np
+
+    features = model["features"]
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        raise ValueError(f"model expects feature column(s) not present in this data: {missing}")
+
+    x = df.select(features).to_numpy()
+    coefs = np.array([model["coefficients"][f] for f in features])
+    linear = x @ coefs + model["intercept"]
+
+    kind = model.get("kind")
+    if kind == "logistic_regression":
+        proba = 1.0 / (1.0 + np.exp(-linear))
+        return df.with_columns(
+            pl.Series("predicted_proba", proba),
+            pl.Series("predicted_class", (proba >= 0.5).astype(int)),
+        )
+    if kind == "glm":
+        # Mirrors TweedieRegressor's link="auto": identity for gaussian,
+        # log for every other family (poisson/gamma/inverse_gaussian) -- see
+        # glm_fit above.
+        pred = linear if model.get("family", "gaussian") == "gaussian" else np.exp(linear)
+        return df.with_columns(pl.Series("predicted", pred))
+    raise ValueError(f"unsupported model kind for predict: {kind!r}")
+
+
+def _predict_meta(input_metas, outputs, params):
+    in_meta = input_metas.get("df", {})
+    (df,) = outputs.values()
+    result = dict(in_meta)
+    role_by_col = {
+        "predicted": ColumnRole.PREDICTED,
+        "predicted_proba": ColumnRole.PREDICTED,
+        "predicted_class": ColumnRole.FEATURE,
+    }
+    for name, role in role_by_col.items():
+        if name in df.columns:
+            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=role)
+    return {"predictions": {name: result[name] for name in df.columns if name in result}}
+
+
+register_block(
+    BlockSpec(
+        category="predict",
+        block_type="standard",
+        group="modelling",
+        display_name="Predict",
+        inputs=[PortSpec("df"), PortSpec("model", type="model")],
+        outputs=[PortSpec("predictions")],
+        fn=predict,
+        metadata_transform=_predict_meta,
+    )
+)
+
+
 def woe_transform(df: pl.DataFrame, col: str, target: str, bins: int = 10) -> pl.DataFrame:
     """Weight-of-evidence encoding of `col` against a binary `target`
     (1 = event/bad, 0 = non-event/good), the standard credit-scoring

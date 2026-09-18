@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
 import { FileBrowser } from './FileBrowser'
+import { GitPanel } from './GitPanel'
 import { SettingsPanel } from './SettingsPanel'
 import type { LLMSettingsOut } from './types'
 
@@ -53,6 +54,7 @@ export function Toolbar({
   const [compiled, setCompiled] = useState<string | null>(null)
   const [compileStreaming, setCompileStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showGit, setShowGit] = useState(false)
   const [showSave, setShowSave] = useState(false)
   const [showLoad, setShowLoad] = useState(false)
   const [defaultProjectsDir, setDefaultProjectsDir] = useState<string | null>(null)
@@ -83,6 +85,11 @@ export function Toolbar({
       setCompiled(source)
     })
 
+  const doNew = () => {
+    if (dirty && !confirm('Discard unsaved changes and start a new project?')) return
+    run(() => api.new())
+  }
+
   const doSavePick = (path: string) => {
     setShowSave(false)
     run(() => api.save(path))
@@ -97,7 +104,7 @@ export function Toolbar({
   // no project open yet they fall back to the server's default projects
   // subdirectory (see /api/project/default_dir), so Save always lands
   // somewhere sensible instead of the server's raw working directory.
-  const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: 'project.json' }
+  const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: 'model.json' }
   const browseStartPath = openDir || defaultProjectsDir
 
   return (
@@ -214,6 +221,9 @@ export function Toolbar({
       </label>
 
       <span style={{ flex: 1 }} />
+      <button disabled={busy} onClick={doNew} title="Start a new, empty project">
+        New
+      </button>
       <button disabled={busy} onClick={() => setShowSave(true)}>
         Save{dirty ? ' •' : ''}
       </button>
@@ -224,6 +234,17 @@ export function Toolbar({
         {projectPath ?? '(unsaved)'}
         {dirty && <span title="Edits not yet written to the project file (they are snapshotted for recovery)"> · unsaved changes</span>}
       </span>
+
+      <div style={{ position: 'relative' }}>
+        <button
+          onClick={() => setShowGit((s) => !s)}
+          disabled={!projectPath}
+          title={projectPath ? 'Version this project with git' : 'Save the project first to use git'}
+        >
+          Git
+        </button>
+        {showGit && <GitPanel projectPath={projectPath} onClose={() => setShowGit(false)} />}
+      </div>
 
       <div style={{ position: 'relative' }}>
         <button onClick={() => setShowSettings((s) => !s)}>Settings</button>

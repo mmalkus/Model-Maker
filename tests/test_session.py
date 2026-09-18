@@ -242,3 +242,35 @@ def test_undo_while_a_run_is_in_flight_does_not_disturb_it(session, tmp_path):
     # The run completed against the graph it was pinned to.
     assert session.runner.state[slow.id].last_successful_key is not None
     assert session.graph.wires == {}
+
+
+def test_new_discards_the_graph_and_project_identity(session, tmp_path):
+    csv = tmp_path / "data.csv"
+    csv.write_text("a\n1\n")
+    with session.edit():
+        session.add_block("read_csv", params={"path": str(csv)})
+    project_path = tmp_path / "project.json"
+    session.save(project_path)
+    assert session.project_path == project_path
+    assert session.graph.blocks
+
+    session.new()
+
+    assert session.graph.blocks == {}
+    assert session.project_path is None
+    assert session.project_name == "untitled"
+    assert session.can_undo is False
+    assert session.can_redo is False
+    assert session.dirty is False
+    # The saved file itself is untouched -- New only affects in-memory state.
+    assert project_path.exists()
+
+
+def test_new_clears_the_recovery_snapshot(session, tmp_path):
+    with session.edit():
+        session.add_block("read_csv", params={"path": "data.csv"})
+    assert session.recovery_info() is not None
+
+    session.new()
+
+    assert session.recovery_info() is None

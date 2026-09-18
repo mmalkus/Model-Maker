@@ -2,7 +2,7 @@ import json
 
 from modelmaker.blocks.base import PortSpec
 from modelmaker.graph import Graph, Lane, Wire
-from modelmaker.project import load_project, save_project
+from modelmaker.project import ensure_project_scaffold, load_project, save_project
 
 from .helpers import make_block
 
@@ -64,3 +64,29 @@ def test_saved_json_has_no_run_state_and_is_sorted(tmp_path):
     # sort_keys=True was used -- re-dumping should be byte-identical
     redumped = json.dumps(data, indent=2, sort_keys=True) + "\n"
     assert raw == redumped
+
+
+def test_save_project_gives_the_folder_a_files_dir_gitignore_and_git_repo(tmp_path):
+    graph = _build_graph()
+    project_dir = tmp_path / "my_project"
+    save_project(graph, project_dir / "model.json")
+
+    assert (project_dir / "files").is_dir()
+    assert (project_dir / ".gitignore").exists()
+    assert ".modelmaker-cache/" in (project_dir / ".gitignore").read_text()
+    assert (project_dir / ".git").is_dir()
+
+
+def test_ensure_project_scaffold_never_overwrites_an_edited_gitignore(tmp_path):
+    ensure_project_scaffold(tmp_path)
+    (tmp_path / ".gitignore").write_text("my-own-rule\n")
+
+    ensure_project_scaffold(tmp_path)
+
+    assert (tmp_path / ".gitignore").read_text() == "my-own-rule\n"
+
+
+def test_ensure_project_scaffold_is_safe_to_call_repeatedly(tmp_path):
+    ensure_project_scaffold(tmp_path)
+    ensure_project_scaffold(tmp_path)  # must not raise (idempotent git init)
+    assert (tmp_path / ".git").is_dir()

@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
+from . import gitops
 from .blocks import library as _library  # noqa: F401
 from .blocks import modelling as _modelling  # noqa: F401
 from .blocks import stat_tests as _stat_tests  # noqa: F401
@@ -202,6 +203,14 @@ class LoadRequest(BaseModel):
 
 class SaveRequest(BaseModel):
     path: str | None = None
+
+
+class GitRemoteRequest(BaseModel):
+    url: str
+
+
+class GitCommitRequest(BaseModel):
+    message: str
 
 
 class CompileRequest(BaseModel):
@@ -451,6 +460,16 @@ def project_default_dir() -> dict[str, str]:
     return {"path": str(DEFAULT_PROJECTS_DIR)}
 
 
+@app.post("/api/project/new")
+def new_project_ep() -> dict[str, Any]:
+    """The 'New' toolbar button: discards the in-memory graph in favor of a
+    blank one. Nothing is written to disk -- an existing project file on
+    disk is untouched, and the crash-recovery snapshot for the discarded
+    graph is cleared so it isn't offered back on the next reload."""
+    SESSION.new()
+    return _graph_out()
+
+
 @app.post("/api/project/load")
 def load_project_ep(req: LoadRequest) -> dict[str, Any]:
     try:
@@ -467,6 +486,73 @@ def save_project_ep(req: SaveRequest) -> dict[str, Any]:
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"path": str(path)}
+
+
+def _project_dir() -> Path:
+    if SESSION.project_path is None:
+        raise HTTPException(400, "save the project first -- git needs a project folder to work in")
+    return SESSION.project_path.parent
+
+
+@app.get("/api/project/git/status")
+def git_status_ep() -> dict[str, Any]:
+    """Whether the currently-open project's folder is a git repo, its
+    branch/remote, uncommitted changes, and how far ahead/behind its
+    upstream it is -- backs the Toolbar's Git panel. Never raises for "no
+    project open yet" (unlike the write endpoints below): the panel wants to
+    show "not a repo" rather than an error in that case."""
+    if SESSION.project_path is None:
+        return {"is_repo": False, "branch": None, "remote": None, "changes": [], "ahead": 0, "behind": 0}
+    return gitops.status(_project_dir())
+
+
+@app.post("/api/project/git/init")
+def git_init_ep() -> dict[str, Any]:
+    try:
+        gitops.init(_project_dir())
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+    return gitops.status(_project_dir())
+
+
+@app.post("/api/project/git/remote")
+def git_remote_ep(req: GitRemoteRequest) -> dict[str, Any]:
+    if not req.url.strip():
+        raise HTTPException(400, "a remote URL is required")
+    try:
+        gitops.set_remote(_project_dir(), req.url.strip())
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+    return gitops.status(_project_dir())
+
+
+@app.post("/api/project/git/commit")
+def git_commit_ep(req: GitCommitRequest) -> dict[str, Any]:
+    if not req.message.strip():
+        raise HTTPException(400, "a commit message is required")
+    try:
+        gitops.commit(_project_dir(), req.message.strip())
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+    return gitops.status(_project_dir())
+
+
+@app.post("/api/project/git/push")
+def git_push_ep() -> dict[str, Any]:
+    try:
+        gitops.push(_project_dir())
+    except gitops.GitError as e:
+        raise HTTPException(502, str(e))
+    return gitops.status(_project_dir())
+
+
+@app.post("/api/project/git/pull")
+def git_pull_ep() -> dict[str, Any]:
+    try:
+        gitops.pull(_project_dir())
+    except gitops.GitError as e:
+        raise HTTPException(502, str(e))
+    return gitops.status(_project_dir())
 
 
 @app.get("/api/project/recovery")

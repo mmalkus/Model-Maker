@@ -23,7 +23,7 @@ def test_registry_lists_standard_blocks(client):
 def test_registry_groups_modelling_and_tests_blocks(client):
     resp = client.get("/api/registry")
     by_category = {b["category"]: b for b in resp.json()}
-    for cat in ("glm_fit", "logistic_regression", "woe_transform"):
+    for cat in ("glm_fit", "logistic_regression", "woe_transform", "predict"):
         assert by_category[cat]["group"] == "modelling"
     for cat in ("ks_test", "auc_gini", "psi_test"):
         assert by_category[cat]["group"] == "tests"
@@ -196,6 +196,54 @@ def test_save_and_load_round_trip(client, tmp_path):
     blocks = load_resp.json()["blocks"]
     assert len(blocks) == 1
     assert next(iter(blocks.values()))["name"] == "Load data"
+
+
+def test_new_project_clears_the_graph_without_touching_the_saved_file(client, tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,10\n")
+    client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}})
+    project_path = tmp_path / "project.json"
+    client.post("/api/project/save", json={"path": str(project_path)})
+
+    resp = client.post("/api/project/new")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["blocks"] == {}
+    assert body["project_path"] is None
+    assert body["dirty"] is False
+    assert project_path.exists()
+
+
+def test_git_status_before_any_project_is_saved(client):
+    resp = client.get("/api/project/git/status")
+    assert resp.status_code == 200
+    assert resp.json() == {"is_repo": False, "branch": None, "remote": None, "changes": [], "ahead": 0, "behind": 0}
+
+
+def test_git_endpoints_require_a_saved_project(client):
+    assert client.post("/api/project/git/commit", json={"message": "x"}).status_code == 400
+    assert client.post("/api/project/git/push").status_code == 400
+    assert client.post("/api/project/git/remote", json={"url": "https://example.com/x.git"}).status_code == 400
+
+
+def test_git_status_commit_and_remote_round_trip(client, tmp_path):
+    project_path = tmp_path / "proj" / "model.json"
+    save_resp = client.post("/api/project/save", json={"path": str(project_path)})
+    assert save_resp.status_code == 200
+
+    status = client.get("/api/project/git/status").json()
+    assert status["is_repo"] is True  # save_project scaffolds + git-inits the folder
+
+    remote_resp = client.post("/api/project/git/remote", json={"url": "https://github.com/example/repo.git"})
+    assert remote_resp.status_code == 200
+    assert remote_resp.json()["remote"] == "https://github.com/example/repo.git"
+
+    commit_resp = client.post("/api/project/git/commit", json={"message": "initial commit"})
+    assert commit_resp.status_code == 200
+    assert commit_resp.json()["changes"] == []
+
+    # nothing left to commit
+    assert client.post("/api/project/git/commit", json={"message": "again"}).status_code == 400
 
 
 def test_delete_block_removes_dependent_wires(client, tmp_path):
