@@ -130,6 +130,28 @@ def test_aggregate_simulation_rejects_missing_dependency_labels():
         blocks.aggregate_simulation(components, dep)
 
 
+def test_aggregate_simulation_shapley_contributions_sum_to_the_var():
+    rng = np.random.default_rng(6)
+    n = 4_000
+    components = pl.DataFrame({"a": rng.exponential(size=n), "b": rng.exponential(size=n), "c": rng.exponential(size=n)})
+    dep = {
+        "kind": "dependency",
+        "type": "gaussian",
+        "labels": ["a", "b", "c"],
+        "corr": [[1.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 1.0]],
+    }
+    result, _, contributions_table = blocks.aggregate_simulation(components, dep, alpha_levels=[0.95], seed=1, contributions_method="shapley")
+    assert set(contributions_table["component"].to_list()) == {"a", "b", "c"}
+    assert contributions_table["contribution"].sum() == pytest.approx(result["quantiles"][0.95], rel=1e-6)
+
+
+def test_aggregate_simulation_rejects_unknown_contributions_method():
+    components = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [1.0, 2.0, 3.0]})
+    dep = {"kind": "dependency", "type": "gaussian", "labels": ["a", "b"], "corr": [[1.0, 0.0], [0.0, 1.0]]}
+    with pytest.raises(ValueError, match="contributions_method"):
+        blocks.aggregate_simulation(components, dep, contributions_method="bogus")
+
+
 def test_fit_evaluate_validate_proxy_round_trip():
     rng = np.random.default_rng(5)
     x = rng.uniform(-2, 2, size=100)

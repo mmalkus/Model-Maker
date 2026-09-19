@@ -77,13 +77,26 @@ own bootstrap CIs (they still use the local numpy resample from §6 — a
 reasonable follow-up now that fan-out exists, not done here to keep this
 change scoped to the primitive itself).
 
+**Shapley allocation (§7.3) is also built**: `stochastic.accumulate.
+shapley_contributions` (exact, by 2^k coalition enumeration over VaR or
+TVaR of the summed components, capped at `MAX_SHAPLEY_COMPONENTS = 12` --
+the risk-module level the proposal scopes it to, not per-obligor), wired
+into `aggregate_simulation` via a `contributions_method: "euler" |
+"shapley"` param (default `"euler"`, unchanged). Checked against Shapley's
+two defining properties directly (efficiency and symmetry) rather than a
+hand-derived reference number — see
+`test_shapley_contributions_are_efficient_and_symmetric` et al. in
+`tests/test_stochastic_core.py`. Not extended to `var_covar_aggregate`:
+its "components" are risk factors with their own closed-form/MC Euler
+decomposition already, and Shapley there would need a different coalition-
+value function (portfolio quantile of a subset of factors' combined
+sensitivity) — a distinct, not-yet-justified increment.
+
 **Deliberately deferred**, consistent with §10's own sequencing (each is
 called out at the point above where it would bite):
 - LSMC and replicating-portfolio proxy methods (§8) — increments on the
   `ProxyFunctionPacket` interface once a real nested-simulation use case
   (CVA/XVA, insurance guarantees) pulls for them.
-- Shapley allocation (§7.3) — Euler/ES contributions ship; Shapley is a
-  follow-on for the risk-module level.
 - Disk-backed raw-path persistence (§9) — `simulate_op_risk_lda`'s
   `keep_paths` param emits paths as a plain dataframe output instead of a
   parquet-file handle; fine at today's scale, worth revisiting if raw-path

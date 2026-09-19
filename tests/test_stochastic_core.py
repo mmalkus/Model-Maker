@@ -189,6 +189,45 @@ def test_euler_contributions_sum_to_total_tvar():
     assert contributions["a"] == pytest.approx(contributions["b"], rel=0.1)  # symmetric by construction
 
 
+def test_shapley_contributions_are_efficient_and_symmetric():
+    """The two defining properties of a Shapley value, checked directly
+    rather than against a hand-derived reference number: efficiency (shares
+    sum exactly to the grand coalition's own value) and symmetry (component
+    with an identical marginal effect on every coalition get equal shares --
+    guaranteed here by construction, since 'a' and 'b' are iid)."""
+    rng = np.random.default_rng(20)
+    n = 5_000
+    components = {"a": rng.exponential(size=n), "b": rng.exponential(size=n), "c": rng.exponential(size=n)}
+    alpha = 0.9
+    shapley = accumulate.shapley_contributions(components, alpha, measure="var")
+    total = components["a"] + components["b"] + components["c"]
+    grand_value = accumulate.risk_measures(total, [alpha])["quantiles"][alpha]
+    assert sum(shapley.values()) == pytest.approx(grand_value, rel=1e-9)
+    assert shapley["a"] == pytest.approx(shapley["b"], rel=0.15)
+    assert shapley["b"] == pytest.approx(shapley["c"], rel=0.15)
+
+
+def test_shapley_contributions_tvar_measure_is_also_efficient():
+    rng = np.random.default_rng(21)
+    n = 5_000
+    components = {"a": rng.exponential(size=n), "b": 2 * rng.exponential(size=n)}
+    alpha = 0.9
+    shapley = accumulate.shapley_contributions(components, alpha, measure="tvar")
+    total = components["a"] + components["b"]
+    grand_value = accumulate.risk_measures(total, [alpha])["tvar"][alpha]
+    assert sum(shapley.values()) == pytest.approx(grand_value, rel=1e-9)
+
+
+def test_shapley_contributions_empty_input():
+    assert accumulate.shapley_contributions({}, 0.9) == {}
+
+
+def test_shapley_contributions_rejects_too_many_components():
+    components = {f"c{i}": np.array([1.0, 2.0, 3.0]) for i in range(accumulate.MAX_SHAPLEY_COMPONENTS + 1)}
+    with pytest.raises(ValueError, match="at most"):
+        accumulate.shapley_contributions(components, 0.9)
+
+
 # ---------------------------------------------------------------------------
 # proxy
 # ---------------------------------------------------------------------------

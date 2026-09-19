@@ -302,6 +302,7 @@ def aggregate_simulation(
     alpha_levels: list[float] | None = None,
     n_bootstrap: int = 200,
     seed: int = 0,
+    contributions_method: str = "euler",
 ) -> tuple[dict, pl.DataFrame, pl.DataFrame]:
     """Combine independently-simulated component loss vectors (one column
     per component in `components`) into a total loss distribution under a
@@ -309,7 +310,12 @@ def aggregate_simulation(
     component's already-simulated marginal is kept exactly, but reordered
     so the joint ranks match a sample from `dependency`'s copula. Avoids
     re-simulating every component jointly -- the practical technique for
-    aggregating risk modules that were (or had to be) simulated separately."""
+    aggregating risk modules that were (or had to be) simulated separately.
+
+    `contributions_method`: "euler" (default -- ES-conditional-expectation
+    contributions, stable at any component count) or "shapley" (exact,
+    symmetric, efficient allocation by coalition enumeration -- capped at
+    stochastic.accumulate.MAX_SHAPLEY_COMPONENTS components, see S7.3)."""
     import numpy as np
 
     from modelmaker.stochastic import accumulate
@@ -333,7 +339,12 @@ def aggregate_simulation(
     total = sum(reordered.values())
     rm = accumulate.risk_measures(total, levels)
     ci = {a: accumulate.bootstrap_quantile_ci(total, a, rng, n_boot=n_bootstrap) for a in levels}
-    contributions = accumulate.euler_contributions(reordered, max(levels))
+    if contributions_method == "euler":
+        contributions = accumulate.euler_contributions(reordered, max(levels))
+    elif contributions_method == "shapley":
+        contributions = accumulate.shapley_contributions(reordered, max(levels), measure="var")
+    else:
+        raise ValueError(f"unknown contributions_method: {contributions_method!r} (use euler or shapley)")
 
     result = {
         "kind": "simulation_result",
@@ -352,7 +363,7 @@ def aggregate_simulation(
             "ci_high": [ci[a][1] for a in levels],
         }
     )
-    contributions_table = pl.DataFrame({"component": list(contributions), "euler_contribution": list(contributions.values())})
+    contributions_table = pl.DataFrame({"component": list(contributions), "contribution": list(contributions.values())})
     return result, quantile_table, contributions_table
 
 

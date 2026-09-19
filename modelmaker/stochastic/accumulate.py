@@ -11,7 +11,18 @@ this module a plain 1-D array, everything here can just use numpy directly.
 
 from __future__ import annotations
 
+import math
+from itertools import combinations
+
 import numpy as np
+
+# Shapley allocation enumerates all 2^k coalitions -- exact and simple, but
+# only practical at the risk-module level the proposal scopes it to (S7.3:
+# "offered at the risk-module level ... not for obligor-level allocation"),
+# not per-obligor. 12 components -> 4096 coalitions, still fast even at
+# N ~ 1e6 paths per coalition; the cap exists so a caller who wires this to
+# something obligor-shaped gets a clear error instead of a hang.
+MAX_SHAPLEY_COMPONENTS = 12
 
 
 def risk_measures(losses: np.ndarray, alpha_levels: list[float]) -> dict:
@@ -112,3 +123,52 @@ def euler_contributions(component_losses: dict[str, np.ndarray], alpha: float) -
     if not mask.any():
         mask = total >= total.max()
     return {name: float(stacked[mask, i].mean()) for i, name in enumerate(names)}
+
+
+def _coalition_value(losses_by_name: dict[str, np.ndarray], subset: frozenset, alpha: float, measure: str) -> float:
+    if not subset:
+        return 0.0
+    total = sum(losses_by_name[name] for name in subset)
+    n = len(total)
+    idx = max(0, min(n - 1, int(np.ceil(alpha * n)) - 1))
+    if measure == "var":
+        return float(np.partition(total, idx)[idx])
+    if measure == "tvar":
+        return float(np.partition(total, idx)[idx:].mean())
+    raise ValueError(f"unknown measure: {measure!r} (use var or tvar)")
+
+
+def shapley_contributions(component_losses: dict[str, np.ndarray], alpha: float, measure: str = "var") -> dict[str, float]:
+    """Exact Shapley allocation of a risk measure (VaR or TVaR at `alpha`)
+    of the aggregate across components, by enumerating all 2^k coalitions
+    (proposal S7.3) -- the "what does my largest exposure cost me" question,
+    as an alternative to euler_contributions above when Euler/ES
+    contributions aren't stable or specific enough (Shapley is symmetric
+    and efficient by construction: components with identical marginal
+    effect always get equal shares, and shares always sum exactly to the
+    grand coalition's value). Capped at MAX_SHAPLEY_COMPONENTS."""
+    names = list(component_losses)
+    k = len(names)
+    if k > MAX_SHAPLEY_COMPONENTS:
+        raise ValueError(
+            f"Shapley allocation supports at most {MAX_SHAPLEY_COMPONENTS} components (got {k}) -- practical at "
+            "the risk-module level, not per-obligor (it enumerates 2^k coalitions)"
+        )
+    if k == 0:
+        return {}
+
+    value_cache: dict[frozenset, float] = {}
+    for r in range(k + 1):
+        for combo in combinations(names, r):
+            subset = frozenset(combo)
+            value_cache[subset] = _coalition_value(component_losses, subset, alpha, measure)
+
+    shapley = {name: 0.0 for name in names}
+    for name in names:
+        others = [n for n in names if n != name]
+        for r in range(len(others) + 1):
+            weight = math.factorial(r) * math.factorial(k - r - 1) / math.factorial(k)
+            for combo in combinations(others, r):
+                subset = frozenset(combo)
+                shapley[name] += weight * (value_cache[subset | {name}] - value_cache[subset])
+    return shapley

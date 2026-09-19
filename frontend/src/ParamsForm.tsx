@@ -162,6 +162,12 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
   aggregate_simulation: [
     { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
     { key: 'seed', label: 'Random seed', kind: 'number' },
+    {
+      key: 'contributions_method',
+      label: 'Contributions',
+      kind: 'select',
+      options: ['euler', 'shapley'],
+    },
   ],
   fit_proxy: [
     { key: 'value_col', label: 'Value column (polynomial)', kind: 'column' },
