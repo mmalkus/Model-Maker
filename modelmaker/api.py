@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
+from .blocks import data_quality as _data_quality  # noqa: F401
 from .blocks import feature_analysis as _feature_analysis  # noqa: F401
 from .blocks import library as _library  # noqa: F401
 from .blocks import modelling as _modelling  # noqa: F401
