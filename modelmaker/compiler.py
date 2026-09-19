@@ -341,7 +341,12 @@ def compile_graph(
                     kwarg_pairs.append((role_param, repr(resolved)))
         if block.block_type == "output" and wants_output_dir[bid]:
             kwarg_pairs.append(("output_dir", "OUTPUT_DIR"))
-        if block.block_type == "output" and wants_block_id[bid]:
+        # Not restricted to output blocks (unlike output_dir above) -- see
+        # the matching widening in runner.run_block: a stochastic "standard"
+        # block derives its RNG from block_id (stochastic.seed.spawn_rng),
+        # so a compiled script has to pass the same block_id the live run
+        # did, or its output would silently stop matching the graph's.
+        if wants_block_id[bid]:
             kwarg_pairs.append(("block_id", repr(bid)))
 
         out_ports = [p.name for p in block.outputs]

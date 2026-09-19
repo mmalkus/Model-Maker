@@ -48,6 +48,7 @@ def run_worker_entry(
             import modelmaker.blocks.library  # noqa: F401
             import modelmaker.blocks.modelling  # noqa: F401
             import modelmaker.blocks.stat_tests  # noqa: F401
+            import modelmaker.blocks.stochastic  # noqa: F401
             from .blocks.base import BLOCK_REGISTRY
 
             fn = BLOCK_REGISTRY[category].fn

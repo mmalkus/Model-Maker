@@ -127,6 +127,57 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'predicted_col', label: 'Predicted column', kind: 'column', autoRole: 'predicted' },
     { key: 'bins', label: 'Bins', kind: 'number' },
   ],
+  // Stochastic engine blocks (see /stochastic-engine-proposal.md and
+  // modelmaker/blocks/stochastic.py). Boolean params (spliced_tail,
+  // keep_paths) and list-of-float params (alpha_levels) are deliberately
+  // left out of these specs -- there's no FieldSpec 'boolean' kind, and
+  // modelling one as a 'select' of the strings 'true'/'false' would set a
+  // truthy *string* value ('false' is still truthy in Python), so both
+  // fall back to the JSON textarea where they can be real JSON literals.
+  fit_distribution: [{ key: 'column', label: 'Column to fit', kind: 'column' }],
+  sample_distribution: [
+    { key: 'n', label: 'Number of samples', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
+  build_dependency: [
+    { key: 'columns', label: 'Columns', kind: 'columns' },
+    { key: 'copula_type', label: 'Copula', kind: 'select', options: ['gaussian', 't', 'clayton', 'gumbel'] },
+    { key: 'dof', label: 'Degrees of freedom (t copula)', kind: 'number' },
+    { key: 'theta', label: 'Theta (Clayton / Gumbel)', kind: 'number', step: 0.1 },
+  ],
+  simulate_op_risk_lda: [
+    { key: 'n_paths', label: 'Number of paths', kind: 'number' },
+    { key: 'chunk_size', label: 'Chunk size', kind: 'number' },
+    { key: 'frequency_family', label: 'Frequency family', kind: 'select', options: ['poisson', 'negbinom'] },
+    { key: 'frequency_mean', label: 'Frequency mean', kind: 'number', step: 0.1 },
+    { key: 'frequency_dispersion', label: 'Frequency dispersion (negbinom)', kind: 'number', step: 0.1 },
+    { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
+  risk_measures: [
+    { key: 'column', label: 'Loss column', kind: 'column' },
+    { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
+  aggregate_simulation: [
+    { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
+  fit_proxy: [
+    { key: 'value_col', label: 'Value column (polynomial)', kind: 'column' },
+    { key: 'method', label: 'Method', kind: 'select', options: ['closed_form', 'polynomial'] },
+    { key: 'expr', label: 'Expression (closed_form)', kind: 'text', placeholder: 'x + 0.5 * y' },
+    { key: 'degree', label: 'Degree (polynomial)', kind: 'number' },
+    { key: 'regressor', label: 'Regressor (polynomial)', kind: 'select', options: ['ridge', 'lasso', 'ols'] },
+    { key: 'alpha', label: 'Regularization (ridge / lasso)', kind: 'number', step: 0.1 },
+  ],
+  validate_proxy: [{ key: 'value_col', label: 'Actual value column', kind: 'column' }],
+  var_covar_aggregate: [
+    { key: 'method', label: 'Method', kind: 'select', options: ['normal', 'cornish_fisher', 'moment_matching', 'delta_gamma_copula'] },
+    { key: 'bump_size', label: 'Bump size', kind: 'number', step: 0.001 },
+    { key: 'n_mc', label: 'Monte Carlo draws (non-normal methods)', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
 }
 
 function prettifyColumnParamLabel(key: string): string {

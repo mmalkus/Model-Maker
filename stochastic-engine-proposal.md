@@ -12,6 +12,51 @@ aggregation with a var-covar path. Distribution/copula catalogue depth and
 the insurance- and credit-specific blocks on top of the spine are follow-on
 work once the spine lands.
 
+## Implementation status
+
+Phases 1-3 and the core of phase 5 (§10) are built, on
+`modelmaker/stochastic/` (seed, distributions, dependency, accumulate,
+proxy, var_covar) and `modelmaker/blocks/stochastic.py`: distribution
+fitting incl. a spliced body-GPD tail, hand-rolled Gaussian/t/Clayton/
+Gumbel copulas with PSD repair, a chunked compound-Poisson/negative-binomial
+op-risk LDA simulation block, the closed-form/polynomial curve-fitting
+proxy family with a validation block, var-covar aggregation across all four
+methods (normal/Cornish-Fisher/moment-matching/delta-gamma-copula) with
+Euler contributions, and copula-based aggregation of independently
+simulated components via Iman-Conover rank reordering. New port types
+(`distribution`/`dependency`/`proxy_function`/`simulation_result`) follow
+the existing "model" port convention (a plain JSON-shaped dict) end to end,
+including on the frontend (`PORT_BADGE`, palette group, `PARAM_SPECS`
+entries) — see `tests/test_stochastic_core.py`,
+`tests/test_stochastic_blocks.py`, and `tests/test_stochastic_runner.py`.
+
+**Deliberately deferred**, consistent with §10's own sequencing (each is
+called out at the point above where it would bite):
+- **Phase 4, the graph fan-out engine primitive** (`IterateBlock`/
+  `CollectBlock`, §4) — the one change to the core run/cache-key/compiler
+  machinery, correspondingly the highest blast-radius one to get wrong.
+  Bootstrap CIs here use a local numpy resample (§6) instead of fan-out.
+- LSMC and replicating-portfolio proxy methods (§8) — increments on the
+  `ProxyFunctionPacket` interface once a real nested-simulation use case
+  (CVA/XVA, insurance guarantees) pulls for them.
+- Shapley allocation (§7.3) — Euler/ES contributions ship; Shapley is a
+  follow-on for the risk-module level.
+- Disk-backed raw-path persistence (§9) — `simulate_op_risk_lda`'s
+  `keep_paths` param emits paths as a plain dataframe output instead of a
+  parquet-file handle; fine at today's scale, worth revisiting if raw-path
+  retention becomes a common request at N well beyond 10⁶.
+- Quasi-MC (Sobol) and importance sampling (§3.1(7)) — antithetic/
+  stratified variance reduction wasn't built either; not yet needed at the
+  path counts the shipped blocks target.
+
+One correctness note for anyone extending this: `runner.RunPlan.basis`
+now folds a registry block's own id into its cache-key basis whenever its
+`fn` accepts a `block_id` param (previously that injection was output-block
+-only and never affected the key) — needed because a stochastic block's
+output genuinely depends on its identity via `stochastic.seed.spawn_rng`,
+not just on category/params/upstream. Any new block that accepts
+`block_id` inherits this automatically; nothing else changes.
+
 ---
 
 ## 1. Design principles

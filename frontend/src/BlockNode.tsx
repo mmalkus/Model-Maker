@@ -19,6 +19,10 @@ const PORT_BADGE: Record<PortType, { icon: string; label: string; color: string 
   image: { icon: '▨', label: 'image', color: '#ea580c' },
   master_scale: { icon: '▤', label: 'scale', color: '#0891b2' },
   any: { icon: '?', label: 'value', color: '#6b7280' },
+  distribution: { icon: '~', label: 'distribution', color: '#db2777' },
+  dependency: { icon: '⋈', label: 'dependency', color: '#4338ca' },
+  proxy_function: { icon: '≈', label: 'proxy', color: '#b45309' },
+  simulation_result: { icon: '◈', label: 'sim result', color: '#0d9488' },
 }
 
 function formatParamValue(v: unknown): string {

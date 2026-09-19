@@ -95,7 +95,7 @@ class RunPlan:
             port: f"{_hash(self.basis(wire.from_block, next_stack))}:{wire.from_port}"
             for port, wire in sorted(self.graph.input_wires(block_id).items())
         }
-        return {
+        basis: dict[str, Any] = {
             "category": block.category,
             "code_version": block.code_version,
             "params": block.params,
@@ -105,6 +105,20 @@ class RunPlan:
             "group_by": block.group_by,
             "max_workers": block.max_workers,
         }
+        # A registry block whose fn accepts `block_id` (see run_block's
+        # block_id injection) has output that genuinely depends on its own
+        # identity -- a stochastic block deriving its RNG from it (see
+        # stochastic.seed.spawn_rng), e.g. -- not just on category/params/
+        # upstream. Without this, two such blocks with otherwise-identical
+        # params (and no upstream) would hash to the same cache key and
+        # silently share one cache slot, each overwriting the other's
+        # result. Scoped to registry blocks only (a plain dict/attribute
+        # lookup, no compilation) so this never has to compile a custom
+        # block's code just to answer a routine status poll.
+        spec = BLOCK_REGISTRY.get(block.category)
+        if spec is not None and accepts_param(spec.fn, "block_id"):
+            basis["block_id"] = block_id
+        return basis
 
     def key(self, block_id: str) -> str:
         return _hash(self.basis(block_id))
@@ -563,7 +577,15 @@ class Runner:
                         call_kwargs[role_param] = resolved
             if block.block_type == "output" and accepts_param(fn, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
-            if block.block_type == "output" and accepts_param(fn, "block_id"):
+            # Not restricted to output blocks (unlike output_dir above): a
+            # stochastic "standard" block (see blocks/stochastic.py) opts
+            # into block_id too, to derive its RNG from (seed param,
+            # block_id) -- see stochastic.seed.spawn_rng -- so its stream is
+            # reproducible without depending on run order or worker count.
+            # No existing block names a param literally "block_id" other
+            # than the output ones already relying on this, so widening it
+            # here changes nothing for them.
+            if accepts_param(fn, "block_id"):
                 call_kwargs["block_id"] = block_id
             # Same injection pattern as output_dir/block_id above: an input
             # block that names a `sample_rows` parameter (e.g. read_csv, via
