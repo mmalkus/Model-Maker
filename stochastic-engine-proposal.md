@@ -92,8 +92,26 @@ decomposition already, and Shapley there would need a different coalition-
 value function (portfolio quantile of a subset of factors' combined
 sensitivity) — a distinct, not-yet-justified increment.
 
+**Closed-form single-factor ASRF credit EC (§3.2) is also built**: a
+deterministic `asrf_economic_capital` block (`stochastic/credit.py` +
+its BlockSpec wrapper) computing the Vasicek/Basel II IRB unexpected-loss
+capital per obligor and summed to a portfolio EC/EL/capital-requirement,
+with either a fixed asset correlation or the Basel regulatory
+PD-dependent formula (`basel_corporate_correlation`). This is §10 step 2
+("land bank credit EC on the spine ... closed-form ASRF gives a
+benchmark") — the closed-form half only; the multi-factor obligor-level
+Monte Carlo simulation it's meant to validate isn't built. No randomness,
+no seed, no engine involvement beyond an ordinary block — tested against
+the formula's own mathematical properties (zero at zero correlation,
+never negative, monotone in confidence and correlation) rather than a
+hand-derived reference number, in `tests/test_stochastic_credit.py`.
+
 **Deliberately deferred**, consistent with §10's own sequencing (each is
 called out at the point above where it would bite):
+- Multi-factor obligor-level credit EC via Monte Carlo (§3.2) — the
+  simulation half of §10 step 2, which the closed-form ASRF block above
+  exists to validate against; also concentration risk, HHI/granularity
+  adjustment, and migration-based (mark-to-model) loss definitions.
 - LSMC and replicating-portfolio proxy methods (§8) — increments on the
   `ProxyFunctionPacket` interface once a real nested-simulation use case
   (CVA/XVA, insurance guarantees) pulls for them.

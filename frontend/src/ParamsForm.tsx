@@ -159,6 +159,15 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
     { key: 'seed', label: 'Random seed', kind: 'number' },
   ],
+  asrf_economic_capital: [
+    { key: 'pd_col', label: 'PD column', kind: 'column' },
+    { key: 'lgd_col', label: 'LGD column', kind: 'column' },
+    { key: 'ead_col', label: 'EAD column', kind: 'column' },
+    { key: 'confidence', label: 'Confidence level', kind: 'number', step: 0.001 },
+    // 'correlation' is a float OR the string "basel_corporate" -- a
+    // 'select' field can't offer "pick a fixed number, or this preset", so
+    // it's left to the JSON textarea (e.g. "basel_corporate" or 0.15).
+  ],
   aggregate_simulation: [
     { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
     { key: 'seed', label: 'Random seed', kind: 'number' },

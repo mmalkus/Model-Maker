@@ -386,6 +386,64 @@ register_block(
 
 
 # ---------------------------------------------------------------------------
+# Credit portfolio economic capital -- closed-form single-factor ASRF
+# (stochastic-engine-proposal.md S3.2 / S10 step 2: "land bank credit EC
+# on the spine ... closed-form ASRF gives a benchmark to validate the
+# simulation against"). Deterministic -- no simulation, no seed -- so it's
+# the cheap, exact answer wherever conditional independence actually
+# holds, and the number a future multi-factor obligor-level Monte Carlo
+# simulation (not built here) should reconcile to when run on the same
+# single-factor assumptions.
+# ---------------------------------------------------------------------------
+
+
+def asrf_economic_capital(
+    df: pl.DataFrame,
+    pd_col: str,
+    lgd_col: str,
+    ead_col: str,
+    confidence: float = 0.999,
+    correlation: float | str = "basel_corporate",
+) -> tuple[dict, pl.DataFrame]:
+    """`correlation` is either a fixed asset correlation applied to every
+    row, or the string "basel_corporate" for the Basel II IRB regulatory
+    PD-dependent formula (see stochastic.credit.basel_corporate_correlation)."""
+    import numpy as np
+
+    from modelmaker.stochastic import credit
+
+    pd_arr = df[pd_col].to_numpy().astype(float)
+    lgd_arr = df[lgd_col].to_numpy().astype(float)
+    ead_arr = df[ead_col].to_numpy().astype(float)
+    if correlation == "basel_corporate":
+        corr_arr = credit.basel_corporate_correlation(pd_arr)
+    else:
+        corr_arr = np.full_like(pd_arr, float(correlation))
+
+    summary, ec_per_obligor, el_per_obligor = credit.asrf_economic_capital(pd_arr, lgd_arr, ead_arr, corr_arr, confidence)
+    detail = df.with_columns(
+        pl.Series("correlation", corr_arr),
+        pl.Series("expected_loss", el_per_obligor),
+        pl.Series("economic_capital", ec_per_obligor),
+    )
+    return summary, detail
+
+
+register_block(
+    BlockSpec(
+        category="asrf_economic_capital",
+        block_type="standard",
+        group="stochastic",
+        display_name="ASRF economic capital (closed form)",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("simulation_result", type="simulation_result"), PortSpec("detail")],
+        fn=asrf_economic_capital,
+        metadata_transform=passthrough,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Curve fitting / proxy functions
 # ---------------------------------------------------------------------------
 
