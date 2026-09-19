@@ -97,21 +97,40 @@ deterministic `asrf_economic_capital` block (`stochastic/credit.py` +
 its BlockSpec wrapper) computing the Vasicek/Basel II IRB unexpected-loss
 capital per obligor and summed to a portfolio EC/EL/capital-requirement,
 with either a fixed asset correlation or the Basel regulatory
-PD-dependent formula (`basel_corporate_correlation`). This is §10 step 2
-("land bank credit EC on the spine ... closed-form ASRF gives a
-benchmark") — the closed-form half only; the multi-factor obligor-level
-Monte Carlo simulation it's meant to validate isn't built. No randomness,
-no seed, no engine involvement beyond an ordinary block — tested against
-the formula's own mathematical properties (zero at zero correlation,
-never negative, monotone in confidence and correlation) rather than a
-hand-derived reference number, in `tests/test_stochastic_credit.py`.
+PD-dependent formula (`basel_corporate_correlation`). No randomness, no
+seed, no engine involvement beyond an ordinary block — tested against the
+formula's own mathematical properties (zero at zero correlation, never
+negative, monotone in confidence and correlation) rather than a
+hand-derived reference number.
+
+**§10 step 2's simulation half is now built too**: `simulate_credit_
+portfolio` is a multi-factor Merton-style Monte Carlo over segments
+(obligors, or homogeneous pools/rating grades for a retail book — scoped
+to tens-to-hundreds of segments, not literal hundreds-of-thousands of
+individual obligors, so peak memory stays `chunk_size x n_segments`, never
+`n_paths x n_segments`), using the semi-analytic conditional-independence
+trick (S3.6 case 1) throughout: conditional on a per-sector systematic
+factor draw (jointly normal across sectors, via a `dependency` object from
+`build_dependency`), each segment's default probability is analytic, so a
+granular portfolio's per-path loss is its conditional-mean loss directly
+-- no per-obligor Bernoulli draw, ever. This is the *reason* the
+closed-form block above was built first: with one sector and matching
+correlation assumptions, the simulation's VaR_alpha of portfolio loss
+converges to `asrf_economic_capital`'s own `capital_requirement` exactly,
+both being the same model integrated two different ways -- verified
+numerically in `test_multi_factor_simulation_converges_to_the_asrf_
+closed_form` (within 5% at n_paths=500,000, tightening with more paths).
+Per-segment Euler risk contributions come along for free by reusing
+`stochastic.accumulate` exactly as `aggregate_simulation` already does.
+
+Not built: true per-obligor Bernoulli simulation (needed only where
+idiosyncratic/concentration risk actually matters -- a genuinely
+undiversified handful of large exposures, where the conditional-mean
+approximation is weakest), concentration risk / HHI / granularity
+adjustment, and migration-based (mark-to-model) loss definitions.
 
 **Deliberately deferred**, consistent with §10's own sequencing (each is
 called out at the point above where it would bite):
-- Multi-factor obligor-level credit EC via Monte Carlo (§3.2) — the
-  simulation half of §10 step 2, which the closed-form ASRF block above
-  exists to validate against; also concentration risk, HHI/granularity
-  adjustment, and migration-based (mark-to-model) loss definitions.
 - LSMC and replicating-portfolio proxy methods (§8) — increments on the
   `ProxyFunctionPacket` interface once a real nested-simulation use case
   (CVA/XVA, insurance guarantees) pulls for them.

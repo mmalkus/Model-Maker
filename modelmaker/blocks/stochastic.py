@@ -443,6 +443,134 @@ register_block(
 )
 
 
+def simulate_credit_portfolio(
+    df: pl.DataFrame,
+    dependency: dict,
+    pd_col: str,
+    lgd_col: str,
+    ead_col: str,
+    sector_col: str,
+    name_col: str | None = None,
+    correlation: float | str = "basel_corporate",
+    n_paths: int = 100_000,
+    chunk_size: int = 20_000,
+    alpha_levels: list[float] | None = None,
+    n_bootstrap: int = 200,
+    compute_contributions: bool = True,
+    seed: int = 0,
+    block_id: str | None = None,
+) -> tuple[dict, pl.DataFrame, pl.DataFrame]:
+    """Multi-factor obligor/segment-level credit EC by Monte Carlo (review
+    S3.2): `dependency` (from build_dependency) carries the *sector-level*
+    correlation matrix, its `labels` naming the sectors `sector_col`'s
+    values must match; each row of `df` is a segment (an individual
+    obligor for a small commercial book, or a homogeneous pool/rating
+    grade for a retail one -- see stochastic.credit's module docstring for
+    why this scopes to that granularity rather than true hundreds-of-
+    thousands-of-obligors scale). Draws are chunked over paths, not
+    segments, so peak memory is `chunk_size x n_segments`, not
+    `n_paths x n_segments` -- fine at the segment counts this targets
+    (tens to a few hundred), the same discipline simulate_op_risk_lda uses
+    for its own chunking.
+
+    With a single sector and matching correlation assumptions, this
+    converges (as n_paths grows) to asrf_economic_capital's closed-form
+    capital_requirement exactly -- see stochastic-engine-proposal.md and
+    tests/test_stochastic_credit.py's cross-validation test, the reason
+    the closed-form block was built first."""
+    import numpy as np
+
+    from modelmaker.stochastic import accumulate, credit
+    from modelmaker.stochastic import dependency as dependency_mod
+    from modelmaker.stochastic import seed as seed_mod
+
+    levels = list(alpha_levels) if alpha_levels else [0.95, 0.99, 0.999]
+    pd_arr = df[pd_col].to_numpy().astype(float)
+    lgd_arr = df[lgd_col].to_numpy().astype(float)
+    ead_arr = df[ead_col].to_numpy().astype(float)
+    sectors = df[sector_col].to_list()
+    names = df[name_col].to_list() if name_col else [f"segment_{i}" for i in range(len(pd_arr))]
+
+    sector_labels = dependency["labels"]
+    missing = sorted(set(sectors) - set(sector_labels))
+    if missing:
+        raise ValueError(f"sector(s) {missing} not found in dependency labels {sector_labels}")
+    sector_index = np.array([sector_labels.index(s) for s in sectors])
+    corr_matrix = np.array(dependency["corr"])
+
+    if correlation == "basel_corporate":
+        corr_arr = credit.basel_corporate_correlation(pd_arr)
+    else:
+        corr_arr = np.full_like(pd_arr, float(correlation))
+
+    rng = seed_mod.spawn_rng(seed, [block_id or "simulate_credit_portfolio"])
+    portfolio_chunks: list[np.ndarray] = []
+    segment_chunks: list[np.ndarray] = []
+    remaining = n_paths
+    while remaining > 0:
+        this_chunk = min(chunk_size, remaining)
+        factors = dependency_mod.sample_correlated_normal(corr_matrix, this_chunk, rng)
+        segment_losses = credit.multi_factor_conditional_mean_losses(pd_arr, lgd_arr, ead_arr, corr_arr, sector_index, factors)
+        portfolio_chunks.append(segment_losses.sum(axis=1))
+        if compute_contributions:
+            segment_chunks.append(segment_losses)
+        remaining -= this_chunk
+
+    losses = np.concatenate(portfolio_chunks)
+    rm = accumulate.risk_measures(losses, levels)
+    ci = {a: accumulate.bootstrap_quantile_ci(losses, a, rng, n_boot=n_bootstrap) for a in levels}
+    convergence = accumulate.running_estimate(losses, max(levels))
+
+    result = {
+        "kind": "simulation_result",
+        "n_paths": n_paths,
+        "n_segments": len(pd_arr),
+        **rm,
+        "quantile_ci": {a: list(ci[a]) for a in levels},
+        "convergence": convergence,
+        "economic_capital": rm["quantiles"][max(levels)] - rm["mean"],
+        "seed_lineage": {"seed": seed, "path": [block_id or "simulate_credit_portfolio"]},
+    }
+    quantile_table = pl.DataFrame(
+        {
+            "alpha": levels,
+            "var": [rm["quantiles"][a] for a in levels],
+            "tvar": [rm["tvar"][a] for a in levels],
+            "unexpected_loss": [rm["unexpected_loss"][a] for a in levels],
+            "ci_low": [ci[a][0] for a in levels],
+            "ci_high": [ci[a][1] for a in levels],
+        }
+    )
+
+    if compute_contributions:
+        segment_matrix = np.concatenate(segment_chunks, axis=0)
+        component_losses = {names[j]: segment_matrix[:, j] for j in range(len(pd_arr))}
+        contributions = accumulate.euler_contributions(component_losses, max(levels))
+        contributions_table = pl.DataFrame({"segment": list(contributions), "euler_contribution": list(contributions.values())})
+    else:
+        contributions_table = pl.DataFrame({"segment": pl.Series([], dtype=pl.Utf8), "euler_contribution": pl.Series([], dtype=pl.Float64)})
+
+    return result, quantile_table, contributions_table
+
+
+register_block(
+    BlockSpec(
+        category="simulate_credit_portfolio",
+        block_type="standard",
+        group="stochastic",
+        display_name="Simulate credit portfolio (multi-factor)",
+        inputs=[PortSpec("df"), PortSpec("dependency", type="dependency")],
+        outputs=[
+            PortSpec("simulation_result", type="simulation_result"),
+            PortSpec("quantile_table"),
+            PortSpec("contributions"),
+        ],
+        fn=simulate_credit_portfolio,
+        metadata_transform=infer_dtypes,
+    )
+)
+
+
 # ---------------------------------------------------------------------------
 # Curve fitting / proxy functions
 # ---------------------------------------------------------------------------

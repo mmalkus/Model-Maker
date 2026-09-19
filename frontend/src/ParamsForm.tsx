@@ -168,6 +168,19 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     // 'select' field can't offer "pick a fixed number, or this preset", so
     // it's left to the JSON textarea (e.g. "basel_corporate" or 0.15).
   ],
+  simulate_credit_portfolio: [
+    { key: 'pd_col', label: 'PD column', kind: 'column' },
+    { key: 'lgd_col', label: 'LGD column', kind: 'column' },
+    { key: 'ead_col', label: 'EAD column', kind: 'column' },
+    { key: 'sector_col', label: 'Sector column (must match the dependency labels)', kind: 'column' },
+    { key: 'name_col', label: 'Segment name column (optional)', kind: 'column' },
+    { key: 'n_paths', label: 'Number of paths', kind: 'number' },
+    { key: 'chunk_size', label: 'Chunk size', kind: 'number' },
+    { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+    // 'correlation' -- see asrf_economic_capital above, same reason it's
+    // left to the JSON textarea.
+  ],
   aggregate_simulation: [
     { key: 'n_bootstrap', label: 'Bootstrap replicates', kind: 'number' },
     { key: 'seed', label: 'Random seed', kind: 'number' },

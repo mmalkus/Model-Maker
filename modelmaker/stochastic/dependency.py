@@ -43,10 +43,18 @@ def cholesky_factor(corr: np.ndarray) -> np.ndarray:
         return np.linalg.cholesky(nearest_psd_correlation(corr))
 
 
+def sample_correlated_normal(corr: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
+    """Jointly normal (not uniform) correlated draws -- the Cholesky
+    ingredient shared by sample_gaussian_copula below and var_covar's
+    delta-gamma Monte Carlo, exposed directly for a Merton-style
+    multi-factor credit model (stochastic.credit), where the systematic
+    factors themselves are assumed jointly normal, not merely
+    rank-correlated via a copula."""
+    return rng.standard_normal((n, corr.shape[0])) @ cholesky_factor(corr).T
+
+
 def sample_gaussian_copula(corr: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
-    k = corr.shape[0]
-    z = rng.standard_normal((n, k)) @ cholesky_factor(corr).T
-    return stats.norm.cdf(z)
+    return stats.norm.cdf(sample_correlated_normal(corr, n, rng))
 
 
 def sample_t_copula(corr: np.ndarray, dof: float, n: int, rng: np.random.Generator) -> np.ndarray:
