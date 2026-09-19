@@ -178,6 +178,24 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'n_mc', label: 'Monte Carlo draws (non-normal methods)', kind: 'number' },
     { key: 'seed', label: 'Random seed', kind: 'number' },
   ],
+  // Graph fan-out (see /stochastic-engine-proposal.md S4). There's no
+  // FieldSpec kind for "pick another block on the canvas", so `collect`'s
+  // `iterate_block` param -- the id of its paired `iterate` block -- stays
+  // a plain text field; find the id from the `iterate` block's inspector
+  // panel. A visually distinguished fan-out region on the canvas itself is
+  // a follow-up (see the proposal's Implementation status section).
+  iterate: [
+    { key: 'n_iterations', label: 'Iterations', kind: 'number' },
+    { key: 'iterator', label: 'Iterator', kind: 'select', options: ['bootstrap_resample', 'scenario_row'] },
+    { key: 'seed', label: 'Random seed', kind: 'number' },
+  ],
+  collect: [
+    { key: 'iterate_block', label: "Paired 'iterate' block id", kind: 'text', placeholder: 'b_042' },
+    { key: 'reducer', label: 'Reducer', kind: 'select', options: ['concat', 'risk_measures'] },
+    { key: 'value_col', label: 'Value column (risk_measures)', kind: 'column' },
+    { key: 'n_bootstrap', label: 'Bootstrap replicates (risk_measures)', kind: 'number' },
+    { key: 'seed', label: 'Random seed (risk_measures)', kind: 'number' },
+  ],
 }
 
 function prettifyColumnParamLabel(key: string): string {

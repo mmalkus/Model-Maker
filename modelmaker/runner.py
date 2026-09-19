@@ -18,7 +18,7 @@ from .cache import CacheStore
 from .graph import BlockInstance, Graph
 from .metadata_transforms import resolve_metadata_transform
 from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
-from .run_worker import run_fused_group_entry, run_worker_entry
+from .run_worker import run_fused_group_entry, run_iteration_entry, run_worker_entry
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 Status = Literal["grey", "green", "orange", "red", "running"]
@@ -250,6 +250,11 @@ class Runner:
     # Ceiling on concurrent worker processes for one grouped run, regardless
     # of what an individual block's max_workers asks for.
     MAX_GROUP_WORKERS = 8
+    # Safety ceiling on a fan-out region's n_iterations (see
+    # _run_region_iterations) -- graph fan-out is the "N ~ 10^2-10^4"
+    # execution shape (stochastic-engine-proposal.md S3.5/S4); a vectorised
+    # simulation block (S5) is the tool for N ~ 10^6+, not this.
+    MAX_ITERATIONS = 10_000
 
     def __init__(
         self,
@@ -554,7 +559,19 @@ class Runner:
         st.last_attempt_key = key
         st.last_attempt_at = _now()
         try:
-            input_packets = self._gather_inputs(block_id, plan)
+            if block.category == "collect":
+                # A 'collect' block's real input isn't its wire's normal
+                # cached value (that's just the fan-out region's own
+                # single-preview-run output, computed like any other
+                # block) -- it's the N-times-iterated, concatenated result
+                # of the whole region between its paired 'iterate' block
+                # and itself. See _run_region_iterations for the actual
+                # fan-out execution (graph fan-out, stochastic-engine-
+                # proposal.md S4); everything from here on treats that
+                # packet exactly like a normal wired input.
+                input_packets = {"value": self._run_region_iterations(block_id, block, plan)}
+            else:
+                input_packets = self._gather_inputs(block_id, plan)
             plain_inputs = {
                 port: (p.data if isinstance(p, DataFramePacket) else p) for port, p in input_packets.items()
             }
@@ -898,6 +915,203 @@ class Runner:
             else:
                 combined.append(dict(zip(group_values, values)))
         return combined[0] if len(combined) == 1 else tuple(combined)
+
+    def _iterate_region(self, ib_id: str, cb_id: str, plan: RunPlan) -> list[str]:
+        """Topologically-ordered blocks in the fan-out region bounded by an
+        'iterate' block and its paired 'collect' block -- every block on
+        some path from `ib_id` to `cb_id` (the intersection of `ib_id`'s
+        descendants and `cb_id`'s ancestors), including `ib_id` itself but
+        excluding `cb_id`, which runs once, as the reducer, not once per
+        iteration."""
+        graph = plan.graph
+        region = graph.descendants([ib_id]) & graph.ancestors([cb_id])
+        region.discard(cb_id)
+        order = graph.topo_order()
+        return [b for b in order if b in region]
+
+    def _run_region_iterations(self, cb_id: str, cb_block: BlockInstance, plan: RunPlan) -> DataFramePacket:
+        """The graph-fan-out engine primitive (stochastic-engine-proposal.md
+        S4): runs the fan-out region between `cb_block`'s paired 'iterate'
+        block and `cb_block` itself once per iteration, each in its own
+        subprocess (see _dispatch_iterations), and concatenates whichever
+        value 'collect' is wired from across all of them into one dataframe
+        (tagged with an `iteration` column) -- the packet run_block then
+        treats as this block's ordinary 'value' input.
+
+        Cache-key note: this needs no changes to RunPlan.basis. `cb_block`'s
+        key already recurses into its 'value' wire's source block's own key
+        (see RunPlan.basis's `upstream` hashing), which recurses in turn
+        through the whole region back to the 'iterate' block -- exactly the
+        same mechanism that makes any ordinary multi-block chain's key
+        depend on everything upstream of it. n_iterations/iterator/seed live
+        in the 'iterate' block's own params, already part of its basis."""
+        ib_id = cb_block.params.get("iterate_block")
+        if not ib_id or ib_id not in plan.graph.blocks:
+            raise ValueError(f"'iterate_block' param must name an existing block id (got {ib_id!r})")
+        ib_block = plan.graph.blocks[ib_id]
+        if ib_block.category != "iterate":
+            raise ValueError(f"'iterate_block' {ib_id!r} is not an 'iterate' block")
+
+        region = self._iterate_region(ib_id, cb_id, plan)
+        if ib_id not in region:
+            raise ValueError(f"'{ib_id}' does not reach 'collect' block '{cb_id}' -- check the wiring between them")
+
+        for rid in region:
+            rblock = plan.graph.blocks[rid]
+            if rblock.block_type == "input":
+                raise ValueError(f"iterated region contains input block '{rid}' -- input blocks can't be re-run per iteration")
+            if rblock.group_by:
+                raise ValueError(f"iterated region contains grouped block '{rid}' -- group_by inside a fan-out region isn't supported yet")
+            if not self._is_current(rid, plan):
+                self.run_block(rid, plan)
+                if not self._is_current(rid, plan):
+                    raise RuntimeError(f"region block '{rid}' failed to run: {self._st(rid).last_error}")
+
+        value_wire = plan.graph.input_wires(cb_id).get("value")
+        if value_wire is None:
+            raise ValueError("'collect' block has no wire into its 'value' input")
+        if value_wire.from_block not in region:
+            raise ValueError("'collect' block's 'value' input must be wired from a block inside the iterated region")
+        source_block = plan.graph.blocks[value_wire.from_block]
+        source_spec = next((p for p in source_block.outputs if p.name == value_wire.from_port), None)
+        if source_spec is None or source_spec.type != "dataframe":
+            raise ValueError("'collect' block's 'value' input must be wired from a dataframe-typed output")
+        collect_source_port_index = next(i for i, p in enumerate(source_block.outputs) if p.name == value_wire.from_port)
+
+        steps: list[dict[str, Any]] = []
+        for rid in region:
+            rblock = plan.graph.blocks[rid]
+            fn = rblock.resolved_fn()
+            kwargs: dict[str, Any] = dict(rblock.params)
+            chain_inputs: dict[str, tuple[str, int]] = {}
+            input_schema_metas: list[dict] = []
+            for port, wire in plan.graph.input_wires(rid).items():
+                entry = self.cache.get(plan.key(wire.from_block))
+                if entry is None:
+                    raise RuntimeError(f"missing cached output for '{wire.from_block}'")
+                value = entry.outputs[wire.from_port]
+                if isinstance(value, DataFramePacket):
+                    input_schema_metas.append(value.schema_meta)
+                if wire.from_block in region:
+                    src_outputs = plan.graph.blocks[wire.from_block].outputs
+                    port_index = next(i for i, p in enumerate(src_outputs) if p.name == wire.from_port)
+                    chain_inputs[port] = (wire.from_block, port_index)
+                else:
+                    # Fixed across every iteration: a normal, already-green
+                    # value from outside the region, read once here exactly
+                    # like _gather_inputs does for an ordinary block.
+                    kwargs[port] = value.data if isinstance(value, DataFramePacket) else value
+            for role in ROLE_PARAM_NAMES:
+                role_param = find_role_param(fn, role)
+                if role_param is not None and role_param not in kwargs:
+                    resolved = resolve_role_column(input_schema_metas, role)
+                    if resolved is not None:
+                        kwargs[role_param] = resolved
+            if accepts_param(fn, "block_id"):
+                kwargs["block_id"] = rid
+            if rblock.block_type == "output" and accepts_param(fn, "output_dir"):
+                kwargs["output_dir"] = self.output_dir
+            steps.append(
+                {
+                    "id": rid,
+                    "category": rblock.category,
+                    "is_custom": rblock.is_custom,
+                    "code": rblock.code,
+                    "kwargs": kwargs,
+                    "chain_inputs": chain_inputs,
+                    "n_outputs": len(rblock.outputs),
+                    "wants_iteration_index": accepts_param(fn, "_iteration_index"),
+                }
+            )
+
+        n_iterations = int(ib_block.params.get("n_iterations", 100))
+        if n_iterations < 1:
+            raise ValueError("'n_iterations' must be >= 1")
+        if n_iterations > self.MAX_ITERATIONS:
+            raise ValueError(f"n_iterations={n_iterations} is over the {self.MAX_ITERATIONS}-iteration safety limit")
+        max_workers = max(1, min(cb_block.max_workers or self.MAX_GROUP_WORKERS, self.MAX_GROUP_WORKERS, n_iterations))
+
+        results = self._dispatch_iterations(cb_id, steps, value_wire.from_block, collect_source_port_index, n_iterations, max_workers)
+
+        frames = []
+        for i in range(n_iterations):
+            frame = results[i]
+            if not isinstance(frame, pl.DataFrame):
+                raise RuntimeError(f"iteration {i}'s collected value is not a dataframe (got {type(frame).__name__})")
+            frames.append(frame.with_columns(pl.lit(i).alias("iteration")))
+        combined = pl.concat(frames, how="diagonal_relaxed")
+        schema_meta = {name: ColumnMeta(dtype=str(combined.schema[name])) for name in combined.columns}
+        return DataFramePacket(data=combined, schema_meta=schema_meta).with_lineage(cb_id)
+
+    def _dispatch_iterations(
+        self,
+        block_id: str,
+        steps: list[dict[str, Any]],
+        collect_source_id: str,
+        collect_source_port_index: int,
+        n_iterations: int,
+        max_workers: int,
+    ) -> dict[int, Any]:
+        """Runs `steps` (the fan-out region -- see _run_region_iterations)
+        once per iteration index, each in its own subprocess via
+        run_iteration_entry, up to `max_workers` at a time -- same
+        isolation, cancellation, and crash-handling contract as _dispatch,
+        just retargeted at a whole region instead of a single block call."""
+        result_queue = MP_CONTEXT.Queue()
+        cancel_event = MP_CONTEXT.Event()
+        pending = list(range(n_iterations))
+        running: dict[int, Any] = {}
+        results: dict[int, Any] = {}
+        errors: dict[int, str] = {}
+
+        with self._active_lock:
+            self._active[block_id] = {"cancel_event": cancel_event, "started_at": time.monotonic()}
+
+        def _start_next() -> None:
+            while pending and len(running) < max(1, max_workers):
+                i = pending.pop(0)
+                p = MP_CONTEXT.Process(
+                    target=run_iteration_entry,
+                    args=(steps, i, collect_source_id, collect_source_port_index, result_queue, i),
+                    daemon=True,
+                )
+                p.start()
+                running[i] = p
+
+        try:
+            _start_next()
+            while running:
+                if cancel_event.is_set():
+                    raise RunCancelled("cancelled by user")
+                try:
+                    key, ok, payload = result_queue.get(timeout=POLL_INTERVAL)
+                except queue_mod.Empty:
+                    dead = [k for k, p in running.items() if not p.is_alive()]
+                    for k in dead:
+                        p = running.pop(k)
+                        errors[k] = f"worker process exited unexpectedly (code {p.exitcode}) -- likely out of memory or a crash"
+                    continue
+                proc = running.pop(key, None)
+                if proc is not None:
+                    proc.join(timeout=5)
+                if ok:
+                    results[key] = payload
+                else:
+                    errors[key] = payload
+                _start_next()
+        finally:
+            for p in running.values():
+                if p.is_alive():
+                    p.terminate()
+            for p in running.values():
+                p.join(timeout=5)
+            with self._active_lock:
+                self._active.pop(block_id, None)
+
+        if errors:
+            first_key, first_err = next(iter(errors.items()))
+            raise RuntimeError(f"{first_err} ({len(errors)}/{n_iterations} iteration(s) failed)")
+        return results
 
     def _run_fused_group(self, group: FusionGroup, plan: RunPlan, report: dict[str, str]) -> None:
         """Runs one fusion group (see _build_fusion_groups) end to end and

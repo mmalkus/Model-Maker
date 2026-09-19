@@ -223,6 +223,18 @@ def compile_graph(
         if not_ready and strict:
             raise CompileError(f"blocks not ready to compile (grey/red): {not_ready}")
 
+    # Graph fan-out (see blocks/stochastic.py's 'iterate'/'collect' and
+    # Runner._run_region_iterations) has no compiled form yet -- a
+    # 'collect' block's real behavior is "re-run this region N times",
+    # which the live engine drives at runtime, not the flat topological
+    # call-sequence this compiler emits. Refuse cleanly rather than emit a
+    # script that silently only runs one iteration.
+    fan_out = sorted(b for b in reachable if graph.blocks[b].category in ("iterate", "collect"))
+    if fan_out:
+        raise CompileError(
+            f"compiling a graph containing a fan-out region isn't supported yet (iterate/collect block(s): {fan_out})"
+        )
+
     order = [b for b in graph.topo_order() if b in reachable]
 
     # Streaming mode groups the compile set up front so both passes below

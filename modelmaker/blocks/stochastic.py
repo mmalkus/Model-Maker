@@ -536,3 +536,126 @@ register_block(
         metadata_transform=infer_dtypes,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# Graph fan-out (iterate / collect) -- stochastic-engine-proposal.md S4
+# ---------------------------------------------------------------------------
+#
+# An 'iterate' block and a matching 'collect' block (paired by the
+# collect's `iterate_block` param, naming the iterate block's id -- there's
+# no dedicated wire for the pairing itself, since a plain param is the same
+# convention every other block-execution modifier in this tool already
+# uses, e.g. group_by naming a column) bound a fan-out *region*: every
+# block on some path between them (see runner.Runner._iterate_region). The
+# region is re-run once per iteration, each in its own subprocess (see
+# Runner._run_region_iterations/_dispatch_iterations) -- the graph
+# fan-out engine primitive, as opposed to a vectorised simulation block's
+# in-process chunking (S5). Practical for N ~ 10^2-10^4 (bootstrap CIs,
+# scenario expansion); not the tool for N ~ 10^6+, which is what
+# simulate_op_risk_lda-style vectorised blocks are for.
+#
+# Both blocks are ordinary registry blocks with ordinary fn's -- there is
+# deliberately no engine magic in `iterate`/`collect` themselves. Run
+# outside a fan-out context (e.g. previewing the 'iterate' block on its
+# own), `iterate` just computes what iteration 0 looks like; the N-times
+# re-execution only happens when a 'collect' block wired to it actually
+# runs (see run_block's `block.category == "collect"` branch).
+#
+# Not yet supported (see stochastic-engine-proposal.md's Implementation
+# status): compiling a graph containing this pair to a standalone script
+# (compiler.compile_graph raises CompileError -- the seed hierarchy and
+# the loop shape both need their own compiled form, deferred); a
+# `group_by` block inside the region; an `iterator` other than
+# bootstrap_resample/scenario_row (a bare "reseed and rerun" iterator
+# doesn't fit this tool's params-are-literal-design-time-config model
+# without also inventing a way to wire a scalar into a param -- see the
+# proposal file for why that was scoped out).
+
+
+def iterate(
+    df: pl.DataFrame,
+    n_iterations: int = 100,
+    iterator: str = "bootstrap_resample",
+    seed: int = 0,
+    _iteration_index: int | None = None,
+    block_id: str | None = None,
+) -> pl.DataFrame:
+    from modelmaker.stochastic import seed as seed_mod
+
+    i = _iteration_index if _iteration_index is not None else 0
+    rng = seed_mod.spawn_rng(seed, [block_id or "iterate", f"iter_{i}"])
+    if iterator == "bootstrap_resample":
+        idx = rng.integers(0, df.height, size=df.height)
+        return df[idx]
+    if iterator == "scenario_row":
+        if i >= df.height:
+            raise ValueError(f"iteration index {i} is out of range for {df.height} scenario row(s) -- set n_iterations <= the scenario set's row count")
+        return df[i : i + 1]
+    raise ValueError(f"unknown iterator: {iterator!r} (use bootstrap_resample or scenario_row)")
+
+
+register_block(
+    BlockSpec(
+        category="iterate",
+        block_type="standard",
+        group="stochastic",
+        display_name="Iterate (fan-out)",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=iterate,
+        metadata_transform=passthrough,
+    )
+)
+
+
+def collect(
+    value: pl.DataFrame,
+    reducer: str = "concat",
+    value_col: str | None = None,
+    alpha_levels: list[float] | None = None,
+    n_bootstrap: int = 200,
+    seed: int = 0,
+    iterate_block: str = "",
+) -> tuple[pl.DataFrame, dict | None]:
+    """`value` is every iteration's collected value already concatenated,
+    with an `iteration` column prepended (see
+    Runner._run_region_iterations) -- this fn itself has no iteration
+    logic, it's an ordinary reducer over an ordinary dataframe.
+    `iterate_block` isn't read here (the Runner reads it directly off
+    block.params to find the paired 'iterate' block before this ever
+    runs) -- accepted only so it doesn't land as an unexpected kwarg."""
+    if reducer == "concat":
+        return value, None
+    if reducer == "risk_measures":
+        import numpy as np
+
+        from modelmaker.stochastic import accumulate
+
+        if not value_col:
+            raise ValueError("reducer='risk_measures' requires the 'value_col' param")
+        # [0.05, 0.5, 0.95] (median + a 90% band), not simulate_op_risk_lda's
+        # deep-tail defaults -- this reduces a *bootstrap estimate*'s spread
+        # across iterations, not a loss distribution's tail.
+        levels = list(alpha_levels) if alpha_levels else [0.05, 0.5, 0.95]
+        estimates = value[value_col].drop_nulls().to_numpy()
+        rng = np.random.default_rng(seed)
+        rm = accumulate.risk_measures(estimates, levels)
+        ci = {a: accumulate.bootstrap_quantile_ci(estimates, a, rng, n_boot=n_bootstrap) for a in levels}
+        result = {"kind": "simulation_result", "n_paths": len(estimates), **rm, "quantile_ci": {a: list(ci[a]) for a in levels}}
+        return value, result
+    raise ValueError(f"unknown reducer: {reducer!r} (use concat or risk_measures)")
+
+
+register_block(
+    BlockSpec(
+        category="collect",
+        block_type="standard",
+        group="stochastic",
+        display_name="Collect (fan-out)",
+        inputs=[PortSpec("value")],
+        outputs=[PortSpec("table"), PortSpec("simulation_result", type="simulation_result", required=False)],
+        fn=collect,
+        metadata_transform=infer_dtypes,
+    )
+)

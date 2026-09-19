@@ -30,12 +30,55 @@ including on the frontend (`PORT_BADGE`, palette group, `PARAM_SPECS`
 entries) — see `tests/test_stochastic_core.py`,
 `tests/test_stochastic_blocks.py`, and `tests/test_stochastic_runner.py`.
 
+**Phase 4, the graph fan-out engine primitive, is also built**: an
+`iterate`/`collect` block pair (paired by a plain param, `collect`'s
+`iterate_block` naming `iterate`'s block id — the same convention every
+other block-execution modifier already uses, e.g. `group_by` naming a
+column, rather than a dedicated wire or a new `BlockInstance` field). The
+fan-out region — every block on some path between the pair
+(`Graph.descendants(iterate) ∩ Graph.ancestors(collect)`, a new
+`Graph.descendants` symmetric to the existing `ancestors`) — is re-run
+once per iteration, each in its own subprocess
+(`Runner._run_region_iterations`/`_dispatch_iterations`, targeting a new
+`run_iteration_entry` worker analogous to `run_fused_group_entry`), and
+`collect` reduces whichever wire it's fed from across all iterations
+(`concat`, or `risk_measures` reusing `stochastic.accumulate` directly).
+Two supported iterators — `bootstrap_resample` and `scenario_row` — cover
+bootstrap CIs and scenario-set valuation (IFRS 9-style); a bare "reseed
+and rerun with everything else fixed" iterator was scoped out because it
+would need a way to wire a scalar into a downstream block's *param*, which
+doesn't exist here (every wire carries a whole value consumed by name, so
+"vary a param per iteration" only works when the varying thing is
+naturally the wired *data*, per this proposal's own reasoning in §4).
+
+The scope reduction that made this tractable: **no changes were needed to
+`RunPlan.basis`, cache keys, `topo_order`, `_sweep`, or `run_to_here`.**
+`collect`'s cache key already depends on the whole region through the
+existing recursive upstream-hashing every multi-block chain gets for free;
+interior region blocks still get an ordinary single-run "iteration 0"
+preview through the normal sweep, entirely independent of `collect`'s own
+N-times re-execution when its turn comes up. `compiler.compile_graph`
+refuses cleanly (`CompileError`) on a graph containing either block —
+compiling a loop is a real, separate feature (the seed hierarchy and the
+loop shape both need their own compiled form), not attempted here. A
+`group_by` block or an `input`-type block inside the region is rejected
+with a clear error rather than silently doing something odd. See
+`tests/test_stochastic_fan_out.py`.
+
+Not yet done, all pre-existing gaps this doesn't change: a canvas UX for
+the fan-out region itself (interior blocks currently look like any other
+wired block — no enclosing container, no "N replicates" wire badge; the
+frontend got only `PARAM_SPECS` entries, and `collect`'s `iterate_block`
+param is a plain text field naming a block id, not a picker); compiling a
+fan-out region to a script; a `fold` (k-fold CV) iterator (same shape as
+`bootstrap_resample`, just non-replacement + stratified, not built);
+reusing this primitive for `simulate_op_risk_lda`/`aggregate_simulation`'s
+own bootstrap CIs (they still use the local numpy resample from §6 — a
+reasonable follow-up now that fan-out exists, not done here to keep this
+change scoped to the primitive itself).
+
 **Deliberately deferred**, consistent with §10's own sequencing (each is
 called out at the point above where it would bite):
-- **Phase 4, the graph fan-out engine primitive** (`IterateBlock`/
-  `CollectBlock`, §4) — the one change to the core run/cache-key/compiler
-  machinery, correspondingly the highest blast-radius one to get wrong.
-  Bootstrap CIs here use a local numpy resample (§6) instead of fan-out.
 - LSMC and replicating-portfolio proxy methods (§8) — increments on the
   `ProxyFunctionPacket` interface once a real nested-simulation use case
   (CVA/XVA, insurance guarantees) pulls for them.
