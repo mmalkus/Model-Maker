@@ -44,6 +44,7 @@ def run_worker_entry(
             # other block module the running app has loaded) must be
             # imported explicitly here too, mirroring what api.py does at
             # startup, or BLOCK_REGISTRY simply won't have `category` yet.
+            import modelmaker.blocks.data_quality  # noqa: F401
             import modelmaker.blocks.feature_analysis  # noqa: F401
             import modelmaker.blocks.library  # noqa: F401
             import modelmaker.blocks.modelling  # noqa: F401
