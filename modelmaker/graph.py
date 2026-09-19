@@ -167,6 +167,22 @@ class Graph:
             stack.extend(self.predecessors(b))
         return seen
 
+    def descendants(self, block_ids: list[str]) -> set[str]:
+        """Symmetric to ancestors() -- includes each of `block_ids` itself.
+        Used by Runner._iterate_region to find the fan-out region between an
+        'iterate' block and its paired 'collect' block: the intersection of
+        this block's descendants and the collect block's ancestors is every
+        block on some path between them."""
+        seen: set[str] = set()
+        stack = list(block_ids)
+        while stack:
+            b = stack.pop()
+            if b in seen:
+                continue
+            seen.add(b)
+            stack.extend(self.successors(b))
+        return seen
+
     def creates_cycle(self, from_block: str, to_block: str) -> bool:
         """Would a wire from_block -> to_block create a cycle? True if
         to_block is already an ancestor of from_block (including

@@ -40,12 +40,13 @@ function InlineAdd({ placeholder, onSubmit }: { placeholder: string; onSubmit: (
   )
 }
 
-const GROUP_ORDER = ['input', 'standard', 'quality', 'modelling', 'tests', 'output']
+const GROUP_ORDER = ['input', 'standard', 'quality', 'modelling', 'stochastic', 'tests', 'output']
 const GROUP_LABELS: Record<string, string> = {
   input: 'Input',
   standard: 'Standard',
   quality: 'Data quality',
   modelling: 'Modelling',
+  stochastic: 'Stochastic',
   tests: 'Tests',
   output: 'Output',
 }

@@ -49,6 +49,7 @@ def run_worker_entry(
             import modelmaker.blocks.library  # noqa: F401
             import modelmaker.blocks.modelling  # noqa: F401
             import modelmaker.blocks.stat_tests  # noqa: F401
+            import modelmaker.blocks.stochastic  # noqa: F401
             from .blocks.base import BLOCK_REGISTRY
 
             fn = BLOCK_REGISTRY[category].fn
@@ -143,3 +144,67 @@ def run_fused_group_entry(
         step = steps[idx] if 0 <= idx < len(steps) else None
         where = f"step {idx} ({step['category']}, block {step['id']!r})" if step else "step ?"
         result_queue.put((task_key, False, f"{where}: {type(e).__name__}: {e}"))
+
+
+def run_iteration_entry(
+    steps: list[dict[str, Any]],
+    iteration_index: int,
+    collect_source_id: str,
+    collect_source_port_index: int,
+    result_queue: Any,
+    task_key: Any,
+) -> None:
+    """Entry point for one iteration of a fan-out region (see
+    Runner._run_region_iterations/_dispatch_iterations in runner.py) --
+    runs every step in `steps` (topologically ordered, one per region
+    block) as an *ordinary* block call in this one subprocess, unlike
+    run_fused_group_entry above, which is specifically for the handful of
+    Polars-lazy-fusable blocks (filter/select/join/...). Each step's own
+    return value is threaded into whichever later step's `chain_inputs`
+    names it, by block id -- there's no lazy plan here, just plain
+    eager calls in order, exactly like run_worker_entry's single call,
+    repeated for every block in the region.
+
+    Each `steps[i]` is `{"id", "category", "is_custom", "code", "kwargs",
+    "chain_inputs", "n_outputs", "wants_iteration_index"}`: `kwargs` is
+    every param and already-resolved external (outside-the-region) input
+    this step's fn needs; `chain_inputs` maps a kwarg name to
+    `(source_block_id, source_output_index)` for a value produced by an
+    earlier step in this same iteration. `wants_iteration_index` mirrors
+    the block_id/output_dir injection convention in runner.run_block --
+    true only for a block whose fn accepts `_iteration_index` (the
+    'iterate' block itself, and any other region block that wants to draw
+    its own per-iteration randomness).
+
+    Reports back only the single value the 'collect' block is wired from
+    -- `outputs_by_id[collect_source_id][collect_source_port_index]` --
+    not the whole region's output, since concatenating that one value
+    across iterations is all the parent (_run_region_iterations) needs.
+    Never raises into the parent, same contract as the entry points above."""
+    import modelmaker.blocks.feature_analysis  # noqa: F401
+    import modelmaker.blocks.library  # noqa: F401
+    import modelmaker.blocks.modelling  # noqa: F401
+    import modelmaker.blocks.stat_tests  # noqa: F401
+    import modelmaker.blocks.stochastic  # noqa: F401
+
+    from .blocks.base import BLOCK_REGISTRY
+    from .graph import _compile_code_to_fn
+
+    idx = -1
+    outputs_by_id: dict[str, tuple[Any, ...]] = {}
+    try:
+        for idx, step in enumerate(steps):
+            kwargs = dict(step["kwargs"])
+            for port, (src_id, src_port_index) in step["chain_inputs"].items():
+                kwargs[port] = outputs_by_id[src_id][src_port_index]
+            if step["wants_iteration_index"]:
+                kwargs["_iteration_index"] = iteration_index
+            fn = _compile_code_to_fn(step["code"] or "") if step["is_custom"] else BLOCK_REGISTRY[step["category"]].fn
+            raw = fn(**kwargs)
+            n_out = step["n_outputs"]
+            outputs_by_id[step["id"]] = (raw,) if n_out <= 1 else tuple(raw)
+        result_queue.put((task_key, True, outputs_by_id[collect_source_id][collect_source_port_index]))
+    except BaseException as e:  # noqa: BLE001 -- must reach the queue, not crash the worker silently
+        step = steps[idx] if 0 <= idx < len(steps) else None
+        where = f"step {idx} ({step['category']}, block {step['id']!r})" if step else "step ?"
+        result_queue.put((task_key, False, f"iteration {iteration_index}, {where}: {type(e).__name__}: {e}"))

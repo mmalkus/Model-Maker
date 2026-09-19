@@ -22,6 +22,7 @@ from .blocks import feature_analysis as _feature_analysis  # noqa: F401
 from .blocks import library as _library  # noqa: F401
 from .blocks import modelling as _modelling  # noqa: F401
 from .blocks import stat_tests as _stat_tests  # noqa: F401
+from .blocks import stochastic as _stochastic  # noqa: F401
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
 from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
