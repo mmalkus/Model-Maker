@@ -1,5 +1,18 @@
 export type Status = 'grey' | 'green' | 'orange' | 'red' | 'running'
-export type PortType = 'dataframe' | 'model' | 'scalar_metric' | 'image' | 'master_scale' | 'any'
+export type PortType =
+  | 'dataframe'
+  | 'model'
+  | 'scalar_metric'
+  | 'image'
+  | 'master_scale'
+  | 'any'
+  // Stochastic engine port types (see /stochastic-engine-proposal.md) --
+  // each is a plain JSON-shaped dict, rendered by PortDataView's generic
+  // JSON fallback view exactly like 'model'/'scalar_metric' already are.
+  | 'distribution'
+  | 'dependency'
+  | 'proxy_function'
+  | 'simulation_result'
 export type BlockType = 'input' | 'standard' | 'output'
 
 export interface PortSpec {

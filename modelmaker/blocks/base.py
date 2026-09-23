@@ -3,7 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-PortType = Literal["dataframe", "model", "scalar_metric", "image", "master_scale", "any"]
+PortType = Literal[
+    "dataframe",
+    "model",
+    "scalar_metric",
+    "image",
+    "master_scale",
+    "any",
+    # Stochastic engine port types (see /stochastic-engine-proposal.md S2) --
+    # each is a plain JSON-shaped dict, same "no special deserializer"
+    # convention as "model" above, not a custom packet class.
+    "distribution",
+    "dependency",
+    "proxy_function",
+    "simulation_result",
+]
 # Pipeline role only -- governs runtime behavior (input blocks need no
 # upstream and support refresh/probe; output blocks may take an injected
 # output_dir). Orthogonal to where a block's code comes from: see
