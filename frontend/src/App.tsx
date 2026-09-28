@@ -103,7 +103,16 @@ function AppInner() {
     api.graph().then((g) => {
       setGraph(g)
       const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort)
-      setBlockNodes(nextBlockNodes)
+      // Carry over React Flow's measured size and selection: the run poll
+      // reloads every 200ms, and fresh nodes without `measured` are hidden
+      // until re-measured, which blinks the whole canvas.
+      setBlockNodes((prev) => {
+        const prevById = new Map(prev.map((n) => [n.id, n]))
+        return nextBlockNodes.map((n) => {
+          const old = prevById.get(n.id)
+          return old ? { ...n, measured: old.measured, selected: old.selected } : n
+        })
+      })
       // fit the view to the actual blocks (not the oversized lane bands) once,
       // on first load -- re-fitting on every later reload would yank the
       // viewport out from under someone mid-edit.
