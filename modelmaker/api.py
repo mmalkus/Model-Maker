@@ -4,19 +4,24 @@ import functools
 import inspect
 import os
 import re
+import secrets
 
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
+from .agent.build import AgentBuild, BuildOptions, LLMChoice
+from .agent.controller import BuildController, BuildError
+from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
+from .agent.tools import tools_for_phase
 from .blocks import data_quality as _data_quality  # noqa: F401
 from .blocks import feature_analysis as _feature_analysis  # noqa: F401
 from .blocks import library as _library  # noqa: F401
@@ -233,6 +238,10 @@ class LLMSettingsUpdate(BaseModel):
     # write-only: GET/PUT never echo a raw key back, only whether one is set
     # (see _redacted_provider_settings).
     settings: dict[str, dict[str, Any]] | None = None
+    # The AI builder's plan and build LLMs: {"provider": ..., "model": ...};
+    # a null/empty field resets it to the default (active provider / its model).
+    agent_plan: dict[str, Any] | None = None
+    agent_build: dict[str, Any] | None = None
 
 
 # ---- helpers -------------------------------------------------------------
@@ -289,6 +298,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "port_names": block.port_names,
         "group_by": block.group_by,
         "max_workers": block.max_workers,
+        "provenance": block.provenance,
         "status": status,
         "last_error": st.last_error if st else None,
         "last_successful_read_at": st.last_successful_read_at if st else None,
@@ -975,13 +985,27 @@ def _effective_llm_settings() -> dict[str, Any]:
             or os.environ.get("MODELMAKER_LLM_MODEL")
             or _anthropic_provider.DEFAULT_MODEL,
         )
+    active = LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
+
+    def agent_choice(stored: dict[str, Any]) -> dict[str, Any]:
+        provider = stored.get("provider") or active
+        model = stored.get("model") or settings.get(provider, {}).get("model")
+        return {"provider": provider, "model": model, "provider_set": "provider" in stored, "model_set": "model" in stored}
+
     return {
         "providers": sorted(LLM_PROVIDER_REGISTRY),
-        "active_provider": LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli"),
+        "active_provider": active,
         # Tri-state: null means "each provider's own default" (on for LM
         # Studio, off elsewhere) rather than an explicit choice.
         "include_reference": LLM_SETTINGS.include_reference,
         "settings": settings,
+        # The AI builder's two LLMs, resolved (see agent_llm_choice), plus
+        # which providers can drive a build at all (tool calling).
+        "agent": {
+            "plan": agent_choice(LLM_SETTINGS.agent_plan),
+            "build": agent_choice(LLM_SETTINGS.agent_build),
+            "capable_providers": list(AGENT_CAPABLE_PROVIDERS),
+        },
     }
 
 
@@ -994,7 +1018,11 @@ def get_llm_settings() -> dict[str, Any]:
 def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
     if req.active_provider is not None and req.active_provider not in LLM_PROVIDER_REGISTRY:
         raise HTTPException(400, f"unknown LLM provider: {req.active_provider}")
-    LLM_SETTINGS.update(req.active_provider, req.include_reference, req.settings)
+    for choice in (req.agent_plan, req.agent_build):
+        provider = (choice or {}).get("provider")
+        if provider and provider not in AGENT_CAPABLE_PROVIDERS:
+            raise HTTPException(400, f"{provider} can't drive an AI build; use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}")
+    LLM_SETTINGS.update(req.active_provider, req.include_reference, req.settings, req.agent_plan, req.agent_build)
     return _effective_llm_settings()
 
 
@@ -1381,6 +1409,165 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
                     suffix += 1
 
     return {**_block_out(block_id), "explanation": result.explanation}
+
+
+# ---- AI model builder (see /agent-builder-proposal.md) ----------------------
+
+
+def agent_llm_choice(stored: dict[str, Any], override: dict[str, Any] | None) -> LLMChoice:
+    """Resolve the plan or build LLM: a per-build override, else Settings'
+    AI-builder choice, else the active provider -- with the model falling
+    back to that provider's configured model (else the loop's default)."""
+    provider = (override or {}).get("provider") or stored.get("provider") or LLM_SETTINGS.active_provider or os.environ.get(
+        "MODELMAKER_LLM_PROVIDER", "claude_cli"
+    )
+    model = (override or {}).get("model") or stored.get("model") or LLM_SETTINGS.for_provider(provider).get("model")
+    return LLMChoice(provider=provider, model=model)
+
+
+def _agent_loop_factory(choice: LLMChoice, phase: str) -> AgentLoop:
+    return make_loop(
+        choice.provider or "claude_cli",
+        choice.model,
+        api_base_url=_AGENT_CALLBACK["url"],
+        token=AGENT.token or "",
+        api_key=_resolve_api_key(choice.provider or ""),
+    )
+
+
+AGENT = BuildController(lambda: SESSION, RUN_SLOT, _agent_loop_factory)
+# Where the claude CLI loop's MCP bridge calls back to -- this server's own
+# address, taken from the request that started the build (the Vite proxy
+# rewrites Host to it; see vite.config.ts), overridable for unusual setups.
+_AGENT_CALLBACK: dict[str, str] = {"url": ""}
+
+# Mutating endpoints that stay open while a build is changing the graph:
+# the agent's own routes, and things that don't touch the graph.
+_AGENT_LOCK_ALLOWED = ("/api/agent/", "/api/llm/", "/api/env_vars/", "/api/project/save", "/api/check_all_sources")
+
+
+@app.middleware("http")
+async def _agent_canvas_lock(request: Request, call_next):
+    """§7: while an AI build is building, the graph is the build's -- user
+    edits (and user-started runs, undo, loading another project) get a
+    409 until it ends or is stopped. Reads always go through."""
+    if (
+        request.method in ("POST", "PUT", "PATCH", "DELETE")
+        and request.url.path.startswith("/api/")
+        and not request.url.path.startswith(_AGENT_LOCK_ALLOWED)
+        and AGENT.canvas_locked()
+    ):
+        return JSONResponse({"detail": "an AI build is in progress -- stop it to edit the graph"}, status_code=409)
+    return await call_next(request)
+
+
+class AgentLLMChoice(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+
+
+class AgentBuildStart(BaseModel):
+    goal: str
+    anchors: list[str]
+    plan_llm: AgentLLMChoice | None = None
+    build_llm: AgentLLMChoice | None = None
+    final_full_run: bool = True
+    # None = decide from the data size; 0 = never sample.
+    sample_rows: int | None = None
+
+
+class AgentText(BaseModel):
+    text: str
+
+
+class AgentToolCall(BaseModel):
+    name: str
+    args: dict[str, Any] = {}
+
+
+def _agent_call(fn: Callable[[], Any], cursor: int = 0) -> dict[str, Any]:
+    try:
+        build = fn()
+    except BuildError as e:
+        raise HTTPException(409, str(e))
+    return build.to_dict(cursor)
+
+
+@app.post("/api/agent/builds")
+def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
+    plan = agent_llm_choice(LLM_SETTINGS.agent_plan, req.plan_llm.model_dump() if req.plan_llm else None)
+    build = agent_llm_choice(LLM_SETTINGS.agent_build, req.build_llm.model_dump() if req.build_llm else None)
+    for choice in (plan, build):
+        if choice.provider not in AGENT_CAPABLE_PROVIDERS:
+            raise HTTPException(
+                400, f"{choice.provider} can't drive an AI build; pick one of {', '.join(AGENT_CAPABLE_PROVIDERS)} in Settings"
+            )
+    _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
+    options = BuildOptions(final_full_run=req.final_full_run, sample_rows=req.sample_rows)
+    return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
+
+
+@app.get("/api/agent/builds/current")
+def agent_current(cursor: int = 0) -> dict[str, Any]:
+    if AGENT.build is None:
+        return {"build": None}
+    return {"build": AGENT.build.to_dict(cursor), "busy": AGENT._busy(), "canvas_locked": AGENT.canvas_locked()}
+
+
+@app.post("/api/agent/builds/current/recheck")
+def agent_recheck() -> dict[str, Any]:
+    return _agent_call(AGENT.recheck)
+
+
+@app.post("/api/agent/builds/current/run_upstream")
+def agent_run_upstream() -> dict[str, Any]:
+    return _agent_call(AGENT.run_upstream)
+
+
+@app.post("/api/agent/builds/current/proceed")
+def agent_proceed() -> dict[str, Any]:
+    return _agent_call(AGENT.proceed)
+
+
+@app.post("/api/agent/builds/current/feedback")
+def agent_feedback(req: AgentText) -> dict[str, Any]:
+    return _agent_call(lambda: AGENT.feedback(req.text))
+
+
+@app.post("/api/agent/builds/current/approve")
+def agent_approve() -> dict[str, Any]:
+    return _agent_call(AGENT.approve)
+
+
+@app.post("/api/agent/builds/current/stop")
+def agent_stop() -> dict[str, Any]:
+    return _agent_call(AGENT.stop)
+
+
+@app.post("/api/agent/builds/current/discard")
+def agent_discard() -> dict[str, Any]:
+    return _agent_call(AGENT.discard)
+
+
+def _require_agent_token(token: str | None) -> AgentBuild:
+    build = AGENT.build
+    if build is None or not AGENT.token or not secrets.compare_digest(token or "", AGENT.token):
+        raise HTTPException(403, "not the current AI build's token")
+    return build
+
+
+@app.get("/api/agent/mcp/tools")
+def agent_mcp_tools(x_agent_token: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    """The MCP bridge's tool list (see agent/mcp_server.py): the tools for
+    the build's current phase."""
+    build = _require_agent_token(x_agent_token)
+    return [t.definition() for t in tools_for_phase(build.phase)]
+
+
+@app.post("/api/agent/mcp/call")
+def agent_mcp_call(req: AgentToolCall, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
+    build = _require_agent_token(x_agent_token)
+    return build.call_tool(req.name, req.args)
 
 
 # Serve the built frontend (from `npm run build` in frontend/, which emits

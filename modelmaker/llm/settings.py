@@ -25,15 +25,33 @@ class LLMSettingsStore:
     # Global include-Polars-reference toggle (see DraftContext.include_reference),
     # applied across every provider's draft calls. None = each provider's own default.
     include_reference: bool | None = None
+    # The AI builder's two LLMs (see /agent-builder-proposal.md §9.1), each
+    # {"provider": ..., "model": ...} with either key optional -- unset
+    # means the active provider and that provider's configured model.
+    agent_plan: dict[str, Any] = field(default_factory=dict)
+    agent_build: dict[str, Any] = field(default_factory=dict)
 
     def for_provider(self, name: str) -> dict[str, Any]:
         return self.per_provider.get(name, {})
 
-    def update(self, active_provider: str | None, include_reference: bool | None, settings: dict[str, dict[str, Any]] | None) -> None:
+    def update(
+        self,
+        active_provider: str | None,
+        include_reference: bool | None,
+        settings: dict[str, dict[str, Any]] | None,
+        agent_plan: dict[str, Any] | None = None,
+        agent_build: dict[str, Any] | None = None,
+    ) -> None:
         if active_provider is not None:
             self.active_provider = active_provider
         if include_reference is not None:
             self.include_reference = include_reference
+        for slot, values in ((self.agent_plan, agent_plan), (self.agent_build, agent_build)):
+            for key, value in (values or {}).items():
+                if value in (None, ""):
+                    slot.pop(key, None)
+                else:
+                    slot[key] = value
         for name, values in (settings or {}).items():
             slot = self.per_provider.setdefault(name, {})
             for key, value in values.items():
