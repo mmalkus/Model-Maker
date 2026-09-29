@@ -546,6 +546,28 @@ class ProjectSession:
         self.graph.artifacts[artifact.id] = artifact
         return artifact
 
+    def upsert_artifact(self, kind: str, block_id: str, port: str, title: str, document: str, key: str | None = None) -> Artifact:
+        """Create or replace a generated document of any `kind` (e.g. an AI
+        build's report). With `key`, the artifact's id is derived from it,
+        so writing the same key again replaces that document in place;
+        without one, every call adds a new artifact."""
+        now = datetime.now(timezone.utc).isoformat()
+        artifact_id = f"art_{kind}_{key}" if key else new_id("art")
+        existing = self.graph.artifacts.get(artifact_id)
+        artifact = Artifact(
+            id=artifact_id,
+            kind=kind,
+            title=existing.title if existing else title,
+            block_id=block_id,
+            port=port,
+            document=document,
+            source_key=self.runner.compute_key(block_id),
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        self.graph.artifacts[artifact_id] = artifact
+        return artifact
+
     def rename_artifact(self, artifact_id: str, title: str) -> Artifact:
         artifact = self.graph.artifacts[artifact_id]
         artifact.title = title
