@@ -149,7 +149,7 @@ def test_agent_llm_settings(client):
     s = c.get("/api/llm/settings").json()["agent"]
     assert s["plan"]["provider"] == "claude_cli" and not s["plan"]["provider_set"]
     assert "claude_cli" in s["capable_providers"]
-    bad = c.put("/api/llm/settings", json={"agent_plan": {"provider": "lmstudio"}})
+    bad = c.put("/api/llm/settings", json={"agent_plan": {"provider": "stub"}})
     assert bad.status_code == 400
     ok = c.put("/api/llm/settings", json={"agent_plan": {"provider": "anthropic", "model": "claude-opus-5"}}).json()["agent"]
     assert ok["plan"] == {"provider": "anthropic", "model": "claude-opus-5", "provider_set": True, "model_set": True}
@@ -160,7 +160,7 @@ def test_agent_llm_settings(client):
 
 def test_start_refuses_providers_that_cant_drive_a_build(client, monkeypatch):
     c = client
-    monkeypatch.setattr(api, "LLM_SETTINGS", LLMSettingsStore(active_provider="lmstudio"))
+    monkeypatch.setattr(api, "LLM_SETTINGS", LLMSettingsStore(active_provider="stub"))
     r = c.post("/api/agent/builds", json={"goal": "x", "anchors": [c.anchor]})
     assert r.status_code == 400 and "can't drive" in r.json()["detail"]
     r = c.post(

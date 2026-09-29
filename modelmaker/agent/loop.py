@@ -99,7 +99,14 @@ class AnthropicLoop(AgentLoop):
         return self._run(build, tools)
 
     def resume(self, build, prompt, tools):
-        self.messages.append({"role": "user", "content": prompt})
+        # A turn that ended on a terminal tool leaves a trailing user turn
+        # (the tool results) -- add the new text to it rather than sending
+        # two user turns in a row.
+        last = self.messages[-1] if self.messages else None
+        if last and last["role"] == "user" and isinstance(last["content"], list):
+            last["content"].append({"type": "text", "text": prompt})
+        else:
+            self.messages.append({"role": "user", "content": prompt})
         return self._run(build, tools)
 
     def _run(self, build: AgentBuild, tools: list[Tool]) -> LoopOutcome:
@@ -136,6 +143,8 @@ class AnthropicLoop(AgentLoop):
                     }
                 )
             self.messages.append({"role": "user", "content": results})
+            if build.turn_over:
+                break
         return LoopOutcome(final_text=final)
 
 
@@ -144,10 +153,12 @@ class AnthropicLoop(AgentLoop):
 HTTP_TIMEOUT_SECONDS = 300
 
 
-def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], what: str) -> dict[str, Any]:
+def _post_json(
+    url: str, payload: dict[str, Any], headers: dict[str, str], what: str, timeout: float | None = None
+) -> dict[str, Any]:
     """POST JSON with the standard library (same approach as the openai/gemini
     draft providers -- no extra packages), with errors worded for the user."""
-    timeout = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", HTTP_TIMEOUT_SECONDS))
+    timeout = timeout or float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", HTTP_TIMEOUT_SECONDS))
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", **headers}, method="POST"
     )
@@ -183,6 +194,16 @@ class OpenAILoop(AgentLoop):
     token cap is sent: current reasoning models reject non-default values
     for both, and every compatible server has a sensible default."""
 
+    # Subclass knobs (see LMStudioLoop): a compact system prompt, a context
+    # budget in tokens that old tool results get elided to stay under, and
+    # a cap on each tool result's length. Off for hosted APIs, whose
+    # context windows dwarf a build.
+    compact = False
+    context_tokens: int | None = None
+    max_result_chars: int | None = None
+    timeout_seconds: float | None = None
+    what = "OpenAI-compatible endpoint"
+
     def __init__(self, model: str | None = None, api_key: str | None = None, base_url: str | None = None) -> None:
         from ..llm import openai_provider
 
@@ -195,6 +216,9 @@ class OpenAILoop(AgentLoop):
             raise RuntimeError("no model configured for openai -- set one in Settings (or for this build)")
         self.messages: list[dict[str, Any]] = []
 
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
     def start(self, build, system, prompt, tools):
         self.messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
         return self._run(build, tools)
@@ -203,6 +227,36 @@ class OpenAILoop(AgentLoop):
         self.messages.append({"role": "user", "content": prompt})
         return self._run(build, tools)
 
+    def _fit_context(self, build: AgentBuild, defs: list[dict[str, Any]]) -> None:
+        """Keep the conversation inside `context_tokens`: estimate its size
+        (~3 chars/token, deliberately pessimistic), and while it's over ~85%
+        of the budget, replace the oldest tool results with a stub. The
+        model keeps every call it made and everything it wrote -- it just
+        can't re-read old outputs, and can call the tool again."""
+        if not self.context_tokens:
+            return
+        budget = self.context_tokens * 0.85
+
+        def size() -> float:
+            return (len(json.dumps(self.messages)) + len(json.dumps(defs))) / 3
+
+        if size() <= budget:
+            return
+        # Never elide the results the model is about to read (after its last turn).
+        last_assistant = max((i for i, m in enumerate(self.messages) if m.get("role") == "assistant"), default=0)
+        elided = 0
+        for m in self.messages[:last_assistant]:
+            if size() <= budget:
+                break
+            if m.get("role") == "tool" and not m.get("_elided"):
+                m["content"] = json.dumps(
+                    {"elided": "older tool result removed to fit the context window -- call the tool again if you need it"}
+                )
+                m["_elided"] = True
+                elided += 1
+        if elided:
+            build.log("context", note=f"elided {elided} old tool result(s) to fit a {self.context_tokens}-token context")
+
     def _run(self, build: AgentBuild, tools: list[Tool]) -> LoopOutcome:
         defs = [
             {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.schema}}
@@ -210,11 +264,19 @@ class OpenAILoop(AgentLoop):
         ]
         final = ""
         while not build.stop_requested:
-            payload: dict[str, Any] = {"model": self.model, "messages": self.messages}
+            self._fit_context(build, defs)
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "messages": [{k: v for k, v in m.items() if not k.startswith("_")} for m in self.messages],
+            }
             if defs:
                 payload["tools"] = defs
             response = _post_json(
-                f"{self.base_url}/chat/completions", payload, {"Authorization": f"Bearer {self.api_key}"}, self.base_url
+                f"{self.base_url}/chat/completions",
+                payload,
+                self._headers(),
+                f"{self.what} at {self.base_url}",
+                self.timeout_seconds,
             )
             usage = response.get("usage") or {}
             build.usage["input_tokens"] += usage.get("prompt_tokens") or 0
@@ -223,9 +285,13 @@ class OpenAILoop(AgentLoop):
                 message = response["choices"][0]["message"]
             except (KeyError, IndexError) as e:
                 raise RuntimeError(f"response missing expected fields: {str(response)[:500]}") from e
-            # Echo the assistant turn back verbatim (tool_calls and all) -- the
-            # API requires each tool result to follow the call it answers.
-            self.messages.append({k: v for k, v in message.items() if v is not None})
+            # Echo the assistant turn back (tool_calls and all) -- the API
+            # requires each tool result to follow the call it answers. Minus
+            # any reasoning trace: it only costs context, and some compatible
+            # servers (e.g. DeepSeek's) reject it being sent back.
+            self.messages.append(
+                {k: v for k, v in message.items() if v is not None and k not in ("reasoning_content", "reasoning")}
+            )
             text = (message.get("content") or "").strip()
             if text:
                 final = text
@@ -237,8 +303,60 @@ class OpenAILoop(AgentLoop):
                 fn = call.get("function") or {}
                 args, err = _parse_args(fn.get("arguments"))
                 result = {"error": err} if err else build.call_tool(fn.get("name", ""), args)
-                self.messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, default=str)})
+                content = json.dumps(result, default=str)
+                if self.max_result_chars and len(content) > self.max_result_chars:
+                    content = content[: self.max_result_chars] + " ...[truncated to fit the context window]"
+                self.messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
+            if build.turn_over:
+                break
         return LoopOutcome(final_text=final)
+
+
+class LMStudioLoop(OpenAILoop):
+    """Local models behind an OpenAI-compatible server: LM Studio, or
+    llama.cpp's llama-server (started with --jinja, which tool calling
+    needs), Ollama's /v1, vLLM... Uses the lmstudio provider's settings --
+    base URL (default http://localhost:1234/v1), and a model that's
+    auto-detected when unset. No API key.
+
+    Local models tend to have small context windows and generate slowly,
+    so this runs in compact mode: a short block catalogue in the system
+    prompt (the model reads details with describe_block_type), tool
+    results capped in length, old results elided to stay within the
+    window, and long request timeouts. The window size comes from
+    MODELMAKER_LLM_CONTEXT_TOKENS, else the server's own report of it
+    (llama.cpp's /v1/models carries n_ctx), else a conservative 16k."""
+
+    compact = True
+    max_result_chars = 6000
+    what = "local model server"
+    DEFAULT_CONTEXT_TOKENS = 16384
+
+    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+        from ..llm import lmstudio_provider
+
+        self.base_url = (base_url or os.environ.get("MODELMAKER_LLM_BASE_URL", lmstudio_provider.DEFAULT_BASE_URL)).rstrip("/")
+        self.api_key = None
+        self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", 900))
+        self.messages = []
+        models = self._server_models()
+        self.model = model or os.environ.get("MODELMAKER_LLM_MODEL") or (models[0]["id"] if models else None)
+        if not self.model:
+            raise RuntimeError(f"the server at {self.base_url} reports no models -- load one, or set a model in Settings")
+        env_ctx = os.environ.get("MODELMAKER_LLM_CONTEXT_TOKENS")
+        served = next((m for m in models if m.get("id") == self.model), models[0] if models else {})
+        n_ctx = (served.get("meta") or {}).get("n_ctx")
+        self.context_tokens = int(env_ctx) if env_ctx else int(n_ctx) if n_ctx else self.DEFAULT_CONTEXT_TOKENS
+
+    def _server_models(self) -> list[dict[str, Any]]:
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/models", timeout=10) as resp:
+                return list(json.load(resp).get("data") or [])
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise RuntimeError(
+                f"could not reach the local model server at {self.base_url} -- is it running "
+                "(LM Studio > Developer > Start Server, or llama-server --jinja)? Check the base URL in Settings."
+            ) from e
 
 
 class GeminiLoop(AgentLoop):
@@ -272,7 +390,11 @@ class GeminiLoop(AgentLoop):
         return self._run(build, tools)
 
     def resume(self, build, prompt, tools):
-        self.contents.append({"role": "user", "parts": [{"text": prompt}]})
+        last = self.contents[-1] if self.contents else None
+        if last and last["role"] == "user":
+            last["parts"].append({"text": prompt})  # after a terminal tool's functionResponse
+        else:
+            self.contents.append({"role": "user", "parts": [{"text": prompt}]})
         return self._run(build, tools)
 
     def _run(self, build: AgentBuild, tools: list[Tool]) -> LoopOutcome:
@@ -313,6 +435,8 @@ class GeminiLoop(AgentLoop):
                     fr["id"] = call["id"]
                 responses.append({"functionResponse": fr})
             self.contents.append({"role": "user", "parts": responses})
+            if build.turn_over:
+                break
         return LoopOutcome(final_text=final)
 
 
@@ -452,7 +576,7 @@ class ClaudeCliLoop(AgentLoop):
 
 # ---- factory ---------------------------------------------------------------------------
 
-AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini")
+AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini", "lmstudio")
 
 
 def make_loop(
@@ -475,6 +599,8 @@ def make_loop(
         return OpenAILoop(model, api_key=api_key, base_url=base_url)
     if provider == "gemini":
         return GeminiLoop(model, api_key=api_key, base_url=base_url)
+    if provider == "lmstudio":
+        return LMStudioLoop(model, base_url=base_url)
     raise ValueError(
         f"provider {provider!r} can't drive an AI build yet (tool calling isn't wired up for it); "
         f"use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}"

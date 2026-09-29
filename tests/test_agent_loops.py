@@ -27,12 +27,18 @@ class FakeEndpoint:
     """Serves `responses` in order (each a dict, or a callable of the request
     body returning one) and records (path, headers, body) per request."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, models=None):
         self.responses = list(responses)
         self.requests: list[tuple[str, dict, dict]] = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 -- /models, for local-server auto-detection
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"data": models or []}).encode())
+
             def do_POST(self):  # noqa: N802
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.requests.append((self.path, dict(self.headers), body))
@@ -101,7 +107,6 @@ def test_openai_loop_plans_through_the_tools(planning_build):
             _oa_message("Looking around.", [("c1", "get_graph", "{}"), ("c2", "describe_block_type", '{"category": "train_test_split"}')]),
             _oa_message(None, [("c3", "submit_plan", "{not json")]),
             _oa_message(None, [("c4", "submit_plan", json.dumps({"plan": _plan(anchor)}))]),
-            _oa_message("Plan submitted."),
         ]
     )
     try:
@@ -110,9 +115,10 @@ def test_openai_loop_plans_through_the_tools(planning_build):
     finally:
         fake.close()
 
-    assert outcome.final_text == "Plan submitted."
+    # A successful submit_plan ends the turn -- no extra request for a closing remark.
+    assert len(fake.requests) == 3 and outcome.final_text == "Looking around."
     assert b.phase == AWAITING_APPROVAL and b.plan["steps"][0]["ref"] == "s1"
-    assert b.usage["input_tokens"] == 40 and b.usage["output_tokens"] == 20
+    assert b.usage["input_tokens"] == 30 and b.usage["output_tokens"] == 15
 
     path, headers, first = fake.requests[0]
     assert path == "/v1/chat/completions" and headers["Authorization"] == "Bearer sk-test"
@@ -178,8 +184,7 @@ def test_gemini_loop_plans_through_the_tools(planning_build):
                     {"functionCall": {"name": "no_such_tool", "args": {}}},
                 ]
             ),
-            _gm([{"functionCall": {"name": "submit_plan", "args": {"plan": _plan(anchor)}}}]),
-            _gm([{"text": "Plan submitted."}]),
+            _gm([{"text": "Submitting."}, {"functionCall": {"name": "submit_plan", "args": {"plan": _plan(anchor)}}}]),
         ]
     )
     try:
@@ -188,9 +193,9 @@ def test_gemini_loop_plans_through_the_tools(planning_build):
     finally:
         fake.close()
 
-    assert outcome.final_text == "Plan submitted."
+    assert len(fake.requests) == 2 and outcome.final_text == "Submitting."
     assert b.phase == AWAITING_APPROVAL
-    assert b.usage["input_tokens"] == 21 and b.usage["output_tokens"] == 9
+    assert b.usage["input_tokens"] == 14 and b.usage["output_tokens"] == 6
     assert all(e.get("text") != "thinking..." for e in b.events_since(0) if e["kind"] == "assistant")
 
     path, headers, first = fake.requests[0]
@@ -238,6 +243,78 @@ def test_stopped_build_makes_no_requests(planning_build):
     assert fake.requests == []
 
 
+# ---- LM Studio / llama.cpp (local, compact mode) --------------------------------------
+
+LOCAL_MODELS = [{"id": "local-27b.gguf", "meta": {"n_ctx": 16384}}]
+
+
+def test_lmstudio_loop_detects_model_and_context_and_sends_no_key(planning_build, monkeypatch):
+    monkeypatch.delenv("MODELMAKER_LLM_MODEL", raising=False)
+    monkeypatch.delenv("MODELMAKER_LLM_CONTEXT_TOKENS", raising=False)
+    b, anchor = planning_build
+    reply = _oa_message("done")
+    reply["choices"][0]["message"]["reasoning_content"] = "long private reasoning " * 50
+    fake = FakeEndpoint([_oa_message(None, [("c1", "get_graph", "{}")]), reply, _oa_message("ok")], models=LOCAL_MODELS)
+    try:
+        loop = make_loop("lmstudio", None, api_base_url="", token="", base_url=fake.url + "/v1")
+        assert loop.compact and loop.model == "local-27b.gguf" and loop.context_tokens == 16384
+        loop.start(b, "S", "P", tools_for_phase(PLANNING))
+        loop.resume(b, "again", tools_for_phase(PLANNING))
+    finally:
+        fake.close()
+    path, headers, body = fake.requests[0]
+    assert path == "/v1/chat/completions" and body["model"] == "local-27b.gguf"
+    assert "authorization" not in {k.lower() for k in headers}
+    # The reasoning trace isn't echoed back into the conversation.
+    assert "reasoning_content" not in json.dumps(fake.requests[-1][2]["messages"])
+
+
+def test_lmstudio_loop_keeps_within_the_context_window(planning_build, monkeypatch):
+    monkeypatch.setenv("MODELMAKER_LLM_CONTEXT_TOKENS", "3000")
+    b, anchor = planning_build
+    calls = [_oa_message(None, [(f"c{i}", "describe_block_type", '{"category": "logistic_regression"}')]) for i in range(6)]
+    fake = FakeEndpoint([*calls, _oa_message("done")], models=LOCAL_MODELS)
+    try:
+        loop = make_loop("lmstudio", "local-27b.gguf", api_base_url="", token="", base_url=fake.url)
+        loop.start(b, "S", "P", [])
+    finally:
+        fake.close()
+    last = fake.requests[-1][2]["messages"]
+    tool_msgs = [m for m in last if m["role"] == "tool"]
+    assert len(tool_msgs) == 6
+    assert any("elided" in m["content"] for m in tool_msgs)  # old results stubbed out
+    assert "elided" not in tool_msgs[-1]["content"]  # the newest one is intact
+    assert all("_elided" not in m for m in last)  # bookkeeping never sent
+    assert len(json.dumps(last)) / 3 <= 3000
+    assert any(e["kind"] == "context" for e in b.events_since(0))
+
+
+def test_lmstudio_loop_caps_long_tool_results(planning_build):
+    b, _ = planning_build
+    fake = FakeEndpoint([_oa_message(None, [("c1", "list_block_types", "{}")]), _oa_message("done")], models=LOCAL_MODELS)
+    try:
+        loop = make_loop("lmstudio", None, api_base_url="", token="", base_url=fake.url)
+        loop.start(b, "S", "P", tools_for_phase(PLANNING))
+    finally:
+        fake.close()
+    tool_msg = fake.requests[-1][2]["messages"][-1]
+    assert tool_msg["role"] == "tool" and len(tool_msg["content"]) < 6100 and tool_msg["content"].endswith("window]")
+
+
+def test_lmstudio_unreachable_server_is_a_clear_error():
+    with pytest.raises(RuntimeError, match="could not reach the local model server"):
+        make_loop("lmstudio", None, api_base_url="", token="", base_url="http://127.0.0.1:9/v1")
+
+
+def test_compact_catalogue_lists_blocks_by_category():
+    from modelmaker.agent import prompts
+
+    compact, full = prompts._catalogue_context(True), prompts._catalogue_context(False)
+    assert len(compact) * 8 < len(full)
+    assert "- modelling: " in compact and "logistic_regression" in compact and "list_block_types" in compact
+    assert "read_csv" not in compact  # disallowed blocks stay out either way
+
+
 # ---- configuration -----------------------------------------------------------------
 
 
@@ -272,4 +349,26 @@ def test_start_endpoint_rejects_an_unconfigured_provider_up_front(tmp_path, monk
     assert api.AGENT.build is None
     # Settings key + model make it acceptable (still no network call at start).
     api.LLM_SETTINGS.update(None, None, {"openai": {"api_key": "sk-x", "model": "gpt-x"}})
-    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini"]
+    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini", "lmstudio"]
+
+
+def test_resume_after_a_terminal_tool_merges_into_the_trailing_user_turn(planning_build):
+    """The turn ended on submit_plan's result; feedback is appended to that
+    same user turn rather than sent as a second user turn in a row."""
+    b, anchor = planning_build
+    fake = FakeEndpoint(
+        [
+            _gm([{"functionCall": {"name": "submit_plan", "args": {"plan": _plan(anchor)}}}]),
+            _gm([{"text": "revised"}]),
+        ]
+    )
+    try:
+        loop = GeminiLoop("gemini-test", api_key="g-key", base_url=fake.url)
+        loop.start(b, "S", "P", tools_for_phase(PLANNING))
+        b.phase = PLANNING
+        loop.resume(b, "FEEDBACK", tools_for_phase(PLANNING))
+    finally:
+        fake.close()
+    contents = fake.requests[-1][2]["contents"]
+    assert [c["role"] for c in contents] == ["user", "model", "user"]
+    assert "functionResponse" in contents[-1]["parts"][0] and contents[-1]["parts"][-1] == {"text": "FEEDBACK"}

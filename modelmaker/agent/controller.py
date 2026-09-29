@@ -153,9 +153,18 @@ class BuildController:
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
+    def _require_idle(self) -> None:
+        """Checked before any state changes -- a request that has to wait
+        for the model must not leave half its effects behind."""
+        if self._busy():
+            raise BuildError("the AI is still finishing its turn -- try again in a moment")
+
     def _spawn(self, fn: Callable[[], None]) -> None:
         if self._busy():
             raise BuildError("the AI is still working -- wait for it, or stop the build")
+
+        if self.build is not None:
+            self.build.turn_over = False
 
         def target() -> None:
             try:
@@ -246,7 +255,7 @@ class BuildController:
             # Created on the worker, so a failure (missing key, no CLI)
             # ends the build as failed with its message, via _spawn.
             self._plan_loop = self.loop_factory(b.plan_llm, "plan")
-            outcome = self._plan_loop.start(b, prompts.plan_system(b), prompts.plan_prompt(b), tools_for_phase(PLANNING))
+            outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), tools_for_phase(PLANNING))
             self._after_plan_turn(outcome)
 
         self._spawn(work)
@@ -270,6 +279,7 @@ class BuildController:
         """Plan feedback (re-plan), or the answer to an ask_user question."""
         with self._lock:
             b = self._require(AWAITING_APPROVAL, AWAITING_INPUT)
+            self._require_idle()
             if not text.strip():
                 raise BuildError("write some feedback")
             if b.phase == AWAITING_APPROVAL:
@@ -298,6 +308,7 @@ class BuildController:
     def approve(self) -> AgentBuild:
         with self._lock:
             b = self._require(AWAITING_APPROVAL)
+            self._require_idle()
             if b.plan is None:
                 raise BuildError("there's no plan to approve -- send feedback to have the AI plan again")
             if b.plan.get("questions"):
@@ -314,7 +325,7 @@ class BuildController:
 
             def work() -> None:
                 self._build_loop = self.loop_factory(b.build_llm, "build")
-                outcome = self._build_loop.start(b, prompts.build_system(b), prompts.build_prompt(b), tools_for_phase(BUILDING))
+                outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
                 self._after_build_turn(outcome)
 
             self._spawn(work)

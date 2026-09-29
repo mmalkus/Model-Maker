@@ -122,8 +122,8 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
         <>
           <Header build={build} busy={busy} />
           {build.phase === 'preflight' && <Preflight build={build} graph={graph} act={act} />}
-          {build.phase === 'awaiting_approval' && <PlanReview build={build} graph={graph} act={act} />}
-          {build.phase === 'awaiting_input' && <Question build={build} act={act} />}
+          {build.phase === 'awaiting_approval' && <PlanReview build={build} graph={graph} act={act} busy={busy} />}
+          {build.phase === 'awaiting_input' && <Question build={build} act={act} busy={busy} />}
           <div style={{ display: 'flex', gap: 6, margin: '4px 0 8px' }}>
             {build.phase !== 'preflight' && build.phase !== 'awaiting_approval' && (
               <button onClick={() => act(() => api.agentAction('stop'))} title="Stop after the current step; keeps what's built (one Undo reverts it)">
@@ -167,7 +167,7 @@ function StartForm({
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
-  const capable = llmSettings?.agent.capable_providers ?? ['claude_cli', 'anthropic', 'openai', 'gemini']
+  const capable = llmSettings?.agent.capable_providers ?? ['claude_cli', 'anthropic', 'openai', 'gemini', 'lmstudio']
 
   return (
     <div>
@@ -329,7 +329,10 @@ function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; ac
   )
 }
 
-function PlanReview({ build, graph, act }: { build: BuildOut; graph: GraphOut; act: Act }) {
+// `busy`: the model is still finishing its turn (e.g. a slow local model
+// writing a closing remark after submitting) -- the server refuses to act
+// until it's done, so the buttons wait too.
+function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: GraphOut; act: Act; busy: boolean }) {
   const [feedback, setFeedback] = useState('')
   const plan = build.plan
   return (
@@ -345,7 +348,7 @@ function PlanReview({ build, graph, act }: { build: BuildOut; graph: GraphOut; a
       />
       <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
         <button
-          disabled={!feedback.trim()}
+          disabled={busy || !feedback.trim()}
           onClick={() => {
             act(() => api.agentFeedback(feedback))
             setFeedback('')
@@ -355,7 +358,7 @@ function PlanReview({ build, graph, act }: { build: BuildOut; graph: GraphOut; a
         </button>
         <button
           className="brand-primary"
-          disabled={!plan || (plan.questions?.length ?? 0) > 0}
+          disabled={busy || !plan || (plan.questions?.length ?? 0) > 0}
           onClick={() => act(() => api.agentAction('approve'))}
           title="Let the AI build this plan"
         >
@@ -424,7 +427,7 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
   )
 }
 
-function Question({ build, act }: { build: BuildOut; act: Act }) {
+function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boolean }) {
   const [answer, setAnswer] = useState('')
   return (
     <div>
@@ -433,7 +436,7 @@ function Question({ build, act }: { build: BuildOut; act: Act }) {
       <button
         className="brand-primary"
         style={{ marginTop: 6 }}
-        disabled={!answer.trim()}
+        disabled={busy || !answer.trim()}
         onClick={() => {
           act(() => api.agentFeedback(answer))
           setAnswer('')

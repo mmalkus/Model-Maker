@@ -447,3 +447,35 @@ def test_tool_call_limit_stops_the_build(prepared):
     b.call_tool("get_graph", {})
     r = b.call_tool("get_graph", {})
     assert r.get("stopped") and b.stop_requested
+
+
+def test_approve_while_the_ai_is_still_finishing_its_turn_changes_nothing(prepared):
+    """Regression: approving while the planner's turn was still running used
+    to flip the phase and open the undo transaction before refusing, leaving
+    a build stuck in 'building' with nothing running."""
+    import threading
+
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    release = threading.Event()
+
+    def slow_plan(call):
+        plan_turn(call)
+        release.wait(30)  # a slow model still writing its closing remark
+        return "done"
+
+    controller = make_controller(session, {"plan": [slow_plan]})
+    b = start(controller, anchor)
+    for _ in range(300):
+        if b.phase == AWAITING_APPROVAL:
+            break
+        threading.Event().wait(0.1)
+    lanes_before = set(session.graph.lanes)
+    with pytest.raises(BuildError, match="finishing its turn"):
+        controller.approve()
+    assert b.phase == AWAITING_APPROVAL and set(session.graph.lanes) == lanes_before
+    assert controller._transaction is None and session._transaction_depth == 0  # nothing opened
+    release.set()
+    controller.join(30)
+    controller.approve()  # now fine
+    assert b.phase in (BUILDING, AWAITING_INPUT)

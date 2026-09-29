@@ -107,13 +107,30 @@ def _anchor_context(build: AgentBuild) -> str:
     return "\n".join(lines) or "- (none)"
 
 
-def _catalogue_context() -> str:
+def _catalogue_context(compact: bool = False) -> str:
+    """The registry blocks for the system prompt. Full: one line per block
+    with ports and summary (~5k tokens). Compact, for small-context local
+    models (see loop.LMStudioLoop): just the block names per category
+    (~200 tokens) -- the model pulls a category's ports and summaries with
+    list_block_types(group=...), or one block's params with
+    describe_block_type, only for what the goal needs."""
+    entries = catalogue.list_block_types()
+    if compact:
+        groups: dict[str, list[str]] = {}
+        for e in entries:
+            groups.setdefault(e["group"], []).append(e["category"])
+        lines = [f"- {g}: {', '.join(cats)}" for g, cats in groups.items()]
+        return (
+            "## Registry blocks by category\n"
+            "Call list_block_types with group=<category> for ports and summaries, and "
+            "describe_block_type for a block's params, before using it.\n" + "\n".join(lines)
+        )
     lines = []
-    for e in catalogue.list_block_types():
+    for e in entries:
         ins = ", ".join(f"{p['name']}:{p['type']}" for p in e["inputs"]) or "-"
         outs = ", ".join(f"{p['name']}:{p['type']}" for p in e["outputs"]) or "-"
         lines.append(f"- {e['category']} [{e['group']}] ({ins}) -> ({outs}): {e['summary']}")
-    return "\n".join(lines)
+    return "## Registry blocks\n" + "\n".join(lines)
 
 
 def _preflight_context(build: AgentBuild) -> str:
@@ -124,8 +141,8 @@ def _preflight_context(build: AgentBuild) -> str:
     return f"\n\nPreflight warnings the user chose to proceed past:\n{body}"
 
 
-def plan_system(build: AgentBuild) -> str:
-    return "\n\n".join([COMMON, CUSTOM_CONTRACT, PLAN_INSTRUCTIONS, "## Registry blocks\n" + _catalogue_context()])
+def plan_system(build: AgentBuild, compact: bool = False) -> str:
+    return "\n\n".join([COMMON, CUSTOM_CONTRACT, PLAN_INSTRUCTIONS, _catalogue_context(compact)])
 
 
 def plan_prompt(build: AgentBuild) -> str:
@@ -142,7 +159,7 @@ def plan_feedback_prompt(feedback: str) -> str:
     )
 
 
-def build_system(build: AgentBuild) -> str:
+def build_system(build: AgentBuild, compact: bool = False) -> str:
     if build.sample_rows_used:
         sample_note = f"a {build.sample_rows_used:,}-row sample of the data"
     else:
@@ -152,7 +169,7 @@ def build_system(build: AgentBuild) -> str:
             COMMON,
             CUSTOM_CONTRACT,
             BUILD_INSTRUCTIONS.format(sample_note=sample_note),
-            "## Registry blocks\n" + _catalogue_context(),
+            _catalogue_context(compact),
         ]
     )
 

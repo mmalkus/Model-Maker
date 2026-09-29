@@ -120,6 +120,11 @@ class AgentBuild:
         self.sample_rows_used: int | None = None
         self.changed_sample_mode = False  # the build turned sample mode on (and must turn it off)
         self.finished = False  # the model called finish
+        # Set by a successful terminal tool (submit_plan, ask_user,
+        # finish): the loop ends the model's turn right there instead of
+        # asking it for a closing remark -- which on a slow local model
+        # can take a minute, during which the user could already act.
+        self.turn_over = False
 
         self.counters = {"plan_tool_calls": 0, "build_tool_calls": 0, "custom_blocks": 0}
         self.failures: dict[str, int] = {}

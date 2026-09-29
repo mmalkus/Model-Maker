@@ -447,6 +447,7 @@ def submit_plan(b: AgentBuild, plan: dict[str, Any]) -> dict[str, Any]:
     layout_plan(b, plan)
     b.plan = plan
     b.set_phase(AWAITING_APPROVAL)
+    b.turn_over = True
     return {"ok": True, "message": "Plan submitted for the user's review. End your turn now."}
 
 
@@ -803,6 +804,7 @@ def note_deviation(b: AgentBuild, what: str, why: str, plan_step: str | None = N
 def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
     b.pending_question = question
     b.set_phase(AWAITING_INPUT)
+    b.turn_over = True
     return {"ok": True, "message": "Question sent to the user. End your turn now."}
 
 
@@ -831,4 +833,5 @@ def finish(b: AgentBuild, report: str, key_outputs: list[dict[str, Any]] | None 
     b.report = report
     b.key_outputs = list(key_outputs or [])
     b.finished = True
+    b.turn_over = True
     return {"ok": True, "message": "Build finished. End your turn now."}
