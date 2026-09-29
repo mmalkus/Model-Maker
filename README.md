@@ -241,8 +241,11 @@ Guardrails are enforced by the tools, not just the prompt:
   are all capped.
 
 Builds run on `claude_cli` (your existing Claude login, via a small MCP
-bridge) or `anthropic`. **Settings → AI builder** picks a separate plan LLM
-and build LLM, and each build can override them.
+bridge), `anthropic`, `openai` (or any OpenAI-compatible endpoint that
+supports tool calling, via its base URL), or `gemini`. They use the same
+keys, models and base URLs as in the LLM provider settings above. **Settings
+→ AI builder** picks a separate plan LLM and build LLM, and each build can
+override them. `lmstudio` can't drive a build yet.
 
 ## Project structure
 

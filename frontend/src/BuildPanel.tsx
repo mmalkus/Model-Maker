@@ -167,7 +167,7 @@ function StartForm({
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
-  const capable = llmSettings?.agent.capable_providers ?? ['claude_cli', 'anthropic']
+  const capable = llmSettings?.agent.capable_providers ?? ['claude_cli', 'anthropic', 'openai', 'gemini']
 
   return (
     <div>

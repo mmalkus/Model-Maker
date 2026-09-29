@@ -241,9 +241,11 @@ class BuildController:
     def _start_planning(self) -> None:
         b = self.build
         b.set_phase(PLANNING)
-        self._plan_loop = self.loop_factory(b.plan_llm, "plan")
 
         def work() -> None:
+            # Created on the worker, so a failure (missing key, no CLI)
+            # ends the build as failed with its message, via _spawn.
+            self._plan_loop = self.loop_factory(b.plan_llm, "plan")
             outcome = self._plan_loop.start(b, prompts.plan_system(b), prompts.plan_prompt(b), tools_for_phase(PLANNING))
             self._after_plan_turn(outcome)
 
@@ -309,9 +311,9 @@ class BuildController:
             self._maybe_sample()
             for lane in b.plan.get("lanes") or []:
                 resolve_lane(b, lane["key"])
-            self._build_loop = self.loop_factory(b.build_llm, "build")
 
             def work() -> None:
+                self._build_loop = self.loop_factory(b.build_llm, "build")
                 outcome = self._build_loop.start(b, prompts.build_system(b), prompts.build_prompt(b), tools_for_phase(BUILDING))
                 self._after_build_turn(outcome)
 

@@ -78,13 +78,32 @@ Where the implementation differs from the text below:
   URL the build was started from. `MODELMAKER_AGENT_CALLBACK_URL` overrides
   that.
 
+**`openai` and `gemini` loops** are built too, over plain HTTPS (standard
+library only, like their draft providers), with the same keys, models and
+base URLs as Settings:
+- **OpenAI:** `OpenAILoop` uses `/chat/completions` with `tools`. It sends
+  no `temperature` and no token cap, because current reasoning models reject
+  non-default values for both.
+- **Gemini:** `GeminiLoop` uses `generateContent` with
+  `functionDeclarations`. It passes schemas as `parametersJsonSchema`,
+  because the OpenAPI-subset `parameters` rejects `additionalProperties` and
+  property-less objects. It echoes each model turn back unchanged so
+  thinking models' thought signatures survive, and it sends the key in the
+  `x-goog-api-key` header rather than the URL.
+- **Start-time check:** `POST /api/agent/builds` constructs both loops once
+  up front, so a missing key or model is a 400 immediately rather than a
+  failed build later.
+- **Tests:** `tests/test_agent_loops.py` drives both loops against a local
+  fake endpoint with scripted vendor responses. It checks our side of the
+  wire format, but not that the real services accept it.
+
 Not yet done:
-- **Providers:** agent loops for `openai`, `gemini` and `lmstudio`. They
-  are refused with a clear message, and only `claude_cli` and `anthropic`
-  can drive a build.
-- **The live Anthropic-API test** (phase 2), which needs an API key. The
-  `AnthropicLoop` is written but has only been exercised through the same
-  tool layer, not against the real API.
+- **LM Studio:** `lmstudio` can't drive a build yet. Its server is
+  OpenAI-compatible, so it's likely `OpenAILoop` pointed at its base URL,
+  but small local models are unreliable at multi-step tool calling, so it
+  needs trying first.
+- **Live tests** of the Anthropic, OpenAI and Gemini loops against the
+  real APIs, which need keys. Only `claude_cli` has run a real build.
 - **Phase 5 follow-ons:** `iterate`/`collect` in the catalogue, "improve
   this model" builds, and the build id in compiled-script block markers.
 

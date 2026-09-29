@@ -1426,12 +1426,14 @@ def agent_llm_choice(stored: dict[str, Any], override: dict[str, Any] | None) ->
 
 
 def _agent_loop_factory(choice: LLMChoice, phase: str) -> AgentLoop:
+    provider = choice.provider or "claude_cli"
     return make_loop(
-        choice.provider or "claude_cli",
+        provider,
         choice.model,
         api_base_url=_AGENT_CALLBACK["url"],
         token=AGENT.token or "",
-        api_key=_resolve_api_key(choice.provider or ""),
+        api_key=_resolve_api_key(provider),
+        base_url=LLM_SETTINGS.for_provider(provider).get("base_url"),
     )
 
 
@@ -1497,11 +1499,17 @@ def _agent_call(fn: Callable[[], Any], cursor: int = 0) -> dict[str, Any]:
 def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
     plan = agent_llm_choice(LLM_SETTINGS.agent_plan, req.plan_llm.model_dump() if req.plan_llm else None)
     build = agent_llm_choice(LLM_SETTINGS.agent_build, req.build_llm.model_dump() if req.build_llm else None)
-    for choice in (plan, build):
+    for label, choice in (("plan", plan), ("build", build)):
         if choice.provider not in AGENT_CAPABLE_PROVIDERS:
             raise HTTPException(
                 400, f"{choice.provider} can't drive an AI build; pick one of {', '.join(AGENT_CAPABLE_PROVIDERS)} in Settings"
             )
+        # Construct the loop once up front (no network call) so a missing
+        # API key / model / CLI is a clear 400 now, not a failed build later.
+        try:
+            AGENT.loop_factory(choice, label)
+        except Exception as e:  # noqa: BLE001 -- each SDK raises its own type for a missing key
+            raise HTTPException(400, f"{label} LLM ({choice.provider}): {e}")
     _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
     options = BuildOptions(final_full_run=req.final_full_run, sample_rows=req.sample_rows)
     return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))

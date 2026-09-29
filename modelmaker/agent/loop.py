@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,6 +136,183 @@ class AnthropicLoop(AgentLoop):
                     }
                 )
             self.messages.append({"role": "user", "content": results})
+        return LoopOutcome(final_text=final)
+
+
+# ---- OpenAI-compatible chat completions and Gemini (plain HTTPS) ------------------
+
+HTTP_TIMEOUT_SECONDS = 300
+
+
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], what: str) -> dict[str, Any]:
+    """POST JSON with the standard library (same approach as the openai/gemini
+    draft providers -- no extra packages), with errors worded for the user."""
+    timeout = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", HTTP_TIMEOUT_SECONDS))
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", **headers}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:800]
+        raise RuntimeError(f"{what} returned HTTP {e.code}: {body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"could not reach {what} -- check the base URL and network access") from e
+    except TimeoutError as e:
+        raise RuntimeError(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
+
+
+def _parse_args(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Tool-call arguments arrive as a JSON string (OpenAI) or an object
+    (Gemini); a model occasionally emits malformed JSON, which goes back to
+    it as a tool error rather than failing the build."""
+    if isinstance(raw, dict):
+        return raw, None
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError as e:
+        return None, f"arguments weren't valid JSON ({e}) -- call the tool again with valid JSON"
+    return (parsed, None) if isinstance(parsed, dict) else (None, "arguments must be a JSON object")
+
+
+class OpenAILoop(AgentLoop):
+    """Tool-use loop over an OpenAI-compatible /chat/completions endpoint --
+    the real OpenAI API by default, or any compatible service via base_url
+    (the same setting the openai draft provider uses). No temperature or
+    token cap is sent: current reasoning models reject non-default values
+    for both, and every compatible server has a sensible default."""
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, base_url: str | None = None) -> None:
+        from ..llm import openai_provider
+
+        self.base_url = (base_url or os.environ.get("MODELMAKER_OPENAI_BASE_URL", openai_provider.DEFAULT_BASE_URL)).rstrip("/")
+        self.api_key = api_key or os.environ.get("MODELMAKER_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.model = model or os.environ.get("MODELMAKER_LLM_MODEL")
+        if not self.api_key:
+            raise RuntimeError("no OpenAI API key configured -- set one in Settings, or export OPENAI_API_KEY")
+        if not self.model:
+            raise RuntimeError("no model configured for openai -- set one in Settings (or for this build)")
+        self.messages: list[dict[str, Any]] = []
+
+    def start(self, build, system, prompt, tools):
+        self.messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        return self._run(build, tools)
+
+    def resume(self, build, prompt, tools):
+        self.messages.append({"role": "user", "content": prompt})
+        return self._run(build, tools)
+
+    def _run(self, build: AgentBuild, tools: list[Tool]) -> LoopOutcome:
+        defs = [
+            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.schema}}
+            for t in tools
+        ]
+        final = ""
+        while not build.stop_requested:
+            payload: dict[str, Any] = {"model": self.model, "messages": self.messages}
+            if defs:
+                payload["tools"] = defs
+            response = _post_json(
+                f"{self.base_url}/chat/completions", payload, {"Authorization": f"Bearer {self.api_key}"}, self.base_url
+            )
+            usage = response.get("usage") or {}
+            build.usage["input_tokens"] += usage.get("prompt_tokens") or 0
+            build.usage["output_tokens"] += usage.get("completion_tokens") or 0
+            try:
+                message = response["choices"][0]["message"]
+            except (KeyError, IndexError) as e:
+                raise RuntimeError(f"response missing expected fields: {str(response)[:500]}") from e
+            # Echo the assistant turn back verbatim (tool_calls and all) -- the
+            # API requires each tool result to follow the call it answers.
+            self.messages.append({k: v for k, v in message.items() if v is not None})
+            text = (message.get("content") or "").strip()
+            if text:
+                final = text
+                build.log("assistant", text=text)
+            calls = message.get("tool_calls") or []
+            if not calls:
+                break
+            for call in calls:
+                fn = call.get("function") or {}
+                args, err = _parse_args(fn.get("arguments"))
+                result = {"error": err} if err else build.call_tool(fn.get("name", ""), args)
+                self.messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, default=str)})
+        return LoopOutcome(final_text=final)
+
+
+class GeminiLoop(AgentLoop):
+    """Function-calling loop over the Gemini API's generateContent. Tool
+    schemas go in `parametersJsonSchema` (full JSON Schema) rather than the
+    OpenAPI-subset `parameters`, which rejects e.g. additionalProperties
+    and property-less objects. Each model turn is echoed back unchanged, so
+    thinking models' thought signatures survive into the next request."""
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, base_url: str | None = None) -> None:
+        from ..llm import gemini_provider
+
+        self.base_url = (base_url or os.environ.get("MODELMAKER_GEMINI_BASE_URL", gemini_provider.DEFAULT_BASE_URL)).rstrip("/")
+        self.api_key = (
+            api_key
+            or os.environ.get("MODELMAKER_GEMINI_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+        )
+        self.model = model or os.environ.get("MODELMAKER_LLM_MODEL")
+        if not self.api_key:
+            raise RuntimeError("no Gemini API key configured -- set one in Settings, or export GEMINI_API_KEY")
+        if not self.model:
+            raise RuntimeError("no model configured for gemini -- set one in Settings (or for this build)")
+        self.system = ""
+        self.contents: list[dict[str, Any]] = []
+
+    def start(self, build, system, prompt, tools):
+        self.system = system
+        self.contents = [{"role": "user", "parts": [{"text": prompt}]}]
+        return self._run(build, tools)
+
+    def resume(self, build, prompt, tools):
+        self.contents.append({"role": "user", "parts": [{"text": prompt}]})
+        return self._run(build, tools)
+
+    def _run(self, build: AgentBuild, tools: list[Tool]) -> LoopOutcome:
+        decls = [{"name": t.name, "description": t.description, "parametersJsonSchema": t.schema} for t in tools]
+        final = ""
+        while not build.stop_requested:
+            payload: dict[str, Any] = {"system_instruction": {"parts": [{"text": self.system}]}, "contents": self.contents}
+            if decls:
+                payload["tools"] = [{"functionDeclarations": decls}]
+            response = _post_json(
+                f"{self.base_url}/models/{self.model}:generateContent",
+                payload,
+                {"x-goog-api-key": self.api_key},
+                "Gemini API",
+            )
+            usage = response.get("usageMetadata") or {}
+            build.usage["input_tokens"] += usage.get("promptTokenCount") or 0
+            build.usage["output_tokens"] += (usage.get("candidatesTokenCount") or 0) + (usage.get("thoughtsTokenCount") or 0)
+            try:
+                content = response["candidates"][0].get("content") or {"role": "model", "parts": []}
+            except (KeyError, IndexError) as e:
+                raise RuntimeError(f"response missing expected fields: {str(response)[:500]}") from e
+            parts = content.get("parts") or []
+            self.contents.append({"role": "model", "parts": parts})
+            texts = [p["text"] for p in parts if p.get("text", "").strip() and not p.get("thought")]
+            if texts:
+                final = "\n".join(texts)
+                build.log("assistant", text=final)
+            calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            if not calls:
+                break
+            responses = []
+            for call in calls:
+                args, err = _parse_args(call.get("args") or {})
+                result = {"error": err} if err else build.call_tool(call.get("name", ""), args)
+                fr: dict[str, Any] = {"name": call.get("name", ""), "response": result}
+                if call.get("id"):
+                    fr["id"] = call["id"]
+                responses.append({"functionResponse": fr})
+            self.contents.append({"role": "user", "parts": responses})
         return LoopOutcome(final_text=final)
 
 
@@ -273,14 +452,29 @@ class ClaudeCliLoop(AgentLoop):
 
 # ---- factory ---------------------------------------------------------------------------
 
-AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic")
+AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini")
 
 
-def make_loop(provider: str, model: str | None, *, api_base_url: str, token: str, api_key: str | None = None) -> AgentLoop:
+def make_loop(
+    provider: str,
+    model: str | None,
+    *,
+    api_base_url: str,
+    token: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> AgentLoop:
+    """`api_base_url`/`token` are this server's own address and the build's
+    MCP token (claude_cli only); `base_url` is the provider endpoint
+    override from Settings (openai/gemini)."""
     if provider == "claude_cli":
         return ClaudeCliLoop(model, api_base_url, token)
     if provider == "anthropic":
         return AnthropicLoop(model, api_key=api_key)
+    if provider == "openai":
+        return OpenAILoop(model, api_key=api_key, base_url=base_url)
+    if provider == "gemini":
+        return GeminiLoop(model, api_key=api_key, base_url=base_url)
     raise ValueError(
         f"provider {provider!r} can't drive an AI build yet (tool calling isn't wired up for it); "
         f"use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}"
