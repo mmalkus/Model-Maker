@@ -23,7 +23,7 @@ from modelmaker.llm.settings import LLMSettingsStore
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
 
-DATA = Path(__file__).resolve().parents[1] / "sample_data" / "pd_model_data.csv"
+DATA = Path(__file__).resolve().parents[1] / "sample_data" / "credit_risk_data.csv"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -241,7 +241,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
     assert {"get_graph", "submit_plan", "describe_block_type"} <= tools and "add_block" not in tools
     assert c.anchor in graph.content[0].text
     s = json.loads(summary.content[0].text)
-    assert s["row_count"] == 1000 and "West" not in summary.content[0].text
+    assert s["row_count"] == 5000 and "West" not in summary.content[0].text
     assert bad.isError and "isn't available in the planning phase" in bad.content[0].text
     assert json.loads(plan.content[0].text)["ok"] is True
     assert api.AGENT.build.phase == "awaiting_approval"

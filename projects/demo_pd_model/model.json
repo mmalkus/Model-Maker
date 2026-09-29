@@ -173,7 +173,7 @@
       "metadata_transform": null,
       "name": "Load applications",
       "params": {
-        "path": "sample_data/pd_model_data.csv"
+        "path": "sample_data/credit_risk_data.csv"
       },
       "port_names": {
         "out": "raw applications"

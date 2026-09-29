@@ -168,6 +168,17 @@ def lgd_regression(
     likelihood."""
     import numpy as np
 
+    # Unlike glm_fit/logistic_regression (sklearn rejects these itself), a
+    # single null/NaN here would silently turn every coefficient into NaN --
+    # and compute_lgd legitimately emits a null LGD for EAD <= 0.
+    for col in [target, *features]:
+        missing = df[col].is_null().sum() + (df[col].is_nan().sum() if df[col].dtype.is_float() else 0)
+        if missing:
+            raise ValueError(
+                f"'{col}' has {missing} null/NaN value(s); drop those rows upstream (e.g. a filter block) "
+                "before fitting a fractional-response (LGD/CCF) regression"
+            )
+
     x = df.select(features).to_numpy()
     y = df[target].to_numpy().astype(float)
     if np.any((y < 0.0) | (y > 1.0)):

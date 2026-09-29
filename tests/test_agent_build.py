@@ -26,7 +26,7 @@ from modelmaker.agent.loop import ScriptedLoop
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
 
-DATA = Path(__file__).resolve().parents[1] / "sample_data" / "pd_model_data.csv"
+DATA = Path(__file__).resolve().parents[1] / "sample_data" / "credit_risk_data.csv"
 
 FEATURES = ["credit_score", "dti", "revolving_utilization", "num_late_payments_2yr", "employment_years"]
 
@@ -312,7 +312,7 @@ def test_build_on_a_sample_then_full_run(tmp_path, prepared):
     assert b.phase == DONE, (b.phase, b.pending_question, b.error)
     assert seen["run"]["outputs"]["out"]["row_count"] == 200
     assert session.runner.sample_rows is None  # restored
-    assert b.results[0]["row_count"] == 1000  # key output refreshed on the full data
+    assert b.results[0]["row_count"] == 5000  # key output refreshed on the full data
     assert session.runner.status(anchor) == "green"
 
 
@@ -377,7 +377,7 @@ def test_output_summary_never_contains_rows_or_text_values(prepared):
     session, anchor = prepared
     b = building(session, anchor)
     out = b.call_tool("get_output_summary", {"block": anchor})
-    assert out["row_count"] == 1000 and "rows" not in out
+    assert out["row_count"] == 5000 and "rows" not in out
     cols = {c["name"]: c for c in out["columns"]}
     assert "min" not in cols["application_id"] and "min" not in cols["region"]
     assert cols["credit_score"]["min"] > 0

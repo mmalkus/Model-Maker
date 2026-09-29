@@ -106,6 +106,21 @@ def test_lgd_regression_raises_when_target_is_outside_0_1():
         modelling.lgd_regression(df, target="lgd", features=["x"])
 
 
+def test_lgd_regression_raises_on_a_null_target_instead_of_returning_nan():
+    # compute_lgd gives a null LGD for EAD <= 0; that must not reach IRLS.
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "lgd": [0.1, None, 0.5, 0.9]})
+
+    with pytest.raises(ValueError, match=r"'lgd' has 1 null/NaN"):
+        modelling.lgd_regression(df, target="lgd", features=["x"])
+
+
+def test_lgd_regression_raises_on_a_nan_feature():
+    df = pl.DataFrame({"x": [0.0, float("nan"), 2.0, 3.0], "lgd": [0.1, 0.3, 0.5, 0.9]})
+
+    with pytest.raises(ValueError, match=r"'x' has 1 null/NaN"):
+        modelling.lgd_regression(df, target="lgd", features=["x"])
+
+
 def test_predict_applies_lgd_regression_sigmoid():
     df = pl.DataFrame({"x": [-100.0, 100.0]})
     model = {"kind": "lgd_regression", "features": ["x"], "coefficients": {"x": 1.0}, "intercept": 0.0}
