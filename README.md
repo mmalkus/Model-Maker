@@ -242,10 +242,21 @@ Guardrails are enforced by the tools, not just the prompt:
 
 Builds run on `claude_cli` (your existing Claude login, via a small MCP
 bridge), `anthropic`, `openai` (or any OpenAI-compatible endpoint that
-supports tool calling, via its base URL), or `gemini`. They use the same
-keys, models and base URLs as in the LLM provider settings above. **Settings
-→ AI builder** picks a separate plan LLM and build LLM, and each build can
-override them. `lmstudio` can't drive a build yet.
+supports tool calling, via its base URL), `gemini`, or `lmstudio`. They use
+the same keys, models and base URLs as in the LLM provider settings above.
+**Settings → AI builder** picks a separate plan LLM and build LLM, and each
+build can override them.
+
+`lmstudio` covers any local OpenAI-compatible server: LM Studio, or
+llama.cpp's `llama-server` (start it with `--jinja`, which tool calling
+needs), Ollama's `/v1`, or vLLM. The model is auto-detected when unset.
+Local models get a compact prompt, where the block catalogue is block names
+per category and details are fetched on demand. They also get length caps
+on tool results, and older results are dropped when the conversation nears
+the context window. The window size is read from the server (llama.cpp
+reports it) or set with `MODELMAKER_LLM_CONTEXT_TOKENS`. Expect a local
+build to take a while; `MODELMAKER_LLM_TIMEOUT_SECONDS` (default 900 for
+local models) caps a single request.
 
 ## Project structure
 

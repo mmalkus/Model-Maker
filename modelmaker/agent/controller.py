@@ -117,6 +117,14 @@ def run_preflight(build: AgentBuild) -> dict[str, Any]:
     return {"blocking": blocking, "warnings": warnings, "max_rows": max_rows}
 
 
+def _record_resolved_model(choice: LLMChoice, loop: AgentLoop) -> None:
+    """When no model was chosen, the loop picks one (a provider default, or
+    whatever a local server has loaded) -- record which, so provenance and
+    the report name the model that actually ran, not 'default'."""
+    if not choice.model and getattr(loop, "model", None):
+        choice.model = loop.model
+
+
 class BuildController:
     """One per API server. At most one live build at a time."""
 
@@ -255,6 +263,7 @@ class BuildController:
             # Created on the worker, so a failure (missing key, no CLI)
             # ends the build as failed with its message, via _spawn.
             self._plan_loop = self.loop_factory(b.plan_llm, "plan")
+            _record_resolved_model(b.plan_llm, self._plan_loop)
             outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), tools_for_phase(PLANNING))
             self._after_plan_turn(outcome)
 
@@ -325,6 +334,7 @@ class BuildController:
 
             def work() -> None:
                 self._build_loop = self.loop_factory(b.build_llm, "build")
+                _record_resolved_model(b.build_llm, self._build_loop)
                 outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
                 self._after_build_turn(outcome)
 

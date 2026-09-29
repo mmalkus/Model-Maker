@@ -372,3 +372,19 @@ def test_resume_after_a_terminal_tool_merges_into_the_trailing_user_turn(plannin
     contents = fake.requests[-1][2]["contents"]
     assert [c["role"] for c in contents] == ["user", "model", "user"]
     assert "functionResponse" in contents[-1]["parts"][0] and contents[-1]["parts"][-1] == {"text": "FEEDBACK"}
+
+
+def test_provenance_names_the_auto_detected_model(planning_build):
+    from modelmaker.agent.build import LLMChoice
+    from modelmaker.agent.controller import _record_resolved_model
+
+    fake = FakeEndpoint([], models=LOCAL_MODELS)
+    try:
+        choice = LLMChoice("lmstudio", None)
+        _record_resolved_model(choice, make_loop("lmstudio", None, api_base_url="", token="", base_url=fake.url))
+    finally:
+        fake.close()
+    assert choice.label() == "lmstudio/local-27b.gguf"
+    explicit = LLMChoice("lmstudio", "chosen")
+    _record_resolved_model(explicit, type("L", (), {"model": "other"})())
+    assert explicit.model == "chosen"

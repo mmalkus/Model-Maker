@@ -97,13 +97,49 @@ base URLs as Settings:
   fake endpoint with scripted vendor responses. It checks our side of the
   wire format, but not that the real services accept it.
 
+**`lmstudio`** is built as `LMStudioLoop`, an `OpenAILoop` in compact mode
+for local OpenAI-compatible servers (LM Studio, llama.cpp `llama-server
+--jinja`, Ollama, vLLM):
+- **Setup:** no API key, and the model is auto-detected.
+- **Compact catalogue:** the system prompt lists block *names per category*
+  (about 170 tokens, against about 5,150 for the full catalogue), and the
+  model fetches ports and summaries with `list_block_types(group=…)` and
+  params with `describe_block_type` as needed.
+- **Context:** tool results are capped at 6,000 chars. When the
+  conversation passes about 85% of the context window, the oldest tool
+  results are replaced by a stub. The window is read from the server
+  (llama.cpp's `/v1/models` reports `n_ctx`), else
+  `MODELMAKER_LLM_CONTEXT_TOKENS`, else 16k.
+- **Reasoning traces:** `reasoning_content` is never echoed back, for any
+  OpenAI-compatible server.
+
+It has been verified live against a llama.cpp server (Ternary-Bonsai-2-27B
+at 2-bit, about 10 tokens/s, 100k context):
+- **Plan:** 10 minutes, using the per-category lookups as intended.
+- **Build:** 9 minutes, five blocks all green on the first run, test Gini
+  0.594, no deviations.
+- **Size and cost:** 59k input and 9k output tokens, $0.
+
+Provenance records the auto-detected model rather than "default".
+
+That run exposed a **race** that fast hosted models had hidden. After
+`submit_plan` the build showed "plan ready" while the model was still
+writing a closing remark, and an Approve in that window returned 409, but
+only *after* flipping the phase and opening the undo transaction. The build
+was then stuck in "building" with nothing running. The fixes:
+- **Terminal tools end the turn.** A successful `submit_plan`, `ask_user`
+  or `finish` sets `build.turn_over`, and the in-process loops stop there
+  with no extra request.
+- **Resume after a terminal tool** merges into the trailing user turn
+  (Anthropic, Gemini).
+- **`approve` and `feedback` check `_require_idle()`** before touching any
+  state.
+- **The panel** disables its buttons while the AI is busy.
+
 Not yet done:
-- **LM Studio:** `lmstudio` can't drive a build yet. Its server is
-  OpenAI-compatible, so it's likely `OpenAILoop` pointed at its base URL,
-  but small local models are unreliable at multi-step tool calling, so it
-  needs trying first.
 - **Live tests** of the Anthropic, OpenAI and Gemini loops against the
-  real APIs, which need keys. Only `claude_cli` has run a real build.
+  real APIs, which need keys. `claude_cli` and `lmstudio` have run real
+  builds.
 - **Phase 5 follow-ons:** `iterate`/`collect` in the catalogue, "improve
   this model" builds, and the build id in compiled-script block markers.
 
