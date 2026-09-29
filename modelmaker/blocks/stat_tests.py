@@ -16,6 +16,13 @@ from .base import BlockSpec, PortSpec, register_block
 
 
 def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
+    """Kolmogorov-Smirnov discrimination test: two-sample KS between the
+    `score_col` distributions of goods (`target_col` == 0) and bads
+    (`target_col` == 1). Emits a scalar_metric dict on the `metric` port:
+    {"kind": "ks_test", "ks_statistic", "p_value"} -- higher KS means
+    better separation. `target_col` must be binary 0/1 with both values
+    present. `score_col` auto-fills from the input's role=predicted column
+    and `target_col` from its role=target column when left unset."""
     from scipy.stats import ks_2samp
 
     scores = df[score_col].to_numpy()
@@ -43,6 +50,13 @@ register_block(
 
 
 def auc_gini(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
+    """Area under the ROC curve of `score_col` against a binary 0/1
+    `target_col`, plus the Gini coefficient (2*AUC - 1). Emits a
+    scalar_metric dict on the `metric` port: {"kind": "auc_gini", "auc",
+    "gini"}. Assumes a higher score means higher probability of
+    target == 1 (e.g. a predicted PD); a score where higher = safer gives
+    AUC < 0.5. `score_col` auto-fills from the input's role=predicted
+    column and `target_col` from its role=target column when left unset."""
     from sklearn.metrics import roc_auc_score
 
     auc = float(roc_auc_score(df[target_col].to_numpy(), df[score_col].to_numpy()))

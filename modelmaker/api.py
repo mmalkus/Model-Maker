@@ -4,7 +4,7 @@ import functools
 import inspect
 import os
 import re
-import threading
+
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -30,8 +30,10 @@ from .llm import claude_cli_provider as _claude_cli_provider
 from .llm import gemini_provider as _gemini_provider
 from .llm import lmstudio_provider as _lmstudio_provider
 from .llm import openai_provider as _openai_provider
+from .llm.redact import column_info_for_llm
 from .llm.settings import LLMSettingsStore
 from .packet import DataFramePacket
+from .runslot import RunBusy, RunFailed, RunSlot
 from .session import ProjectSession, wire_is_valid
 
 try:
@@ -70,30 +72,9 @@ LLM_SETTINGS = LLMSettingsStore()
 _ENV_VAR_OVERRIDES: dict[str, str | None] = {}
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Run orchestration: at most one run (a single block, a cascade, or a full
-# sweep) is active at a time, executed on a background thread so a run that
-# genuinely takes a while -- above all a heavily-grouped block, the case
-# this whole mechanism exists to keep safe -- doesn't block the HTTP
-# request indefinitely: the frontend polls GET /api/graph (whose per-block
-# `status` already reflects "running", see Runner.status) to watch it
-# progress, and POST /api/run/cancel to stop it. _start_background_run
-# joins the thread for up to `wait_seconds` before returning, though, so
-# the common case (a normal-sized run finishes in well under that) still
-# gets a response that reflects the final state, exactly as if the call
-# had been synchronous -- only a run that's still going after the wait
-# comes back as "running" for the client to poll. The isolation that
-# actually matters -- one subprocess per block call, so a crash or a
-# runaway group_by can't take the server down -- is Runner's job (see
-# runner.py) and applies either way.
-_RUN_LOCK = threading.Lock()
-_RUN_THREAD: threading.Thread | None = None
-# A precondition failure (e.g. "Run" clicked on a block whose upstream
-# isn't green yet) raises before any block state changes, so there's
-# nothing in the graph's own status to show it happened -- stashed here,
-# raised directly if the run finishes within the wait window (matching the
-# old synchronous endpoints' behavior), and otherwise surfaced once via
-# _graph_out(), which clears it on read.
-_LAST_RUN_ERROR: str | None = None
+# Run orchestration: at most one run is active at a time, shared between
+# the canvas endpoints below and an AI build's own runs -- see RunSlot.
+RUN_SLOT = RunSlot()
 
 
 def _start_background_run(fn: Callable[[], Any], wait_seconds: float = 20.0) -> Any:
@@ -101,30 +82,10 @@ def _start_background_run(fn: Callable[[], Any], wait_seconds: float = 20.0) -> 
     common case -- callers that don't care, like the single-block run
     endpoints, can just ignore it and re-read block state), else None to
     mean "still running" (poll GET /api/graph)."""
-    global _RUN_THREAD, _LAST_RUN_ERROR
-    with _RUN_LOCK:
-        if _RUN_THREAD is not None and _RUN_THREAD.is_alive():
-            raise HTTPException(409, "a run is already in progress")
-        _LAST_RUN_ERROR = None
-        holder: dict[str, Any] = {}
-
-        def _target() -> None:
-            global _LAST_RUN_ERROR
-            try:
-                holder["result"] = fn()
-            except Exception as e:  # noqa: BLE001 -- has no HTTP response to attach to once the wait below gives up
-                _LAST_RUN_ERROR = f"{type(e).__name__}: {e}"
-
-        thread = threading.Thread(target=_target, daemon=True)
-        _RUN_THREAD = thread
-        thread.start()
-    thread.join(timeout=wait_seconds)
-    if thread.is_alive():
-        return None
-    if _LAST_RUN_ERROR:
-        err, _LAST_RUN_ERROR = _LAST_RUN_ERROR, None
-        raise HTTPException(409, err)
-    return holder.get("result")
+    try:
+        return RUN_SLOT.start_background(fn, wait_seconds)
+    except (RunBusy, RunFailed) as e:
+        raise HTTPException(409, str(e))
 
 # Static curated list -- the `claude` CLI has no scriptable "list models"
 # command, so this is what the model dropdown offers for the claude_cli
@@ -342,8 +303,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
 
 
 def _graph_out() -> dict[str, Any]:
-    global _LAST_RUN_ERROR
-    run_error, _LAST_RUN_ERROR = _LAST_RUN_ERROR, None
+    run_error = RUN_SLOT.take_error()
     return {
         "project_name": SESSION.project_name,
         # The project *folder*, not the PROJECT_FILENAME inside it -- that's
@@ -429,10 +389,7 @@ def _input_schema_for_block(block_id: str) -> dict[str, list[ColumnInfo]]:
         packet = entry.outputs.get(wire.from_port)
         if not isinstance(packet, DataFramePacket):
             continue
-        result[port] = [
-            ColumnInfo(name=name, dtype=meta.dtype, role=meta.role.value if hasattr(meta.role, "value") else meta.role)
-            for name, meta in packet.schema_meta.items()
-        ]
+        result[port] = [column_info_for_llm(name, meta) for name, meta in packet.schema_meta.items()]
     return result
 
 
@@ -1265,21 +1222,7 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     packet = packet.compute_summary()
     summary = packet.summary or {}
 
-    columns = [
-        ColumnInfo(
-            name=name,
-            dtype=meta.dtype,
-            role=meta.role.value if hasattr(meta.role, "value") else meta.role,
-            count=summary[name].count if name in summary else None,
-            null_count=summary[name].null_count if name in summary else None,
-            n_unique=summary[name].n_unique if name in summary else None,
-            mean=summary[name].mean if name in summary else None,
-            std=summary[name].std if name in summary else None,
-            min=summary[name].min if name in summary else None,
-            max=summary[name].max if name in summary else None,
-        )
-        for name, meta in packet.schema_meta.items()
-    ]
+    columns = [column_info_for_llm(name, meta, summary.get(name)) for name, meta in packet.schema_meta.items()]
     ctx = DraftContext(
         instruction="Analyze these columns as described in the system prompt: write the document and propose tags.",
         function_name="(not applicable to this action -- see the system prompt)",
@@ -1393,10 +1336,7 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
     for port_spec in block.outputs:
         packet = entry.outputs.get(port_spec.name) if entry else None
         input_ports[port_spec.name] = (
-            [
-                ColumnInfo(name=name, dtype=meta.dtype, role=meta.role.value if hasattr(meta.role, "value") else meta.role)
-                for name, meta in packet.schema_meta.items()
-            ]
+            [column_info_for_llm(name, meta) for name, meta in packet.schema_meta.items()]
             if isinstance(packet, DataFramePacket)
             else []
         )

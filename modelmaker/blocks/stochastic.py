@@ -60,6 +60,23 @@ def fit_distribution(
     threshold_quantile: float = 0.9,
     body_family: str = "lognorm",
 ) -> tuple[dict, pl.DataFrame]:
+    """Fits a parametric distribution to the values of `column` in the `df`
+    input (nulls dropped) by maximum likelihood. Outputs: `distribution`, a
+    JSON-shaped dict (family, params, fit_stats) consumed by
+    sample_distribution / simulate_op_risk_lda, and `fit_table`, a
+    dataframe comparing candidates.
+
+    Default mode: tries each of `families` (default ["norm", "lognorm",
+    "gamma", "expon"]; also accepted: "genpareto", "t") and picks the
+    lowest AIC; `fit_table` has one row per candidate (aic, bic, ks_stat,
+    ks_p, ad_stat, or an error for a family that couldn't fit). Raises if
+    no family fits. With `spliced_tail=True`, `families` is ignored and a
+    spliced body-tail model is fitted instead: `body_family` (default
+    "lognorm") below the `threshold_quantile` quantile of the data
+    (default 0.9), a generalized Pareto tail above it -- needs >= 10
+    observations above the threshold. Use this for heavy-tailed loss
+    severities.
+    """
     from modelmaker.stochastic import distributions
 
     x = df[column].drop_nulls().to_numpy()
@@ -91,6 +108,12 @@ register_block(
 
 
 def sample_distribution(distribution: dict, n: int = 100_000, seed: int = 0, block_id: str | None = None) -> pl.DataFrame:
+    """Draws `n` random values (default 100,000) from the `distribution`
+    input (a fit_distribution output) and emits them on the `samples` port
+    as a one-column dataframe, column "sample". `seed` (default 0) makes
+    the draw reproducible; the RNG stream is keyed on (seed, block id), so
+    two sample blocks with the same seed still draw independent streams.
+    `block_id` is engine-injected; leave it unset."""
     from modelmaker.stochastic import distributions
     from modelmaker.stochastic import seed as seed_mod
 
@@ -118,6 +141,18 @@ register_block(
 
 
 def build_dependency(df: pl.DataFrame, columns: list[str], copula_type: str = "gaussian", dof: float = 5.0, theta: float = 2.0) -> dict:
+    """Estimates a dependency structure between the numeric `columns` of
+    the `df` input (e.g. historical risk-factor moves or per-component
+    losses, one row per observation) and emits it on the `dependency` port
+    as a JSON-shaped dict: the Pearson correlation matrix (projected to the
+    nearest positive semi-definite matrix if needed -- `psd_repaired`
+    flags that), each column's sample std dev, and the copula settings.
+    Consumed by aggregate_simulation and var_covar_aggregate, which match
+    it to their own inputs by column label. `copula_type` is "gaussian"
+    (default), "t" (uses `dof`, degrees of freedom, default 5), "clayton"
+    or "gumbel" (use `theta`, default 2); it isn't validated here -- an
+    unknown value only fails when a consumer samples from it. Columns
+    should be null-free."""
     import numpy as np
 
     from modelmaker.stochastic import dependency as dependency_mod
@@ -586,6 +621,20 @@ def fit_proxy(
     alpha: float = 1.0,
     expr: str | None = None,
 ) -> dict:
+    """Builds a proxy (surrogate valuation) function of the `risk_factors`
+    columns, emitted on the `proxy` port as a JSON-shaped dict that
+    evaluate_proxy, validate_proxy and var_covar_aggregate consume.
+    `method`:
+      - "polynomial" (default): fits a polynomial of `degree` (default 2)
+        in the risk factors to `value_col` (required) over the `fitting`
+        input's rows, using `regressor` "ridge" (default), "lasso" or
+        "ols"; `alpha` (default 1.0) is the ridge/lasso penalty. Needs
+        more fitting rows than risk factors. Records in-sample R^2.
+      - "closed_form": no fitting; `expr` (required) is a Polars SQL
+        expression over the risk-factor columns, e.g. "notional * rate",
+        evaluated directly per scenario. The `fitting` port must still be
+        wired, but its data is unused.
+    """
     from modelmaker.stochastic import proxy as proxy_mod
 
     if method == "closed_form":
@@ -614,6 +663,11 @@ register_block(
 
 
 def evaluate_proxy(proxy: dict, scenarios: pl.DataFrame) -> pl.DataFrame:
+    """Applies the `proxy` input (a fit_proxy output) to every row of the
+    `scenarios` input, emitting the scenarios plus a new "value" column on
+    the `valued` port. `scenarios` must contain every risk-factor column
+    the proxy was built on (or that its closed_form expression uses). No
+    params."""
     from modelmaker.stochastic import proxy as proxy_mod
 
     values = proxy_mod.evaluate_proxy(proxy, scenarios)
@@ -635,6 +689,13 @@ register_block(
 
 
 def validate_proxy(proxy: dict, validation: pl.DataFrame, value_col: str) -> tuple[dict, pl.DataFrame]:
+    """Out-of-sample check of the `proxy` input against true values: the
+    `validation` input holds scenarios (risk-factor columns) not used for
+    fitting, with their full-revaluation result in `value_col` (required).
+    Outputs: `diagnostics`, a scalar_metric dict (out_of_sample_r2, mae,
+    rmse, max_abs_error, and worst_indices -- row positions of the 10
+    largest absolute errors), and `error_table`, the validation rows plus
+    "predicted", "error" (predicted - actual) and "abs_error" columns."""
     import numpy as np
 
     from modelmaker.stochastic import proxy as proxy_mod
@@ -778,6 +839,19 @@ def iterate(
     _iteration_index: int | None = None,
     block_id: str | None = None,
 ) -> pl.DataFrame:
+    """Opens a fan-out region: every block between this one and a
+    'collect' block (whose `iterate_block` param names this block's id)
+    is re-run once per iteration, and collect gathers the results. Emits
+    this iteration's slice of the `df` input on `out`. `iterator`:
+    "bootstrap_resample" (default; `df.height` rows resampled with
+    replacement, a fresh draw per iteration) or "scenario_row" (iteration
+    i emits only row i -- set `n_iterations` <= the row count).
+    `n_iterations` (default 100, max 10,000) is read by the engine, not by
+    this function. `seed` (default 0) makes the resamples reproducible.
+    Run on its own (no collect), it just emits iteration 0.
+    `_iteration_index` and `block_id` are engine-injected; leave them
+    unset. The region may not contain input blocks or group_by blocks,
+    and graphs using iterate/collect can't yet be compiled to a script."""
     from modelmaker.stochastic import seed as seed_mod
 
     i = _iteration_index if _iteration_index is not None else 0

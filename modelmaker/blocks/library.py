@@ -17,6 +17,11 @@ from .base import BlockSpec, PortSpec, register_block
 
 
 def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    """Reads a CSV file into a dataframe on the `out` port; no inputs.
+    `path` is the file path (relative to the working directory the engine
+    runs in). Column dtypes are inferred by polars; column roles start
+    untagged. `sample_rows` is not a user param -- the engine injects it in
+    sample mode to read only the first N rows; leave it unset."""
     # `sample_rows`, when the engine's sample mode is on, is injected by
     # Runner.run_block the same way output_dir/block_id are (see
     # util.accepts_param) -- an input block opts in just by naming the
@@ -70,6 +75,10 @@ register_block(
 
 
 def read_parquet(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    """Reads a Parquet file into a dataframe on the `out` port; no inputs.
+    `path` is the file path. Dtypes come from the Parquet schema.
+    `sample_rows` is engine-injected in sample mode (first N rows only);
+    leave it unset."""
     if sample_rows is not None:
         return pl.scan_parquet(path).head(sample_rows).collect()
     return pl.read_parquet(path)
@@ -99,6 +108,11 @@ register_block(
 
 
 def read_json(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+    """Reads a JSON file into a dataframe on the `out` port; no inputs.
+    `path` ending in .jsonl/.ndjson (case-insensitive) is read as
+    newline-delimited JSON (one object per line); anything else must be a
+    plain JSON array of records. `sample_rows` is engine-injected in sample
+    mode (first N rows only); leave it unset."""
     # Newline-delimited JSON has a real lazy/streaming reader; a plain JSON
     # array does not (polars must load it whole to find its structure), so
     # this block -- unlike read_csv/read_parquet -- has no lazy_fn twin and
@@ -126,6 +140,11 @@ register_block(
 
 
 def read_excel(path: str, sheet: str | None = None, sample_rows: int | None = None) -> pl.DataFrame:
+    """Reads one worksheet of an Excel workbook into a dataframe on the
+    `out` port; no inputs. `path` is the .xlsx file path; `sheet` is the
+    worksheet name -- unset/empty reads the first sheet. The first row is
+    taken as the header. `sample_rows` is engine-injected in sample mode
+    (the whole sheet is still read, then truncated); leave it unset."""
     df = pl.read_excel(path, sheet_name=sheet) if sheet else pl.read_excel(path)
     return df.head(sample_rows) if sample_rows is not None else df
 
@@ -145,6 +164,16 @@ register_block(
 
 
 def read_sql(connection_env: str, query: str, sample_rows: int | None = None) -> pl.DataFrame:
+    """Runs a SQL query against a database and returns the result set as a
+    dataframe on the `out` port; no inputs. `connection_env` is the *name*
+    of an environment variable (e.g. "WAREHOUSE_URI") holding the
+    connection URI -- never the URI itself; raises KeyError if that
+    variable isn't set. `query` is the SQL text, in the target database's
+    own dialect. Optional `probe_query` param (a cheap query such as
+    SELECT MAX(updated_at) ...) lets "check for changes" detect new data;
+    it isn't passed to this function. `sample_rows` is engine-injected in
+    sample mode (the full query still runs, then is truncated client-side);
+    leave it unset."""
     # The connection string itself never lives in params -- it's baked as a
     # literal into saved project files and (per compiler.py section 7)
     # compiled scripts, so a raw DB password there would leak into both.
@@ -192,6 +221,10 @@ register_block(
 
 
 def filter_rows(df: pl.DataFrame, expr: str) -> pl.DataFrame:
+    """Keeps only the rows of `df` for which `expr` is true, emitted on
+    `out` with the same columns and roles. `expr` is a Polars SQL boolean
+    expression over column names, e.g. "age >= 18 AND region = 'EU'" or
+    "balance IS NOT NULL" (string literals in single quotes)."""
     return df.filter(pl.sql_expr(expr))
 
 
@@ -213,6 +246,9 @@ register_block(
 
 
 def select_cols(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
+    """Keeps only the listed columns of `df`, in the order given by `cols`,
+    emitted on `out`; kept columns retain their roles. Every name in `cols`
+    must exist in the input."""
     return df.select(cols)
 
 
@@ -231,6 +267,14 @@ register_block(
 
 
 def groupby_agg(df: pl.DataFrame, by: list[str], aggs: dict[str, str]) -> pl.DataFrame:
+    """Groups `df` by the `by` key columns and aggregates, one row per
+    group on `out`. `aggs` maps a column name to the name of a polars
+    expression method applied to it, e.g. {"balance": "sum", "pd":
+    "mean"}; valid names include sum, mean, median, min, max, std, var,
+    count, n_unique, first, last. Each aggregated column keeps its own
+    name (so a column can be aggregated only once), and only `by` plus the
+    `aggs` keys appear in the output. Key columns keep their roles;
+    aggregated columns lose theirs. Output row order is not guaranteed."""
     agg_exprs = [getattr(pl.col(c), fn)().alias(c) for c, fn in aggs.items()]
     return df.group_by(by).agg(agg_exprs)
 
@@ -263,6 +307,14 @@ register_block(
 
 
 def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inner") -> pl.DataFrame:
+    """Joins the `left` and `right` input dataframes on the key columns in
+    `on` (same names on both sides), emitted on `out`. `how` is a polars
+    join strategy: "inner" (default), "left", "right", "full", "semi", or
+    "anti" ("cross" is not usable: polars rejects join keys with it).
+    Non-key columns present on both sides get a "_right" suffix on the
+    right-hand copy; a "full" join also keeps the right-hand keys as
+    "<key>_right". Where a column exists on both sides, the left side's
+    role wins."""
     return left.join(right, on=on, how=how)
 
 
@@ -289,6 +341,12 @@ register_block(
 
 
 def train_test_split(df: pl.DataFrame, test_size: float = 0.2, seed: int = 0) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Randomly splits `df`'s rows into two disjoint dataframes on the
+    `train` and `test` ports; both keep every column and role. `test_size`
+    is the fraction of rows sent to `test` (0-1, default 0.2; the test row
+    count is rounded down), the rest go to `train`. `seed` fixes the
+    shuffle, so the same seed gives the same split. Simple random split --
+    not stratified by target."""
     shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
     n_test = int(len(shuffled) * test_size)
     test = shuffled.head(n_test)
@@ -310,6 +368,10 @@ register_block(
 
 
 def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
+    """Writes the `df` input to a CSV file; no output ports. `filename` is
+    the file name (e.g. "scored.csv"), written inside `output_dir`, which
+    the engine injects as the run's output directory -- leave it unset.
+    Overwrites any existing file of the same name."""
     df.write_csv(os.path.join(output_dir, filename))
 
 
@@ -398,6 +460,15 @@ def generate_image(
     output_dir: str = ".",
     block_id: str = "",
 ) -> bytes:
+    """Draws a matplotlib chart from the `df` input and emits it as PNG
+    bytes on the `image` port, also saving it as
+    generate_image_<block_id>.png in `output_dir`. `kind` is one of
+    "hist" (default; histogram of column `x` with `bins` bins, `y`
+    unused), "bar" (x = category labels, y = bar heights -- one bar per
+    row, so aggregate first), "scatter", or "line" (both plot `y` against
+    `x` in row order). `x` is always required; `y` is required for every
+    kind but hist. `title` is optional. `output_dir` and `block_id` are
+    engine-injected; leave them unset."""
     # Self-contained imports (rather than relying on this module's own
     # top-level imports) so this function stays a valid, independent unit
     # both when run live by the engine and when inlined verbatim into a
