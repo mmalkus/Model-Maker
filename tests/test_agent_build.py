@@ -328,6 +328,12 @@ def test_user_blocks_are_read_only(prepared):
     assert session.graph.blocks[anchor].params == {"path": str(DATA)}
 
 
+def test_the_build_never_reads_input_blocks_itself(prepared):
+    session, anchor = prepared
+    b = building(session, anchor)
+    assert "input blocks" in b.call_tool("run_to", {"block": anchor})["error"]
+
+
 def test_approved_changes_are_allowed_and_recorded(prepared):
     session, anchor = prepared
     with session.edit():

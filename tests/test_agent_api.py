@@ -193,10 +193,10 @@ def live_server(client):
     server = uvicorn.Server(uvicorn.Config(api.app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    for _ in range(100):
-        if server.started:
-            break
+    deadline = time.time() + 30
+    while not server.started and time.time() < deadline:
         time.sleep(0.05)
+    assert server.started, "uvicorn didn't start"
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(5)

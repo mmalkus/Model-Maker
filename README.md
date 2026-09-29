@@ -202,6 +202,48 @@ export MODELMAKER_LLM_MODEL=gpt-5.1
 modelmaker-api
 ```
 
+## Build with AI
+
+Beyond drafting one block at a time, an AI can plan and build a whole model
+graph for you (design: [agent-builder-proposal.md](agent-builder-proposal.md)):
+
+1. **Prepare the data yourself.** Add your input block(s), run them, and tag
+   column roles in the port inspector: at least `target`, plus `excluded`
+   for anything that must never become a feature (leaky or post-outcome
+   columns). The AI never picks files or touches credentials.
+2. **Select** those blocks (shift-click for several), click **Build with AI**
+   and describe the goal.
+3. **Preflight** checks the selected blocks and everything upstream of them.
+   Blocks that aren't up to date get a warning, with **Run upstream** to fix
+   them or **Proceed anyway**.
+4. **Review the plan.** It appears as ghost blocks on the canvas and as a
+   list in the panel. Nothing changes until you approve. Send feedback to
+   have it re-plan.
+5. **Watch it build.** It adds blocks, runs each one, reads their summary
+   statistics, fixes failures, and asks you when it's stuck. The canvas is
+   read-only for you meanwhile. A large dataset is built on a sample, then
+   the whole graph runs once on the full data.
+6. **Read the report**, which is saved as an artifact. AI-built blocks
+   carry an **AI** badge and a provenance record: build, LLMs, time, and
+   whether a person has edited them since. **One Undo reverts the whole
+   build.**
+
+Guardrails are enforced by the tools, not just the prompt:
+- **No rows.** The AI only ever sees column names, dtypes, roles and
+  summary statistics. The min/max of text and id columns are withheld too,
+  for every AI feature.
+- **Your blocks stay yours.** It can read and wire *from* your blocks, but
+  it only changes blocks it created, plus changes to existing blocks that
+  the plan listed and you approved.
+- **Excluded means excluded.** Columns tagged `excluded` are refused as
+  features.
+- **Limits.** Tool calls, custom blocks, repeated failures and wall time
+  are all capped.
+
+Builds run on `claude_cli` (your existing Claude login, via a small MCP
+bridge) or `anthropic`. **Settings → AI builder** picks a separate plan LLM
+and build LLM, and each build can override them.
+
 ## Project structure
 
 ```
@@ -209,6 +251,7 @@ modelmaker/
   api.py              FastAPI app and HTTP routes
   blocks/             Block registry (standard library, modelling, stat tests)
   llm/                Pluggable LLM providers for AI-assisted drafting
+  agent/              AI model builder: tools, guards, build lifecycle, loops, MCP bridge
   graph.py            Graph/block/wire data model
   session.py          Mutable project session wrapping the graph + runner
   runner.py           Block execution + caching engine

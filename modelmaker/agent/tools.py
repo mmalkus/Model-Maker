@@ -71,13 +71,14 @@ def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
 
 
 def _json_preview(value: Any, limit: int = 6000) -> Any:
+    """A JSON-safe copy of `value`, or a truncated JSON string when big."""
     try:
         text = json.dumps(value, default=str)
     except (TypeError, ValueError):
-        text = repr(value)
-    if len(text) <= limit:
-        return json.loads(text) if text[:1] in "[{" else value if isinstance(value, (int, float, str, bool)) else text
-    return {"truncated_json": text[:limit] + "..."}
+        return repr(value)[:limit]
+    if len(text) > limit:
+        return {"truncated_json": text[:limit] + "..."}
+    return json.loads(text)
 
 
 def summarize_value(value: Any, with_stats: bool = True) -> dict[str, Any]:
@@ -386,7 +387,9 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
         for inp in step.get("inputs") or []:
             src = inp.get("from")
             if src in refs:
-                _, src_out = _step_ports(refs[src]) if refs[src].get("category") in BLOCK_REGISTRY or refs[src].get("category") == "custom" else (None, None)
+                src_step = refs[src]
+                valid_src = src_step.get("category") == "custom" or src_step.get("category") in BLOCK_REGISTRY
+                src_out = _step_ports(src_step)[1] if valid_src else None
             elif src in graph.blocks:
                 src_out = {p.name: p.type for p in graph.blocks[src].outputs}
             else:
@@ -732,6 +735,8 @@ def set_column_role(b: AgentBuild, block: str, column: str, role: str) -> dict[s
 )
 def run_to(b: AgentBuild, block: str) -> dict[str, Any]:
     blk = b.require_block(block)
+    if blk.block_type == "input":
+        raise ToolError("input blocks are the user's to (re)read -- run_to a block downstream of it instead")
     runner = b.session.runner
     try:
         status = b.run_slot.run_sync(lambda: runner.run_to_here(block))

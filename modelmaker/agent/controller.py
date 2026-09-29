@@ -76,8 +76,9 @@ def run_preflight(build: AgentBuild) -> dict[str, Any]:
         blocking.append(_issue("anchor_not_run", f"These haven't produced output yet, so there's nothing to plan from: {names}. Run upstream first.", no_output))
 
     stale = []
+    scope = build.scope_block_ids()
     for bid in graph.topo_order():
-        if bid not in build.scope_block_ids():
+        if bid not in scope:
             continue
         status = runner.status(bid)
         if status in ("green", "running"):
@@ -212,13 +213,10 @@ class BuildController:
         A user action from the preflight panel, not the agent's."""
         with self._lock:
             b = self._require(PREFLIGHT)
-            session = self.session
-            runner = session.runner
+            runner = self.session.runner
 
             def work() -> None:
-                for bid in session.graph.topo_order():
-                    if bid in b.scope_block_ids() and session.graph.blocks[bid].block_type == "input" and runner.status(bid) != "green":
-                        runner.run_block(bid)
+                self._read_stale_inputs()
                 for a in b.anchors:
                     runner.run_to_here(a)
 
@@ -343,17 +341,17 @@ class BuildController:
         b.log("sample_mode", rows=requested)
         self._reread_inputs()
 
+    def _read_stale_inputs(self) -> None:
+        """(Re)read the in-scope input blocks that aren't current. Caller
+        holds the run slot."""
+        graph, runner = self.session.graph, self.session.runner
+        scope = self.build.scope_block_ids()
+        for bid in graph.topo_order():
+            if bid in scope and graph.blocks[bid].block_type == "input" and runner.status(bid) != "green":
+                runner.run_block(bid)
+
     def _reread_inputs(self) -> None:
-        b = self.build
-        session = self.session
-        runner = session.runner
-
-        def work() -> None:
-            for bid in session.graph.topo_order():
-                if bid in b.scope_block_ids() and session.graph.blocks[bid].block_type == "input" and runner.status(bid) != "green":
-                    runner.run_block(bid)
-
-        self.run_slot.run_sync(work)
+        self.run_slot.run_sync(self._read_stale_inputs)
 
     def _restore_sample_mode(self) -> None:
         """Undo _maybe_sample: back to full data. Re-reading the inputs

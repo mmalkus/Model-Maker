@@ -28,6 +28,66 @@ Decisions already taken (from the design discussion):
 The open decisions from the first draft are resolved in §11 and carried
 through the sections below.
 
+## Implementation status
+
+**Phases 0–3 are built, plus the `claude_cli` part of phase 4.** That
+provider was moved forward because it's the default and needs no API key.
+The code is in `modelmaker/agent/` and the frontend's `BuildPanel.tsx` /
+`GhostNode.tsx`, with tests in `tests/test_agent_foundations.py`,
+`tests/test_agent_build.py` (a scripted loop against the real runner and
+PD sample data) and `tests/test_agent_api.py` (including a real stdio MCP
+client driving the bridge against a live server).
+
+It has been verified end to end with the real `claude` CLI:
+- **Plan:** it planned a PD model from a prepared `read_csv` block (70/30
+  split → logistic regression on six numeric drivers → predict → AUC/Gini).
+  It left out the excluded, id and date columns by itself.
+- **Build:** after approval it built all five blocks green, first time,
+  with test-set Gini 0.674.
+- **Cost:** about $0.29 for the whole build, planning included.
+
+Where the implementation differs from the text below:
+- **Custom blocks** are written by the build LLM itself
+  (`add_custom_block` / `update_custom_block`), checked against the same
+  contract (one polars function, input ports as leading parameters, a valid
+  `metadata_transform`, no excluded-column literals). They are not
+  delegated to a second LLM call through the `draft` / `suggest_fix` flow.
+  The agent already has the context, and a nested call per block would
+  double the cost and latency.
+- **Sampling (§7):** switching sample mode makes input blocks stale, and
+  downstream runs then refuse to run. A sampled build therefore re-reads the
+  in-scope input blocks with `run_block` (not `refresh`, which bumps the
+  read counter and would orphan the full-data cache). This happens once on
+  approval and again when sample mode is switched back off; the second read
+  hits the cache. Sampling defaults to 50,000 rows, and only when the
+  largest anchor output has more than 100,000 rows. If the user already has
+  sample mode on, the build uses it and leaves the setting alone.
+- **Preflight (§4.1):** no `target` at all is a warning, not a blocker.
+  The app can't tell from the goal whether a target is needed. More than
+  one distinct target is still blocking.
+- **Discard** is available only while a build is live. Once it has ended,
+  a plain Undo reverts it in one step.
+- **Canvas lock (§7):** this is an HTTP middleware. While a build is
+  `building`, `awaiting_input` or `final_run`, it returns 409 for mutating
+  `/api/*` calls other than `/api/agent/*`, LLM settings, env vars, project
+  save and source checks.
+- **The MCP bridge** is a stateless stdio server
+  (`python -m modelmaker.agent.mcp_server`) that forwards to
+  `/api/agent/mcp/{tools,call}`, authenticated with a per-build token.
+  Guards and logging therefore stay in the API process. It calls back to the
+  URL the build was started from. `MODELMAKER_AGENT_CALLBACK_URL` overrides
+  that.
+
+Not yet done:
+- **Providers:** agent loops for `openai`, `gemini` and `lmstudio`. They
+  are refused with a clear message, and only `claude_cli` and `anthropic`
+  can drive a build.
+- **The live Anthropic-API test** (phase 2), which needs an API key. The
+  `AnthropicLoop` is written but has only been exercised through the same
+  tool layer, not against the real API.
+- **Phase 5 follow-ons:** `iterate`/`collect` in the catalogue, "improve
+  this model" builds, and the build id in compiled-script block markers.
+
 Written against the codebase as of `0f0499e`.
 
 ## 1. Design principles
