@@ -335,6 +335,30 @@ export function Inspector({
         </strong>
       </div>
 
+      {block.provenance && (
+        <div style={{ background: '#f5f3ff', color: '#4c1d95', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+          {block.provenance.source === 'agent' ? (
+            <>
+              <strong>Built by AI</strong> in build {block.provenance.build_id}
+              {block.provenance.at && ` on ${new Date(block.provenance.at).toLocaleString()}`}
+              {block.provenance.plan_step && ` (plan step ${block.provenance.plan_step})`}.
+              {block.provenance.goal && <div style={{ marginTop: 2 }}>Goal: {block.provenance.goal}</div>}
+              <div style={{ marginTop: 2, color: '#6d28d9' }}>
+                Plan LLM {block.provenance.plan_llm} · build LLM {block.provenance.build_llm}
+              </div>
+              {block.provenance.modified_by_user && <div style={{ marginTop: 2 }}>Changed by a person since.</div>}
+            </>
+          ) : (
+            <strong>Changed by AI builds:</strong>
+          )}
+          {(block.provenance.changes ?? []).map((c, i) => (
+            <div key={i} style={{ marginTop: 2 }}>
+              {new Date(c.at).toLocaleString()}: {c.change} <span style={{ color: '#6d28d9' }}>({c.build_id})</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {block.status === 'orange' && block.stale_reason && (
         <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
           <strong>Stale:</strong> {block.stale_reason}. The output below is from the last run, not the current

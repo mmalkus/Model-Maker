@@ -33,13 +33,34 @@ function formatParamValue(v: unknown): string {
   return s.length > 18 ? `${s.slice(0, 16)}…` : s
 }
 
-export type BlockNodeData = { block: BlockOut; onViewPort: (blockId: string, port: string, portType: PortType) => void }
+export type BlockNodeData = {
+  block: BlockOut
+  onViewPort: (blockId: string, port: string, portType: PortType) => void
+  // AI build overlays (see BuildPanel): a change the plan proposes to this
+  // (user) block, and whether the build's latest tool call touched it.
+  aiPlannedChange?: string | null
+  aiActive?: boolean
+}
 export type BlockFlowNode = Node<BlockNodeData, 'modelBlock'>
 
+function provenanceTitle(block: BlockOut): string {
+  const p = block.provenance
+  if (!p) return ''
+  const lines = [
+    `Built by an AI build (${p.build_id}) on ${p.at ? new Date(p.at).toLocaleString() : '?'}`,
+    p.goal ? `Goal: ${p.goal}` : '',
+    `Plan LLM: ${p.plan_llm ?? '?'} · build LLM: ${p.build_llm ?? '?'}`,
+    p.modified_by_user ? 'Changed by a person since.' : '',
+  ]
+  return lines.filter(Boolean).join('\n')
+}
+
 export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
-  const { block, onViewPort } = data
+  const { block, onViewPort, aiPlannedChange, aiActive } = data
   const color = STATUS_COLOR[block.status] ?? STATUS_COLOR.grey
   const paramEntries = Object.entries(block.params)
+  const aiBuilt = block.provenance?.source === 'agent'
+  const aiChanged = (block.provenance?.changes?.length ?? 0) > 0
 
   return (
     <div
@@ -52,7 +73,12 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         // the upstream edit that caused it) stretches the card right across
         // the canvas instead of wrapping inside it.
         maxWidth: 280,
-        boxShadow: selected ? '0 0 0 2px var(--brand)' : '0 1px 3px rgba(0,0,0,0.15)',
+        boxShadow: aiActive
+          ? '0 0 0 3px #a78bfa'
+          : selected
+            ? '0 0 0 2px var(--brand)'
+            : '0 1px 3px rgba(0,0,0,0.15)',
+        transition: 'box-shadow 0.2s',
         fontSize: 12,
       }}
     >
@@ -87,7 +113,40 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
             ⟲ {block.group_by}
           </span>
         )}
+        {aiBuilt && (
+          <span
+            title={provenanceTitle(block)}
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: '#6d28d9',
+              background: '#ede9fe',
+              borderRadius: 4,
+              padding: '0 4px',
+              flexShrink: 0,
+              marginLeft: 'auto',
+            }}
+          >
+            AI{block.provenance?.modified_by_user ? ' · edited' : ''}
+          </span>
+        )}
+        {!aiBuilt && aiChanged && (
+          <span
+            title={(block.provenance?.changes ?? []).map((c) => `${c.at}: ${c.change} (AI build ${c.build_id})`).join('\n')}
+            style={{ fontSize: 10, color: '#6d28d9', border: '1px solid #c4b5fd', borderRadius: 4, padding: '0 4px', flexShrink: 0, marginLeft: 'auto' }}
+          >
+            AI-changed
+          </span>
+        )}
       </div>
+      {aiPlannedChange && (
+        <div
+          title="The AI build's plan proposes this change to your block -- approving the plan allows it"
+          style={{ background: '#f5f3ff', color: '#6d28d9', fontSize: 10, padding: '3px 8px', borderBottom: '1px dashed #c4b5fd' }}
+        >
+          planned change: {aiPlannedChange}
+        </div>
+      )}
       <div style={{ padding: '4px 8px 8px', color: '#6b7280' }}>
         <div>
           {block.category}

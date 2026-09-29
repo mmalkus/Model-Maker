@@ -13,17 +13,27 @@ import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { BlockNode, type BlockFlowNode } from './BlockNode'
+import { BuildPanel } from './BuildPanel'
 import { DataWireEdge, type DataWireEdgeType } from './DataWireEdge'
+import { GHOST_IN, GHOST_OUT, GhostLane, GhostNode, type GhostFlowNode, type GhostLaneNode } from './GhostNode'
 import { Inspector } from './Inspector'
 import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
 import { LaneLabels, LaneResizeHandles } from './LaneLabels'
 import { Palette } from './Palette'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
-import type { BlockOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
+import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
 
-const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand }
+const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
+
+// Build phases during which the server refuses user edits (see api.py's
+// agent canvas lock) -- mirrored here only to say so up front.
+const BUILD_LOCKING = new Set(['building', 'awaiting_input', 'final_run'])
+const BUILD_TERMINAL = new Set(['done', 'done_with_errors', 'stopped', 'failed', 'discarded'])
+const BUILD_BLOCK_TOOLS = new Set(['add_block', 'add_custom_block', 'run_to', 'set_params', 'update_custom_block', 'connect'])
+
+type AiEdge = { id: string; source: string; sourceHandle: string; target: string; targetHandle: string; style: React.CSSProperties; selectable: false }
 
 // How long to sit idle after the last edit before writing the project file.
 // Short enough that a save is never more than a few clicks stale, long
@@ -37,7 +47,7 @@ export type AutosaveStatus =
   | { state: 'saved'; at: number }
   | { state: 'error'; message: string }
 
-type FlowNode = BlockFlowNode | LaneBandNode
+type FlowNode = BlockFlowNode | LaneBandNode | GhostFlowNode | GhostLaneNode
 
 function toBlockNodes(
   graph: GraphOut,
@@ -84,6 +94,8 @@ function AppInner() {
   const [llmSettings, setLlmSettings] = useState<LLMSettingsOut | null>(null)
   const [recovery, setRecovery] = useState<RecoveryInfo | null>(null)
   const [autosave, setAutosave] = useState<AutosaveStatus>({ state: 'idle' })
+  const [buildOpen, setBuildOpen] = useState(false)
+  const [build, setBuild] = useState<BuildOut | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
@@ -94,6 +106,15 @@ function AppInner() {
   useEffect(() => {
     reloadLlmSettings()
   }, [reloadLlmSettings])
+
+  // Pick up an AI build that's still going on the server (e.g. after a page
+  // reload) -- a live one keeps BuildPanel mounted, which polls it.
+  useEffect(() => {
+    api
+      .agentCurrent()
+      .then((s) => setBuild(s.build))
+      .catch(() => {})
+  }, [])
 
   const onViewPort = useCallback((blockId: string, port: string, portType: PortType) => {
     setSelectedPort({ blockId, port, portType })
@@ -332,11 +353,115 @@ function AppInner() {
     [laneLayout, collapsedLanes],
   )
 
-  const nodes: FlowNode[] = useMemo(() => [...laneNodes, ...blockNodes], [laneNodes, blockNodes])
+  // ---- AI build overlays (see BuildPanel / agent-builder-proposal.md §4.2) --
+  // While a plan awaits review: its steps as ghost blocks (plus ghost bands
+  // for lanes it would create) and its wiring as dashed edges. While
+  // building: a highlight on whichever block the AI last touched.
+  const reviewPlan = build?.phase === 'awaiting_approval' ? build.plan : null
+  const ghostNodes: (GhostFlowNode | GhostLaneNode)[] = useMemo(() => {
+    if (!reviewPlan) return []
+    const lanes: GhostLaneNode[] = Object.entries(reviewPlan.lane_layout ?? {}).map(([key, l]) => ({
+      id: `ghostlane_${key}`,
+      type: 'ghostLane' as const,
+      position: { x: BAND_X, y: l.top },
+      draggable: false,
+      selectable: false,
+      zIndex: -9,
+      data: { name: l.name, height: l.height },
+    }))
+    const steps: GhostFlowNode[] = reviewPlan.steps
+      .filter((s) => reviewPlan.layout?.[s.ref])
+      .map((s) => ({
+        id: `ghost_${s.ref}`,
+        type: 'ghostBlock' as const,
+        position: { x: reviewPlan.layout[s.ref].x, y: reviewPlan.layout[s.ref].y },
+        draggable: false,
+        selectable: false,
+        data: { step: s, highlighted: false },
+      }))
+    return [...lanes, ...steps]
+  }, [reviewPlan])
+
+  const ghostEdges: AiEdge[] = useMemo(() => {
+    if (!reviewPlan) return []
+    const refs = new Set(reviewPlan.steps.map((s) => s.ref))
+    return reviewPlan.steps.flatMap((s) =>
+      s.inputs.map((inp, i) => ({
+        id: `ghostedge_${s.ref}_${i}`,
+        source: refs.has(inp.from) ? `ghost_${inp.from}` : inp.from,
+        sourceHandle: refs.has(inp.from) ? GHOST_OUT : inp.from_port,
+        target: `ghost_${s.ref}`,
+        targetHandle: GHOST_IN,
+        style: { stroke: '#a78bfa', strokeDasharray: '6 4' },
+        selectable: false as const,
+      })),
+    )
+  }, [reviewPlan])
+
+  const aiActiveBlock = useMemo(() => {
+    if (!build || !BUILD_LOCKING.has(build.phase)) return null
+    for (let i = build.events.length - 1; i >= 0; i--) {
+      const e = build.events[i]
+      if (e.kind === 'tool' && BUILD_BLOCK_TOOLS.has(String(e.tool))) {
+        const args = (e.args ?? {}) as Record<string, unknown>
+        const result = (e.result ?? {}) as Record<string, unknown>
+        return String(args.block ?? args.to_block ?? result.block ?? '')
+      }
+    }
+    return null
+  }, [build])
+
+  const plannedChanges = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const c of reviewPlan?.changes_to_existing ?? []) m.set(c.block, m.has(c.block) ? `${m.get(c.block)}; ${c.change}` : c.change)
+    return m
+  }, [reviewPlan])
+
+  const overlaidBlockNodes = useMemo(
+    () =>
+      blockNodes.map((n) =>
+        n.id === aiActiveBlock || plannedChanges.has(n.id)
+          ? { ...n, data: { ...n.data, aiActive: n.id === aiActiveBlock, aiPlannedChange: plannedChanges.get(n.id) ?? null } }
+          : n,
+      ),
+    [blockNodes, aiActiveBlock, plannedChanges],
+  )
+
+  // Lane bands and ghosts are derived (memoized) rather than held in state,
+  // so React Flow's measured sizes for them would otherwise be dropped --
+  // and in controlled mode an unmeasured node stays `visibility: hidden`
+  // and can't anchor edges. Keep their measurements here and hand them back.
+  const [derivedMeasured, setDerivedMeasured] = useState<Record<string, { width: number; height: number }>>({})
+  const nodes: FlowNode[] = useMemo(
+    () => [
+      ...laneNodes.map((n) => (derivedMeasured[n.id] ? { ...n, measured: derivedMeasured[n.id] } : n)),
+      ...overlaidBlockNodes,
+      ...ghostNodes.map((n) => (derivedMeasured[n.id] ? { ...n, measured: derivedMeasured[n.id] } : n)),
+    ],
+    [laneNodes, overlaidBlockNodes, ghostNodes, derivedMeasured],
+  )
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => {
-    setBlockNodes((nds) => applyNodeChanges(changes, nds) as BlockFlowNode[])
+    const isDerived = (id: string) => id.startsWith('laneband_') || id.startsWith('ghost')
+    const derived = changes.filter((c) => c.type === 'dimensions' && isDerived(c.id) && c.dimensions)
+    if (derived.length > 0) {
+      setDerivedMeasured((prev) => {
+        const next = { ...prev }
+        for (const c of derived) if (c.type === 'dimensions' && c.dimensions) next[c.id] = c.dimensions
+        return next
+      })
+    }
+    const blockChanges = changes.filter((c) => !('id' in c) || !isDerived(c.id))
+    if (blockChanges.length > 0) setBlockNodes((nds) => applyNodeChanges(blockChanges as NodeChange<BlockFlowNode>[], nds))
   }, [])
+
+  const selectedIds = useMemo(() => {
+    const ids = blockNodes.filter((n) => n.selected).map((n) => n.id)
+    return ids.length > 0 ? ids : selectedId ? [selectedId] : []
+  }, [blockNodes, selectedId])
+
+  const buildLive = build != null && !BUILD_TERMINAL.has(build.phase)
+  const canvasLocked = build != null && BUILD_LOCKING.has(build.phase)
 
   const laneForY = useCallback(
     (y: number): string | null => {
@@ -376,6 +501,7 @@ function AppInner() {
 
   const onEdgeClick = useCallback(
     (_: unknown, edge: DataWireEdgeType) => {
+      if (edge.id.startsWith('ghostedge_')) return
       if (confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
       }
@@ -528,7 +654,7 @@ function AppInner() {
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
           <ReactFlow
             nodes={nodes}
-            edges={graph ? toEdges(graph) : []}
+            edges={graph ? [...toEdges(graph), ...(ghostEdges as unknown as DataWireEdgeType[])] : []}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
@@ -557,6 +683,23 @@ function AppInner() {
               onMove={moveLane}
             />
             <LaneResizeHandles lanes={laneLayout} collapsedLanes={collapsedLanes} onResize={resizeLane} />
+            <Panel position="top-right" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {canvasLocked && (
+                <span
+                  title="While the AI builds, the graph is read-only for you -- stop the build to edit"
+                  style={{ background: '#ede9fe', color: '#5b21b6', borderRadius: 4, padding: '3px 8px', fontSize: 12 }}
+                >
+                  AI is editing -- canvas read-only
+                </span>
+              )}
+              <button
+                className={buildOpen ? undefined : 'brand-primary'}
+                onClick={() => setBuildOpen((o) => !o)}
+                title="Have an AI plan and build a model from the selected blocks"
+              >
+                {buildLive && !buildOpen ? 'AI build in progress…' : 'Build with AI'}
+              </button>
+            </Panel>
             <Panel
               position="bottom-right"
               style={{
@@ -581,7 +724,21 @@ function AppInner() {
             </Panel>
           </ReactFlow>
         </div>
-        {selectedPort && graph ? (
+        {graph && (buildOpen || buildLive) && (
+          // Kept mounted (just hidden) while a build is live, so it keeps
+          // polling the build -- and the canvas -- with the panel closed.
+          <div style={{ display: buildOpen ? 'flex' : 'none' }}>
+            <BuildPanel
+              graph={graph}
+              selectedIds={selectedIds}
+              llmSettings={llmSettings}
+              onChanged={reload}
+              onBuild={setBuild}
+              onClose={() => setBuildOpen(false)}
+            />
+          </div>
+        )}
+        {buildOpen ? null : selectedPort && graph ? (
           <PortInspector
             blockId={selectedPort.blockId}
             port={selectedPort.port}
