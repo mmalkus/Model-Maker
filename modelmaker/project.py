@@ -90,6 +90,7 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
             group_by=b.get("group_by"),
             max_workers=b.get("max_workers"),
             column_tags=b.get("column_tags", {}),
+            provenance=b.get("provenance"),
         )
 
     wires = {
@@ -159,6 +160,10 @@ def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path
                 "outputs": [asdict(p) for p in b.outputs],
             },
         }
+        # Only written when set, so projects with no AI-built blocks save
+        # byte-identically to before this field existed.
+        if b.provenance is not None:
+            entry["provenance"] = b.provenance
         if inline_code is not None:
             entry["code"] = inline_code
         blocks_out[bid] = entry

@@ -42,6 +42,17 @@ def glm_fit(
     family: str = "gaussian",
     alpha: float = 0.0,
 ) -> tuple[pl.DataFrame, dict]:
+    """Fits a generalized linear model of a continuous/count `target` on
+    `features` (sklearn TweedieRegressor). Outputs: `predictions` -- the
+    input rows plus a `predicted` column (role=predicted) -- and `model`, a
+    JSON-shaped artifact (kind "glm": coefficients, intercept, family)
+    that the predict block can apply to other data. `family` is
+    "gaussian" (default, identity link), or "poisson", "gamma",
+    "inverse_gaussian" (log link; gamma/inverse_gaussian need a strictly
+    positive target, poisson a non-negative one). `alpha` is the L2
+    penalty strength (0 = unpenalized). `features` must be numeric,
+    null-free columns. `target` auto-fills from the input's role=target
+    column when left unset. Predictions are in-sample (on the fit data)."""
     from sklearn.linear_model import TweedieRegressor
 
     power = {"gaussian": 0.0, "poisson": 1.0, "gamma": 2.0, "inverse_gaussian": 3.0}.get(family)
@@ -87,6 +98,17 @@ def logistic_regression(
     C: float = 1.0,
     max_iter: int = 200,
 ) -> tuple[pl.DataFrame, dict]:
+    """Fits an L2-regularized logistic regression of a binary `target`
+    (0/1, 1 = event/default) on `features` (sklearn LogisticRegression) --
+    the standard PD / scorecard model. Outputs: `predictions` -- the input
+    rows plus `predicted_proba` (P(target=1), role=predicted) and
+    `predicted_class` (0/1 at a 0.5 cutoff) -- and `model`, a JSON-shaped
+    artifact (kind "logistic_regression": coefficients, intercept) usable
+    by predict and scorecard_scale. `C` is the inverse regularization
+    strength (smaller = stronger penalty; default 1.0); `max_iter` caps
+    solver iterations. `features` must be numeric, null-free columns (e.g.
+    WoE-transformed). `target` auto-fills from the input's role=target
+    column when left unset. Predictions are in-sample (on the fit data)."""
     from sklearn.linear_model import LogisticRegression
 
     x = df.select(features).to_numpy()

@@ -1,0 +1,539 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api } from './api'
+import type { BuildEvent, BuildOut, BuildPlan, GraphOut, LLMSettingsOut } from './types'
+
+// The AI model builder's side panel (see agent-builder-proposal.md §2):
+// start a build from the selected blocks, review preflight, review and
+// steer the plan (shown as ghost blocks on the canvas by App), watch the
+// build, answer its questions, read its report.
+
+const TERMINAL = new Set(['done', 'done_with_errors', 'stopped', 'failed', 'discarded'])
+const WORKING = new Set(['planning', 'building', 'final_run'])
+
+const PHASE_LABEL: Record<string, string> = {
+  preflight: 'Checking the data',
+  planning: 'Planning…',
+  awaiting_approval: 'Plan ready for review',
+  building: 'Building…',
+  awaiting_input: 'Waiting for your answer',
+  final_run: 'Running on the full data…',
+  done: 'Done',
+  done_with_errors: 'Done, with errors',
+  stopped: 'Stopped',
+  failed: 'Failed',
+  discarded: 'Discarded',
+}
+
+const box: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, marginBottom: 8 }
+const label: React.CSSProperties = { fontSize: 11, color: '#6b7280', fontWeight: 600, marginBottom: 4 }
+
+type Props = {
+  graph: GraphOut
+  selectedIds: string[]
+  llmSettings: LLMSettingsOut | null
+  onChanged: () => void
+  onBuild: (build: BuildOut | null) => void
+  onClose: () => void
+}
+
+export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild, onClose }: Props) {
+  const [build, setBuild] = useState<BuildOut | null>(null)
+  const [events, setEvents] = useState<BuildEvent[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const cursor = useRef(0)
+  const buildId = useRef<string | null>(null)
+
+  const apply = useCallback(
+    (b: BuildOut | null, isBusy?: boolean) => {
+      if (!b) {
+        setBuild(null)
+        onBuild(null)
+        return
+      }
+      if (b.id !== buildId.current) {
+        buildId.current = b.id
+        cursor.current = 0
+        setEvents(b.events)
+      } else {
+        setEvents((prev) => [...prev, ...b.events.filter((e) => e.seq >= prev.length)])
+      }
+      cursor.current = b.next_cursor
+      setBuild(b)
+      onBuild(b)
+      if (isBusy !== undefined) setBusy(isBusy)
+    },
+    [onBuild],
+  )
+
+  const poll = useCallback(() => {
+    api
+      .agentCurrent(cursor.current)
+      .then((s) => {
+        apply(s.build, s.busy)
+        onChanged()
+      })
+      .catch(() => {})
+  }, [apply, onChanged])
+
+  useEffect(() => {
+    api
+      .agentCurrent(0)
+      .then((s) => apply(s.build, s.busy))
+      .catch(() => {})
+  }, [apply])
+
+  const live = build && !TERMINAL.has(build.phase) && (busy || WORKING.has(build.phase))
+  useEffect(() => {
+    if (!live) return
+    const id = setInterval(poll, 1000)
+    return () => clearInterval(id)
+  }, [live, poll])
+
+  const act = useCallback(
+    (fn: () => Promise<BuildOut>) => {
+      setError(null)
+      fn()
+        .then((b) => {
+          apply(b, true)
+          onChanged()
+          setTimeout(poll, 300)
+        })
+        .catch((e) => setError((e as Error).message))
+    },
+    [apply, onChanged, poll],
+  )
+
+  return (
+    <div style={{ width: 380, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', fontSize: 12, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+        <strong style={{ fontSize: 14 }}>Build with AI</strong>
+        <span style={{ flex: 1 }} />
+        <button onClick={onClose} title="Close (the build keeps going)">×</button>
+      </div>
+      {error && <div style={{ ...box, borderColor: '#fecaca', background: '#fef2f2', color: '#b91c1c' }}>{error}</div>}
+
+      {!build || TERMINAL.has(build.phase) ? (
+        <>
+          {build && <Finished build={build} graph={graph} />}
+          <StartForm graph={graph} selectedIds={selectedIds} llmSettings={llmSettings} onStart={(body) => act(() => api.agentStart(body))} />
+        </>
+      ) : (
+        <>
+          <Header build={build} busy={busy} />
+          {build.phase === 'preflight' && <Preflight build={build} graph={graph} act={act} />}
+          {build.phase === 'awaiting_approval' && <PlanReview build={build} graph={graph} act={act} busy={busy} />}
+          {build.phase === 'awaiting_input' && <Question build={build} act={act} busy={busy} />}
+          <div style={{ display: 'flex', gap: 6, margin: '4px 0 8px' }}>
+            {build.phase !== 'preflight' && build.phase !== 'awaiting_approval' && (
+              <button onClick={() => act(() => api.agentAction('stop'))} title="Stop after the current step; keeps what's built (one Undo reverts it)">
+                Stop
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (confirm('Discard this build and put the graph back as it was?')) act(() => api.agentAction('discard'))
+              }}
+            >
+              Discard
+            </button>
+          </div>
+          <EventFeed events={events} graph={graph} />
+        </>
+      )}
+    </div>
+  )
+}
+
+// ---- start ---------------------------------------------------------------------
+
+type StartBody = Parameters<typeof api.agentStart>[0]
+
+function StartForm({
+  graph,
+  selectedIds,
+  llmSettings,
+  onStart,
+}: {
+  graph: GraphOut
+  selectedIds: string[]
+  llmSettings: LLMSettingsOut | null
+  onStart: (body: StartBody) => void
+}) {
+  const [goal, setGoal] = useState('')
+  const [planLlm, setPlanLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
+  const [buildLlm, setBuildLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
+  const [fullRun, setFullRun] = useState(true)
+  const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
+  const [sampleRows, setSampleRows] = useState(50000)
+  const anchors = selectedIds.filter((id) => graph.blocks[id])
+  const capable = llmSettings?.agent.capable_providers ?? ['claude_cli', 'anthropic', 'openai', 'gemini', 'lmstudio']
+
+  return (
+    <div>
+      <div style={label}>What should the AI build?</div>
+      <textarea
+        value={goal}
+        onChange={(e) => setGoal(e.target.value)}
+        rows={4}
+        style={{ width: '100%', boxSizing: 'border-box' }}
+        placeholder="e.g. PD model: logistic regression on WoE-transformed features, out-of-time validation on 2023, master scale with 10 grades"
+      />
+      <div style={{ ...label, marginTop: 8 }}>Build from (select blocks on the canvas; shift-click for several)</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minHeight: 22 }}>
+        {anchors.length === 0 && <span style={{ color: '#b45309' }}>Nothing selected -- select your prepared input block(s).</span>}
+        {anchors.map((id) => (
+          <span key={id} style={{ background: '#f3f4f6', borderRadius: 4, padding: '2px 6px' }}>
+            {graph.blocks[id].name}
+          </span>
+        ))}
+      </div>
+
+      <details style={{ marginTop: 8 }}>
+        <summary style={{ cursor: 'pointer', color: '#4b5563' }}>Models and options</summary>
+        <LlmPicker label="Plan LLM" value={planLlm} fallback={llmSettings?.agent.plan} capable={capable} onChange={setPlanLlm} />
+        <LlmPicker label="Build LLM" value={buildLlm} fallback={llmSettings?.agent.build} capable={capable} onChange={setBuildLlm} />
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+          <input type="checkbox" checked={fullRun} onChange={(e) => setFullRun(e.target.checked)} />
+          Finish with a run on the full data
+        </label>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+          Build on a sample:
+          <select value={sample} onChange={(e) => setSample(e.target.value as typeof sample)}>
+            <option value="auto">automatic (large data only)</option>
+            <option value="off">no, use full data</option>
+            <option value="custom">yes, rows:</option>
+          </select>
+          {sample === 'custom' && (
+            <input type="number" min={100} value={sampleRows} onChange={(e) => setSampleRows(Number(e.target.value))} style={{ width: 80 }} />
+          )}
+        </div>
+      </details>
+
+      <button
+        className="brand-primary"
+        style={{ marginTop: 10, width: '100%' }}
+        disabled={!goal.trim() || anchors.length === 0}
+        onClick={() =>
+          onStart({
+            goal,
+            anchors,
+            plan_llm: planLlm.provider || planLlm.model ? planLlm : undefined,
+            build_llm: buildLlm.provider || buildLlm.model ? buildLlm : undefined,
+            final_full_run: fullRun,
+            sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
+          })
+        }
+      >
+        Plan the build
+      </button>
+      <div style={{ color: '#6b7280', marginTop: 6 }}>
+        The AI plans first and changes nothing until you approve. It only sees column names, roles and summary statistics --
+        never rows.
+      </div>
+    </div>
+  )
+}
+
+function LlmPicker({
+  label: text,
+  value,
+  fallback,
+  capable,
+  onChange,
+}: {
+  label: string
+  value: { provider: string; model: string }
+  fallback?: { provider: string; model: string | null }
+  capable: string[]
+  onChange: (v: { provider: string; model: string }) => void
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 6 }}>
+      <span style={{ width: 64 }}>{text}</span>
+      <select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value })}>
+        <option value="">{fallback ? `default (${fallback.provider})` : 'default'}</option>
+        {capable.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <input
+        value={value.model}
+        onChange={(e) => onChange({ ...value, model: e.target.value })}
+        placeholder={fallback?.model ?? 'default model'}
+        style={{ flex: 1, minWidth: 0 }}
+      />
+    </div>
+  )
+}
+
+// ---- phases ----------------------------------------------------------------------
+
+function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
+  return (
+    <div style={{ ...box, background: '#f5f3ff', borderColor: '#ddd6fe' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {(busy || WORKING.has(build.phase)) && (
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: '#7c3aed', animation: 'mm-pulse 1s ease-in-out infinite' }} />
+        )}
+        <strong>{PHASE_LABEL[build.phase] ?? build.phase}</strong>
+      </div>
+      <div style={{ marginTop: 4, color: '#4b5563' }}>{build.goal}</div>
+      <div style={{ marginTop: 4, color: '#6b7280', fontSize: 11 }}>
+        plan: {build.plan_llm.provider}/{build.plan_llm.model ?? 'default'} · build: {build.build_llm.provider}/
+        {build.build_llm.model ?? 'default'}
+        {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
+        {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
+      </div>
+    </div>
+  )
+}
+
+type Act = (fn: () => Promise<BuildOut>) => void
+
+function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; act: Act }) {
+  const { blocking, warnings } = build.preflight
+  return (
+    <div>
+      {blocking.map((i) => (
+        <div key={i.code} style={{ ...box, borderColor: '#fecaca', background: '#fef2f2', color: '#991b1b', whiteSpace: 'pre-wrap' }}>
+          {i.message}
+        </div>
+      ))}
+      {warnings.map((i) => (
+        <div key={i.code} style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', color: '#92400e', whiteSpace: 'pre-wrap' }}>
+          {i.message}
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        {(blocking.some((i) => i.code === 'anchor_not_run') || warnings.some((i) => i.code === 'upstream_not_current')) && (
+          <button className="brand-primary" onClick={() => act(() => api.agentAction('run_upstream'))}>
+            Run upstream
+          </button>
+        )}
+        <button onClick={() => act(() => api.agentAction('recheck'))} title="Check again, e.g. after tagging roles">
+          Re-check
+        </button>
+        <button disabled={blocking.length > 0} onClick={() => act(() => api.agentAction('proceed'))}>
+          Proceed anyway
+        </button>
+      </div>
+      {blocking.length === 0 && warnings.length > 0 && (
+        <div style={{ color: '#6b7280', marginBottom: 8 }}>
+          Proceeding records these warnings in the build's report. Anchors: {build.anchors.map((a) => graph.blocks[a]?.name ?? a).join(', ')}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// `busy`: the model is still finishing its turn (e.g. a slow local model
+// writing a closing remark after submitting) -- the server refuses to act
+// until it's done, so the buttons wait too.
+function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: GraphOut; act: Act; busy: boolean }) {
+  const [feedback, setFeedback] = useState('')
+  const plan = build.plan
+  return (
+    <div>
+      {plan ? <PlanView plan={plan} graph={graph} /> : <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>}
+      <div style={label}>{plan?.questions?.length ? 'Answer its questions' : 'Feedback (optional)'}</div>
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        rows={3}
+        style={{ width: '100%', boxSizing: 'border-box' }}
+        placeholder="e.g. use a 70/30 split instead of out-of-time; drop the correlation step"
+      />
+      <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
+        <button
+          disabled={busy || !feedback.trim()}
+          onClick={() => {
+            act(() => api.agentFeedback(feedback))
+            setFeedback('')
+          }}
+        >
+          Re-plan with feedback
+        </button>
+        <button
+          className="brand-primary"
+          disabled={busy || !plan || (plan.questions?.length ?? 0) > 0}
+          onClick={() => act(() => api.agentAction('approve'))}
+          title="Let the AI build this plan"
+        >
+          Approve and build
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
+  const laneName = (key: string) => plan.lanes?.find((l) => l.key === key)?.name ?? graph.lanes[key]?.name ?? key
+  const byLane = new Map<string, typeof plan.steps>()
+  for (const s of plan.steps) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s])
+  const refName = (ref: string) => plan.steps.find((s) => s.ref === ref)?.name ?? graph.blocks[ref]?.name ?? ref
+  return (
+    <div>
+      <div style={box}>{plan.summary}</div>
+      {!!plan.questions?.length && (
+        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb' }}>
+          <div style={label}>Questions</div>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>
+        </div>
+      )}
+      {!!plan.assumptions?.length && (
+        <div style={box}>
+          <div style={label}>Assumptions</div>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.assumptions.map((a, i) => <li key={i}>{a}</li>)}</ul>
+        </div>
+      )}
+      {[...byLane.entries()].map(([lane, steps]) => (
+        <div key={lane} style={box}>
+          <div style={label}>{laneName(lane)}</div>
+          {steps.map((s) => (
+            <div key={s.ref} style={{ marginBottom: 6 }}>
+              <div>
+                <span style={{ color: '#7c3aed' }}>{s.ref}</span> <strong>{s.name}</strong>{' '}
+                <span style={{ color: '#6b7280' }}>({s.category})</span>
+              </div>
+              {s.inputs.length > 0 && (
+                <div style={{ color: '#6b7280' }}>from {s.inputs.map((i) => `${refName(i.from)}.${i.from_port}`).join(', ')}</div>
+              )}
+              {s.params && Object.keys(s.params).length > 0 && (
+                <div style={{ color: '#4b5563', fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-word' }}>
+                  {Object.entries(s.params)
+                    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                    .join(' ')}
+                </div>
+              )}
+              <div style={{ color: '#6b7280', fontStyle: 'italic' }}>{s.instruction ?? s.why}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+      {!!plan.changes_to_existing?.length && (
+        <div style={{ ...box, borderColor: '#c4b5fd' }}>
+          <div style={label}>Changes to your existing blocks</div>
+          {plan.changes_to_existing.map((c, i) => (
+            <div key={i}>
+              <strong>{graph.blocks[c.block]?.name ?? c.block}</strong>: {c.change} <span style={{ color: '#6b7280' }}>-- {c.why}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boolean }) {
+  const [answer, setAnswer] = useState('')
+  return (
+    <div>
+      <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box' }} />
+      <button
+        className="brand-primary"
+        style={{ marginTop: 6 }}
+        disabled={busy || !answer.trim()}
+        onClick={() => {
+          act(() => api.agentFeedback(answer))
+          setAnswer('')
+        }}
+      >
+        Send
+      </button>
+    </div>
+  )
+}
+
+function Finished({ build, graph }: { build: BuildOut; graph: GraphOut }) {
+  const good = build.phase === 'done'
+  return (
+    <div style={{ ...box, borderColor: good ? '#bbf7d0' : '#e5e7eb', marginBottom: 12 }}>
+      <div style={{ fontWeight: 600 }}>
+        Last build: {PHASE_LABEL[build.phase]} <span style={{ color: '#6b7280', fontWeight: 400 }}>-- {build.goal}</span>
+      </div>
+      {build.error && <div style={{ color: '#b91c1c', marginTop: 4 }}>{build.error}</div>}
+      {build.results.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          {build.results.map((r, i) => (
+            <div key={i}>
+              <strong>{r.label ?? `${graph.blocks[r.block]?.name ?? r.block}.${r.port}`}:</strong>{' '}
+              <code style={{ wordBreak: 'break-word' }}>{JSON.stringify(r.value ?? r.error ?? r.row_count)}</code>
+            </div>
+          ))}
+        </div>
+      )}
+      {build.report && <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto' }}>{build.report}</div>}
+      {build.deviations.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={label}>Deviations from the plan</div>
+          {build.deviations.map((d, i) => (
+            <div key={i}>
+              {d.plan_step && <span style={{ color: '#7c3aed' }}>{d.plan_step} </span>}
+              {d.what} -- <span style={{ color: '#6b7280' }}>{d.why}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {build.owned_blocks.length > 0 && build.phase !== 'discarded' && (
+        <div style={{ color: '#6b7280', marginTop: 6 }}>
+          {build.owned_blocks.length} block(s) built. The full report is saved as an artifact; Undo reverts the whole build in one step.
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- event feed ---------------------------------------------------------------------
+
+function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'ok' | 'err' | 'info' | 'ai' } | null {
+  const blockName = (id: unknown) => (typeof id === 'string' ? (graph.blocks[id]?.name ?? id) : '')
+  if (e.kind === 'assistant') return { text: String(e.text), tone: 'ai' }
+  if (e.kind === 'user') return { text: `You: ${String(e.text)}`, tone: 'info' }
+  if (e.kind === 'phase') return { text: `— ${PHASE_LABEL[String(e.phase)] ?? e.phase}${e.note ? ` (${e.note})` : ''}`, tone: 'info' }
+  if (e.kind === 'error') return { text: String(e.message), tone: 'err' }
+  if (e.kind === 'sample_mode') return { text: e.rows ? `Sample mode: ${Number(e.rows).toLocaleString()} rows` : 'Back to full data', tone: 'info' }
+  if (e.kind === 'approved_change') return { text: `Changed your block ${blockName(e.block)}: ${e.change}`, tone: 'info' }
+  if (e.kind !== 'tool') return null
+  const args = (e.args ?? {}) as Record<string, unknown>
+  const result = (e.result ?? {}) as Record<string, unknown>
+  const tool = String(e.tool)
+  const target =
+    tool === 'add_block'
+      ? String(args.category)
+      : tool === 'add_custom_block'
+        ? `custom: ${args.name}`
+        : tool === 'connect'
+          ? `${blockName(args.from_block)}.${args.from_port} → ${blockName(args.to_block)}.${args.to_port}`
+          : blockName(args.block ?? args.category ?? '')
+  let text = `${tool}${target ? ` ${target}` : ''}`
+  if (tool === 'run_to' && result.status) text += ` → ${result.status}`
+  if (!e.ok) text += `: ${String(result.error ?? '').slice(0, 300)}`
+  return { text, tone: e.ok && result.status !== 'red' ? 'ok' : 'err' }
+}
+
+function EventFeed({ events, graph }: { events: BuildEvent[]; graph: GraphOut }) {
+  const end = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: 'nearest' })
+  }, [events.length])
+  const color = { ok: '#15803d', err: '#b91c1c', info: '#6b7280', ai: '#1f2937' }
+  return (
+    <div style={{ ...box, flex: 1, minHeight: 120, overflowY: 'auto', fontSize: 11, background: '#fafafa' }}>
+      {events.map((e) => {
+        const d = describeEvent(e, graph)
+        if (!d) return null
+        return (
+          <div key={e.seq} style={{ color: color[d.tone], marginBottom: 3, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {d.tone === 'ok' ? '✓ ' : d.tone === 'err' ? '✗ ' : ''}
+            {d.text}
+          </div>
+        )
+      })}
+      <div ref={end} />
+    </div>
+  )
+}

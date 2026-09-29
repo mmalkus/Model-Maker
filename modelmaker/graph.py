@@ -90,6 +90,17 @@ class BlockInstance:
     # left out of Runner.compute_key's hash basis: retagging a column is not
     # a reason to invalidate this block or anything downstream.
     column_tags: dict[str, list[str]] = field(default_factory=dict)
+    # Where this block came from, when that's worth recording -- today only
+    # set for blocks an AI build created (see agent/build.py), e.g.
+    # {"source": "agent", "build_id": ..., "at": ..., "plan_llm": ...,
+    # "build_llm": ..., "plan_step": ..., "modified_by_user": False}, plus a
+    # "changes" history when a build edits a pre-existing block (whose
+    # "source" is then left unset, so a user block is never relabelled as
+    # AI-built just because an agent touched it). Descriptive audit trail
+    # only, like column_tags: deliberately outside Runner.compute_key's
+    # hash basis, so recording provenance never invalidates a cache. None
+    # for every hand-built block.
+    provenance: dict[str, Any] | None = None
 
     def resolved_fn(self):
         if self.is_custom:

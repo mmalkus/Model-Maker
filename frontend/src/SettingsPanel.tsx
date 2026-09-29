@@ -244,8 +244,81 @@ export function SettingsPanel({
               </div>
             </span>
           </label>
+
+          {settings.agent && (
+            <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 10, paddingTop: 8, fontSize: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>AI builder</div>
+              <div style={{ color: '#9ca3af', marginBottom: 6 }}>
+                Which LLMs plan and build models with "Build with AI". Planning is short but benefits from the strongest
+                model; building is many tool calls. Each can be overridden per build.
+              </div>
+              <AgentLlmRow
+                key={`plan-${settings.agent.plan.provider}-${settings.agent.plan.model}`}
+                label="Plan"
+                choice={settings.agent.plan}
+                capable={settings.agent.capable_providers}
+                disabled={busy}
+                onSave={(v) => update({ agent_plan: v })}
+              />
+              <AgentLlmRow
+                key={`build-${settings.agent.build.provider}-${settings.agent.build.model}`}
+                label="Build"
+                choice={settings.agent.build}
+                capable={settings.agent.capable_providers}
+                disabled={busy}
+                onSave={(v) => update({ agent_build: v })}
+              />
+            </div>
+          )}
         </>
       )}
+    </div>
+  )
+}
+
+function AgentLlmRow({
+  label,
+  choice,
+  capable,
+  disabled,
+  onSave,
+}: {
+  label: string
+  choice: { provider: string; model: string | null; provider_set?: boolean; model_set?: boolean }
+  capable: string[]
+  disabled: boolean
+  onSave: (v: { provider?: string | null; model?: string | null }) => void
+}) {
+  // The caller remounts this row (via `key`) when the saved choice changes,
+  // so the local text starts from it without syncing in an effect.
+  const [model, setModel] = useState(choice.model_set ? (choice.model ?? '') : '')
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
+      <span style={{ width: 36, color: '#6b7280' }}>{label}</span>
+      <select
+        value={choice.provider_set ? choice.provider : ''}
+        disabled={disabled}
+        onChange={(e) => onSave({ provider: e.target.value || null })}
+        style={{ fontSize: 12 }}
+      >
+        <option value="">active ({choice.provider_set ? '…' : choice.provider})</option>
+        {capable.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <input
+        value={model}
+        disabled={disabled}
+        onChange={(e) => setModel(e.target.value)}
+        onBlur={() => {
+          const trimmed = model.trim()
+          if (trimmed !== (choice.model_set ? (choice.model ?? '') : '')) onSave({ model: trimmed || null })
+        }}
+        placeholder={choice.model ?? '(default)'}
+        style={{ flex: 1, minWidth: 0, fontSize: 12, fontFamily: 'monospace' }}
+      />
     </div>
   )
 }

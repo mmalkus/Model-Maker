@@ -52,6 +52,10 @@ export interface BlockOut {
   // the runner's default".
   group_by: string | null
   max_workers: number | null
+  // Audit record for AI-built blocks (see BlockInstance.provenance): who
+  // built it, in which AI build, from which LLMs -- and whether a person
+  // has changed it since. null for hand-built blocks.
+  provenance: Provenance | null
   status: Status
   last_error: string | null
   last_successful_read_at: string | null
@@ -219,11 +223,118 @@ export interface LLMProviderSettings {
   api_key_source?: 'override' | 'env' | null
 }
 
+export interface AgentLLMChoice {
+  provider: string
+  model: string | null
+  // Whether Settings sets this explicitly, vs. falling back to the active
+  // provider / that provider's model.
+  provider_set?: boolean
+  model_set?: boolean
+}
+
 export interface LLMSettingsOut {
   providers: string[]
   active_provider: string
   include_reference: boolean | null
   settings: Record<string, LLMProviderSettings>
+  // The AI builder's plan and build LLMs (see agent-builder-proposal.md §9.1).
+  agent: { plan: AgentLLMChoice; build: AgentLLMChoice; capable_providers: string[] }
+}
+
+export interface Provenance {
+  source?: 'agent'
+  build_id?: string
+  at?: string
+  goal?: string
+  plan_llm?: string
+  build_llm?: string
+  plan_step?: string | null
+  modified_by_user?: boolean
+  // Approved changes AI builds made to a pre-existing (user) block.
+  changes?: { build_id: string; at: string; change: string }[]
+}
+
+// ---- AI model builder ------------------------------------------------------
+
+export type BuildPhase =
+  | 'preflight'
+  | 'planning'
+  | 'awaiting_approval'
+  | 'building'
+  | 'awaiting_input'
+  | 'final_run'
+  | 'done'
+  | 'done_with_errors'
+  | 'stopped'
+  | 'failed'
+  | 'discarded'
+
+export interface PreflightIssue {
+  code: string
+  message: string
+  blocks: string[]
+}
+
+export interface PlanStep {
+  ref: string
+  category: string
+  instruction?: string
+  lane: string
+  name: string
+  inputs: { port: string; from: string; from_port: string }[]
+  params?: Record<string, unknown>
+  why: string
+}
+
+export interface BuildPlan {
+  summary: string
+  assumptions?: string[]
+  questions?: string[]
+  lanes?: { key: string; name: string; purpose?: string }[]
+  steps: PlanStep[]
+  changes_to_existing?: { block: string; change: string; why: string }[]
+  // Ghost-block positions (see agent/tools.layout_plan) and the bands of
+  // lanes the plan would create.
+  layout: Record<string, { lane: string; x: number; y: number }>
+  lane_layout: Record<string, { name: string; top: number; height: number }>
+}
+
+export interface BuildEvent {
+  seq: number
+  at: string
+  kind: string
+  [key: string]: unknown
+}
+
+export interface BuildOut {
+  id: string
+  goal: string
+  anchors: string[]
+  phase: BuildPhase
+  created_at: string
+  plan_llm: { provider: string | null; model: string | null }
+  build_llm: { provider: string | null; model: string | null }
+  options: { final_full_run: boolean; sample_rows: number | null }
+  preflight: { blocking: PreflightIssue[]; warnings: PreflightIssue[]; max_rows?: number | null }
+  plan: BuildPlan | null
+  plan_rounds: number
+  pending_question: string | null
+  report: string | null
+  results: { block: string; port: string | null; label?: string | null; value?: unknown; row_count?: number; error?: string }[]
+  deviations: { plan_step?: string; what: string; why: string }[]
+  owned_blocks: string[]
+  sample_rows_used: number | null
+  counters: Record<string, number>
+  usage: { input_tokens: number; output_tokens: number; cost_usd?: number }
+  error: string | null
+  events: BuildEvent[]
+  next_cursor: number
+}
+
+export interface BuildStateOut {
+  build: BuildOut | null
+  busy?: boolean
+  canvas_locked?: boolean
 }
 
 export interface EnvVarStatus {

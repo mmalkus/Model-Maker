@@ -70,6 +70,10 @@ class ProjectSession:
         self.saved_revision = 0
         self._undo: list[Snapshot] = []
         self._redo: list[Snapshot] = []
+        # Depth of open transaction() blocks -- while > 0, edit() still
+        # bumps the revision and writes recovery, but pushes no undo point
+        # of its own (the transaction pushed one on entry).
+        self._transaction_depth = 0
 
     # ---- edit bookkeeping ---------------------------------------------
 
@@ -114,13 +118,47 @@ class ProjectSession:
         revision, but only if the mutation actually succeeds -- a rejected
         edit (a wire that would create a cycle, a duplicate role) must not
         leave a no-op entry on the undo stack for the user to step through."""
-        before = self._snapshot()
+        before = None if self._transaction_depth else self._snapshot()
         yield
-        self._undo.append(before)
-        del self._undo[:-UNDO_LIMIT]
+        if before is not None:
+            self._undo.append(before)
+            del self._undo[:-UNDO_LIMIT]
         self._redo.clear()
         self.revision += 1
         self._write_recovery()
+
+    @contextmanager
+    def transaction(self) -> Iterator[Snapshot]:
+        """Group any number of edit()s into a single undo point -- used by
+        an AI build (see agent/build.py), which makes dozens of edits the
+        user should be able to revert in one step. Pushes one snapshot on
+        entry and yields it (so the caller can restore it directly, e.g. to
+        discard a build); edits inside push none of their own. Unlike
+        edit(), the undo point is kept even if the body raises: whatever
+        edits succeeded before the failure are real changes to the graph,
+        and they must stay revertible. A transaction that made no edits at
+        all removes its own undo point on exit, so an empty one leaves
+        nothing to step through. Nests: only the outermost one records."""
+        outermost = self._transaction_depth == 0
+        before = self._snapshot()
+        start_revision = self.revision
+        if outermost:
+            self._undo.append(before)
+            del self._undo[:-UNDO_LIMIT]
+        self._transaction_depth += 1
+        try:
+            yield before
+        finally:
+            self._transaction_depth -= 1
+            if outermost and self.revision == start_revision and self._undo and self._undo[-1] is before:
+                self._undo.pop()
+
+    def restore_snapshot(self, snap: Snapshot) -> None:
+        """Put the graph back to a snapshot taken earlier (e.g. by
+        transaction()) as its own undoable edit -- so discarding an AI
+        build can itself be undone if it was a mistake."""
+        with self.edit():
+            self._restore(snap)
 
     def undo(self) -> bool:
         if not self._undo:
@@ -310,8 +348,20 @@ class ProjectSession:
         self.graph.blocks[bid] = block
         return block
 
-    def update_block(self, block_id: str, **fields: Any) -> BlockInstance:
+    def _mark_user_modified(self, block: BlockInstance, actor: str) -> None:
+        """Record on an AI-built block's provenance that a person has since
+        changed what it computes -- "the AI built it and someone changed it"
+        is exactly what a model reviewer needs to see (see
+        BlockInstance.provenance)."""
+        if actor == "user" and block.provenance and block.provenance.get("source") == "agent":
+            block.provenance = {**block.provenance, "modified_by_user": True}
+
+    def update_block(self, block_id: str, actor: str = "user", **fields: Any) -> BlockInstance:
+        """`actor` is "user" for every canvas/API edit and "agent" for an
+        AI build's own edits (see agent/tools.py) -- only a user's change
+        to params or code flags an AI-built block as modified_by_user."""
         block = self.graph.blocks[block_id]
+        old_params, old_code = block.params, block.code
         if "name" in fields and fields["name"] is not None:
             block.name = fields["name"]
         if "lane" in fields:
@@ -329,9 +379,11 @@ class ProjectSession:
             block.code_version += 1
         if "metadata_transform" in fields and fields["metadata_transform"] is not None:
             block.metadata_transform = fields["metadata_transform"]
+        if block.params != old_params or block.code != old_code:
+            self._mark_user_modified(block, actor)
         return block
 
-    def set_column_role(self, block_id: str, column: str, role: str) -> BlockInstance:
+    def set_column_role(self, block_id: str, column: str, role: str, actor: str = "user") -> BlockInstance:
         """Hand-tag one column's role on this block (see
         BlockInstance.column_role_overrides). role="unassigned" clears a
         previous tag. Rejects a role already sitting on a different column
@@ -373,6 +425,8 @@ class ProjectSession:
                             f"role '{dup_role.value}' can only be on one column here -- already set on {others[0]!r}"
                         )
 
+        if overrides != block.column_role_overrides:
+            self._mark_user_modified(block, actor)
         block.column_role_overrides = overrides
         return block
 
@@ -490,6 +544,28 @@ class ProjectSession:
             updated_at=now,
         )
         self.graph.artifacts[artifact.id] = artifact
+        return artifact
+
+    def upsert_artifact(self, kind: str, block_id: str, port: str, title: str, document: str, key: str | None = None) -> Artifact:
+        """Create or replace a generated document of any `kind` (e.g. an AI
+        build's report). With `key`, the artifact's id is derived from it,
+        so writing the same key again replaces that document in place;
+        without one, every call adds a new artifact."""
+        now = datetime.now(timezone.utc).isoformat()
+        artifact_id = f"art_{kind}_{key}" if key else new_id("art")
+        existing = self.graph.artifacts.get(artifact_id)
+        artifact = Artifact(
+            id=artifact_id,
+            kind=kind,
+            title=existing.title if existing else title,
+            block_id=block_id,
+            port=port,
+            document=document,
+            source_key=self.runner.compute_key(block_id),
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        self.graph.artifacts[artifact_id] = artifact
         return artifact
 
     def rename_artifact(self, artifact_id: str, title: str) -> Artifact:

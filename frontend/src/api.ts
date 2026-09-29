@@ -5,6 +5,8 @@ import type {
   BlockOut,
   BlockType,
   BrowseOut,
+  BuildOut,
+  BuildStateOut,
   DraftOut,
   EnvVarStatus,
   GitStatusOut,
@@ -161,7 +163,25 @@ export const api = {
     active_provider?: string
     include_reference?: boolean | null
     settings?: Record<string, { model?: string | null; base_url?: string | null; api_key?: string | null }>
+    agent_plan?: { provider?: string | null; model?: string | null }
+    agent_build?: { provider?: string | null; model?: string | null }
   }) => request<LLMSettingsOut>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
+
+  // AI model builder -- see agent-builder-proposal.md. One build at a time;
+  // everything after start() acts on "the current build".
+  agentStart: (body: {
+    goal: string
+    anchors: string[]
+    plan_llm?: { provider?: string | null; model?: string | null }
+    build_llm?: { provider?: string | null; model?: string | null }
+    final_full_run?: boolean
+    sample_rows?: number | null
+  }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
+  agentCurrent: (cursor = 0) => request<BuildStateOut>(`/agent/builds/current?cursor=${cursor}`),
+  agentAction: (action: 'recheck' | 'run_upstream' | 'proceed' | 'approve' | 'stop' | 'discard') =>
+    request<BuildOut>(`/agent/builds/current/${action}`, { method: 'POST' }),
+  agentFeedback: (text: string) =>
+    request<BuildOut>('/agent/builds/current/feedback', { method: 'POST', body: JSON.stringify({ text }) }),
   llmModels: (provider: string, baseUrl?: string) => {
     const q = new URLSearchParams({ provider })
     if (baseUrl) q.set('base_url', baseUrl)

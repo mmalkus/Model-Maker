@@ -6,6 +6,19 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--host"],
       "port": 5173
+    },
+    {
+      "name": "modelmaker-api-alt",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "modelmaker.api:app", "--host", "127.0.0.1", "--port", "8011"],
+      "port": 8011
+    },
+    {
+      "name": "modelmaker-frontend-alt",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--port", "5174", "--strictPort"],
+      "env": { "MODELMAKER_API_URL": "http://127.0.0.1:8011" },
+      "port": 5174
     }
   ]
 }
