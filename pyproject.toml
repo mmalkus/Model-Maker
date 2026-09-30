@@ -32,6 +32,11 @@ dependencies = [
     "scipy>=1.11.0",
     "numpy>=1.26.0",
     "python-dotenv>=1.0.0",
+    # The stdio server the claude CLI agent loop talks to
+    # (modelmaker/agent/mcp_server.py) -- core, since that loop is the
+    # default and needs no other extra. Below 2: mcp 2.x dropped the
+    # low-level Server decorator API (@server.list_tools()) it uses.
+    "mcp>=1.0.0,<2",
 ]
 
 [project.urls]

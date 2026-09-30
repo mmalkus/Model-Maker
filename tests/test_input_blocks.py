@@ -159,7 +159,8 @@ def _sqlite_db(tmp_path, rows):
     con.executemany("INSERT INTO loans VALUES (?, ?)", rows)
     con.commit()
     con.close()
-    return f"sqlite://{db_path}"
+    # sqlite:///C:/... on Windows, sqlite:///tmp/... elsewhere.
+    return f"sqlite:///{db_path.as_posix().lstrip('/')}"
 
 
 def test_read_sql(tmp_path, monkeypatch):
