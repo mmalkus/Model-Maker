@@ -678,7 +678,7 @@ def set_column_role(block_id: str, req: ColumnRoleUpdate) -> dict[str, Any]:
 
 
 @app.get("/api/blocks/{block_id}/input_schema")
-def input_schema_ep(block_id: str) -> dict[str, list[dict[str, str]]]:
+def input_schema_ep(block_id: str) -> dict[str, list[dict[str, Any]]]:
     """Column names/dtypes/roles available on each of a block's input ports
     (empty for a port whose upstream hasn't produced output yet) -- lets the
     UI offer column dropdowns for params instead of free-text entry."""

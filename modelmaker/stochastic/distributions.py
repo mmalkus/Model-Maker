@@ -70,7 +70,9 @@ def fit_distribution(x: np.ndarray, families: list[str] | None = None) -> dict[s
             params = dist.fit(x)
             loglik = float(np.sum(dist.logpdf(x, *params)))
             k = len(params)
-            ks_stat, ks_p = stats.kstest(x, name, args=params)
+            # The cdf callable, not the family name: scipy 1.18 maps "norm" to
+            # special.ndtr, which rejects the loc/scale args.
+            ks_stat, ks_p = stats.kstest(x, dist.cdf, args=params)
             ad_stat = _anderson_darling_statistic(x, lambda v, d=dist, p=params: d.cdf(v, *p))
             candidates.append(
                 {

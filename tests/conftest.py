@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# The git tests commit into throwaway repos; don't depend on the machine
+# having a git identity configured (a fresh CI runner doesn't).
+for _var, _value in {
+    "GIT_AUTHOR_NAME": "Model-Maker Tests",
+    "GIT_AUTHOR_EMAIL": "tests@example.invalid",
+    "GIT_COMMITTER_NAME": "Model-Maker Tests",
+    "GIT_COMMITTER_EMAIL": "tests@example.invalid",
+}.items():
+    os.environ.setdefault(_var, _value)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

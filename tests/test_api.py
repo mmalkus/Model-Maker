@@ -665,6 +665,17 @@ def test_input_schema_lists_all_declared_ports_even_when_unwired(client):
     assert schema == {"expected": [], "actual": []}
 
 
+def test_input_schema_of_a_run_upstream_carries_column_stats(client, tmp_path):
+    # Regression: ColumnInfo's optional stats (None where they don't apply)
+    # failed the endpoint's all-str response type -- a 500 as soon as the
+    # upstream had run.
+    display = client.post("/api/blocks", json={"category": "display_table"}).json()
+    _wired_read_csv(client, tmp_path, display["id"])
+    resp = client.get(f"/api/blocks/{display['id']}/input_schema")
+    assert resp.status_code == 200, resp.text
+    assert [c["name"] for c in resp.json()["df"]] == ["a", "b"]
+
+
 def test_display_value_wires_up_to_a_scalar_metric_port(client, tmp_path):
     # display_value's ports are typed "any" -- wiring a scalar_metric port
     # (auc_gini) into it must be accepted despite the type mismatch.

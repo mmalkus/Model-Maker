@@ -43,7 +43,7 @@ def test_render_chart_rejects_unknown_kind(df):
 def test_save_chart_writes_plain_text_by_default(df, tmp_path):
     path = charts.save_chart(df, tmp_path / "chart.txt", kind="hist", x="score", width=40, height=15)
     assert path == tmp_path / "chart.txt"
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert text.strip()
     assert "\x1b[" not in text  # no ANSI codes without keep_colors=True
 
@@ -52,7 +52,7 @@ def test_save_chart_keep_colors_preserves_ansi(df, tmp_path):
     path = charts.save_chart(
         df, tmp_path / "chart.txt", kind="hist", x="score", width=40, height=15, keep_colors=True
     )
-    assert "\x1b[" in path.read_text()
+    assert "\x1b[" in path.read_text(encoding="utf-8")
 
 
 def test_save_chart_creates_parent_dirs(df, tmp_path):
