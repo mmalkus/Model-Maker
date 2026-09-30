@@ -9,6 +9,9 @@ PortType = Literal[
     "scalar_metric",
     "image",
     "master_scale",
+    # A fitted binning (see blocks/binning.py fit_binning): bins + WoE per
+    # feature, applied unchanged to other samples by apply_binning.
+    "binning",
     "any",
     # Stochastic engine port types (see /stochastic-engine-proposal.md S2) --
     # each is a plain JSON-shaped dict, same "no special deserializer"

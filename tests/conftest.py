@@ -11,7 +11,7 @@ import modelmaker  # noqa: E402,F401
 # importing these for their registration side effect is what makes
 # BLOCK_REGISTRY complete, so a test module run on its own sees the same
 # catalog as one run as part of the whole suite.
-from modelmaker.blocks import feature_analysis, library, modelling, stat_tests, stochastic  # noqa: E402,F401
+from modelmaker.blocks import binning, data_quality, feature_analysis, library, modelling, stat_tests, stochastic  # noqa: E402,F401
 
 # The demo dataset isn't committed -- it's generated (fixed seed) by
 # modelmaker/demo_data.py. Several tests and the demo project read it from

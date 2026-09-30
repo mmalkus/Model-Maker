@@ -34,7 +34,24 @@ does the job (e.g. a multi-column transformation, an out-of-time split by \
 date). Registry block params are documented by describe_block_type -- read it \
 before using a block you haven't used yet in this build.
 - Keep the model proportionate to the goal. Don't add blocks the goal \
-doesn't call for."""
+doesn't call for.
+
+Modelling practice the registry is built around:
+- Fit anything learned from data on the development/train sample only and \
+apply the fitted artifact elsewhere: fit_binning on train, then \
+apply_binning on train, test and out-of-time (never woe_transform on a test \
+sample -- it re-derives WoE from that sample's own target); predict with the \
+train model; calibrate_model on development data.
+- fit_binning is also the univariate analysis (bin table, IV, \
+direction-adjusted Gini/KS or rank correlation for LGD/CCF, monotonicity); \
+pair it with characteristic_stability (drift per feature between samples) \
+and target_trend (target over time) rather than one block per feature.
+- Use time_split for an out-of-time sample, train_test_split with \
+stratify_col for a low default rate, derive_columns for ratios/flags and \
+one_hot_encode for categorical regressors before writing custom code.
+- For LGD: discount_recoveries -> compute_lgd (tags lgd as the target); for \
+CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
+(train/test/OOT side by side) and, for a rating scale, grade_backtest."""
 
 CUSTOM_CONTRACT = """Custom block contract (add_custom_block / update_custom_block):
 - Exactly one top-level Python function. Its first parameters are its \

@@ -29,6 +29,7 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
   train_test_split: [
     { key: 'test_size', label: 'Test size (fraction)', kind: 'number', step: 0.05 },
     { key: 'seed', label: 'Random seed', kind: 'number' },
+    { key: 'stratify_col', label: "Stratify by (optional, e.g. the default flag)", kind: 'column' },
   ],
   write_csv: [{ key: 'filename', label: 'Output filename', kind: 'text', placeholder: 'output.csv' }],
   read_excel: [{ key: 'sheet', label: 'Sheet name (optional -- defaults to the first sheet)', kind: 'text' }],
@@ -92,6 +93,7 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
       kind: 'select',
       options: ['quantile', 'equal_width', 'monotonic_default_rate'],
     },
+    { key: 'min_grade_share', label: "Minimum grade share (e.g. 0.03)", kind: 'number', step: 0.01 },
   ],
   assign_rating_grade: [{ key: 'score_col', label: 'Score column (defaults to the scale’s own)', kind: 'column', autoRole: 'predicted' }],
   rating_summary: [
@@ -117,6 +119,7 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'balance_default_col', label: 'Balance at default column', kind: 'column' },
     { key: 'floor', label: 'Floor', kind: 'number', step: 0.05 },
     { key: 'cap', label: 'Cap', kind: 'number', step: 0.05 },
+    { key: 'no_headroom', label: "No undrawn headroom at reference", kind: 'select', options: ['zero', 'null'] },
   ],
   continuous_accuracy: [
     { key: 'actual_col', label: 'Actual column', kind: 'column', autoRole: 'target' },
@@ -223,6 +226,81 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'value_col', label: 'Value column (risk_measures)', kind: 'column' },
     { key: 'n_bootstrap', label: 'Bootstrap replicates (risk_measures)', kind: 'number' },
     { key: 'seed', label: 'Random seed (risk_measures)', kind: 'number' },
+  ],
+  // Binning / univariate, calibration, LGD/CCF/EAD and back-testing blocks.
+  time_split: [
+    { key: 'date_col', label: "Date column", kind: 'column' },
+    { key: 'cutoff', label: "Cut-off date (first out-of-time day)", kind: 'text', placeholder: "2025-01-01" },
+    { key: 'oot_end', label: "Out-of-time end date (optional, exclusive)", kind: 'text', placeholder: "2026-01-01" },
+  ],
+  apply_binning: [
+    { key: 'output', label: "Output", kind: 'select', options: ['woe', 'target_mean', 'bin', 'both'] },
+    { key: 'features', label: "Features (optional -- defaults to every binned feature)", kind: 'columns' },
+  ],
+  scorecard_table: [
+    { key: 'base_score', label: "Base score", kind: 'number' },
+    { key: 'base_odds', label: "Base odds (good:bad)", kind: 'number' },
+    { key: 'pdo', label: "Points to double the odds", kind: 'number' },
+  ],
+  characteristic_stability: [
+    { key: 'features', label: "Features (optional -- defaults to all shared columns)", kind: 'columns' },
+    { key: 'bins', label: "Bins (numeric features)", kind: 'number' },
+  ],
+  target_trend: [
+    { key: 'date_col', label: "Date column", kind: 'column' },
+    { key: 'target_col', label: "Target column", kind: 'column', autoRole: 'target' },
+    { key: 'period', label: "Period", kind: 'select', options: ['month', 'quarter', 'year'] },
+    { key: 'features', label: "Features to trend (optional)", kind: 'columns' },
+  ],
+  bin_chart: [
+    { key: 'feature', label: "Feature", kind: 'text', placeholder: "credit_score" },
+    { key: 'title', label: "Title (optional)", kind: 'text' },
+  ],
+  stepwise_selection: [
+    { key: 'target', label: "Target column (binary, or LGD/CCF in [0, 1])", kind: 'column', autoRole: 'target' },
+    { key: 'features', label: "Candidate features", kind: 'columns' },
+    { key: 'direction', label: "Direction", kind: 'select', options: ['both', 'forward', 'backward'] },
+    { key: 'p_enter', label: "p-value to enter", kind: 'number', step: 0.01 },
+    { key: 'p_remove', label: "p-value to remove", kind: 'number', step: 0.01 },
+    { key: 'max_features', label: "Max features (optional)", kind: 'number' },
+  ],
+  calibrate_model: [
+    { key: 'central_tendency', label: "Central tendency (target mean, e.g. long-run default rate)", kind: 'number', step: 0.001 },
+  ],
+  margin_of_conservatism: [
+    { key: 'predicted_col', label: "Estimate column", kind: 'column', autoRole: 'predicted' },
+    { key: 'add_on', label: "Add-on", kind: 'number', step: 0.01 },
+    { key: 'multiplier', label: "Multiplier", kind: 'number', step: 0.05 },
+    { key: 'floor', label: "Floor (optional)", kind: 'number', step: 0.0001 },
+    { key: 'cap', label: "Cap (optional)", kind: 'number', step: 0.05 },
+    { key: 'output_col', label: "Output column", kind: 'text', placeholder: "predicted_moc" },
+  ],
+  discount_recoveries: [
+    { key: 'id_col', label: "Facility id column (both inputs)", kind: 'column' },
+    { key: 'default_date_col', label: "Default date column (facilities)", kind: 'column' },
+    { key: 'cf_date_col', label: "Cash-flow date column (cash flows)", kind: 'column' },
+    { key: 'recovery_col', label: "Recovery amount column", kind: 'column' },
+    { key: 'cost_col', label: "Workout cost column (optional)", kind: 'column' },
+    { key: 'annual_rate', label: "Annual discount rate", kind: 'number', step: 0.005 },
+    { key: 'rate_col', label: "Per-facility rate column (optional, overrides the rate)", kind: 'column' },
+  ],
+  compute_ead: [
+    { key: 'balance_col', label: "Drawn balance column", kind: 'column' },
+    { key: 'limit_col', label: "Limit column", kind: 'column' },
+    { key: 'predicted_col', label: "CCF column", kind: 'column', autoRole: 'predicted' },
+    { key: 'output_col', label: "Output column", kind: 'text', placeholder: "ead_predicted" },
+  ],
+  long_run_average: [
+    { key: 'target_col', label: "Realised value column (LGD, CCF or default flag)", kind: 'column', autoRole: 'target' },
+    { key: 'date_col', label: "Default date column", kind: 'column' },
+    { key: 'weight_col', label: "Exposure weight column (optional, e.g. EAD)", kind: 'column' },
+    { key: 'period', label: "Period", kind: 'select', options: ['year', 'quarter', 'month'] },
+  ],
+  grade_backtest: [
+    { key: 'grade_col', label: "Grade column", kind: 'column' },
+    { key: 'target_col', label: "Default flag column", kind: 'column', autoRole: 'target' },
+    { key: 'pd_col', label: "Grade PD column (e.g. grade_pd)", kind: 'column' },
+    { key: 'confidence', label: "Confidence level", kind: 'number', step: 0.005 },
   ],
 }
 

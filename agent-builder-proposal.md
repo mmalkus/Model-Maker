@@ -672,7 +672,7 @@ Defaults, adjustable in the Build panel:
 
 | Limit | Default | On hit |
 |---|---|---|
-| Tool calls per phase | plan 30, build 80 | stop, report |
+| Tool calls per phase | plan 30, build 150 | stop, report |
 | Custom blocks per build | 5 | tool error: "use a registry block or ask_user" |
 | Consecutive failed runs of one block | 3 | forced `ask_user` |
 | Wall time | 20 min | stop, report |

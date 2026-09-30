@@ -38,6 +38,7 @@ def ensure_blocks_registered() -> None:
     the API server does this at import time; the agent may also run from
     the MCP server or tests, which don't import api.py."""
     from ..blocks import (  # noqa: F401
+        binning,
         data_quality,
         feature_analysis,
         library,

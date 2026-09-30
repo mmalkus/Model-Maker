@@ -10,7 +10,7 @@ from .packet import ColumnRole
 # output_dir/block_id (see runner.run_block, compiler.compile_graph): no
 # per-block registry to keep in sync, and it works for custom AI-authored
 # blocks for free as long as the drafted code names the parameter this way.
-TARGET_PARAM_NAMES = ("target", "target_col")
+TARGET_PARAM_NAMES = ("target", "target_col", "actual_col")
 PREDICTED_PARAM_NAMES = ("score_col", "predicted_col")
 
 # Which param names, for a given upstream column role, opt a block function
