@@ -55,7 +55,7 @@ def _cache_dir() -> str:
 
 
 @pytest.fixture
-def server_base_url():
+def server_base_url(tmp_path):
     # Function-scoped (a fresh server per test) rather than shared: the
     # server's SESSION carries state (background run threads, the last-run
     # error slot) across requests, and a module-scoped server let one
@@ -65,9 +65,12 @@ def server_base_url():
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     env = {**os.environ, "MODELMAKER_HOST": "127.0.0.1", "MODELMAKER_PORT": str(port), "MODELMAKER_LLM_PROVIDER": "stub"}
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "modelmaker.api"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    # The server's own log goes to a file, echoed at teardown -- pytest only
+    # shows it for a failed test, where a 500 or crash is otherwise invisible
+    # (the client just sees "Server disconnected").
+    log_path = tmp_path / "modelmaker-api.log"
+    log = open(log_path, "wb")
+    proc = subprocess.Popen([sys.executable, "-m", "modelmaker.api"], env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
         if not _wait_for_health(base_url):
             proc.terminate()
@@ -79,6 +82,8 @@ def server_base_url():
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        log.close()
+        print(log_path.read_text(encoding="utf-8", errors="replace"))
         shutil.rmtree(_cache_dir(), ignore_errors=True)
 
 
@@ -94,9 +99,14 @@ def demo_project_path(tmp_path):
 
 
 async def _load(app: ModelMakerTUI, pilot) -> None:
+    # Wait for the whole first refresh, not just for app.graph to be set:
+    # refresh_all assigns the graph first and only builds the canvas and
+    # focuses the first block after. Asserting in between failed the test
+    # and tore the app down under the still-mounting canvas (surfacing as
+    # a misleading WidgetError from the startup worker).
     for _ in range(100):
         await pilot.pause(0.2)
-        if app.graph.get("blocks"):
+        if app.graph.get("blocks") and app._did_initial_focus and not app._refresh_lock.locked():
             return
     pytest.fail("project never finished loading")
 
