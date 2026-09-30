@@ -60,7 +60,7 @@ class LLMChoice:
 @dataclass
 class BuildLimits:
     plan_tool_calls: int = 30
-    build_tool_calls: int = 80
+    build_tool_calls: int = 150
     custom_blocks: int = 5
     consecutive_failures_per_block: int = 3
     wall_seconds: float = 20 * 60

@@ -148,3 +148,58 @@ def test_compiled_master_scale_pipeline_matches_engine_output(tmp_path):
     engine_out = runner.cache.get(runner.state["b_assign"].last_successful_key).outputs["out"]
     compiled_out = ns["b_assign_b_assign"]
     assert compiled_out.to_dicts() == engine_out.data.to_dicts()
+
+
+def test_monotonic_scale_spreads_a_zero_default_tail_over_several_grades():
+    """Leftover pools are merged by closest mean *predicted* score, not
+    observed rate -- every zero-default pool has observed rate 0, so
+    merging on that folded the whole low-risk tail into one grade."""
+    import numpy as np
+    import polars as pl
+
+    from modelmaker.blocks.modelling import fit_master_scale
+
+    rng = np.random.default_rng(0)
+    pd_ = np.exp(rng.uniform(np.log(0.0005), np.log(0.5), size=600))
+    y = (rng.random(600) < pd_).astype(int)
+    scale = fit_master_scale(pl.DataFrame({"pd": pd_, "y": y}), "pd", "y", n_grades=7, algorithm="monotonic_default_rate")
+    grades = scale["grades"]
+    zero_default = [g for g in grades if g["observed_rate"] == 0.0]
+    assert len(zero_default) >= 2
+    assert max(g["n"] for g in grades) / 600 < 0.5
+    rates = [g["observed_rate"] for g in grades]
+    assert all(a <= b for a, b in zip(rates, rates[1:]))
+
+
+def test_monotonic_scale_stays_monotonic_with_tied_scores_on_the_edges():
+    """A binned/WoE model has few distinct scores, so quantile edges land on
+    clumps of ties; pooling and grade assignment must use the same
+    (lo, hi] convention or the clumps land in a different grade than the
+    one monotonicity was checked for. This is the PD sample data case that
+    broke it."""
+    from pathlib import Path
+
+    import polars as pl
+
+    from modelmaker.blocks.binning import apply_binning, fit_binning
+    from modelmaker.blocks.library import time_split, train_test_split
+    from modelmaker.blocks.modelling import assign_rating_grade, calibrate_model, fit_master_scale, logistic_regression, predict
+
+    df = pl.read_csv(Path(__file__).resolve().parents[1] / "sample_data" / "credit_risk_data.csv")
+    dev, _ = time_split(df, "reference_date", "2025-01-01")
+    train, _ = train_test_split(dev, 0.3, 1, stratify_col="default_flag")
+    features = ["credit_score", "purpose", "employment_years", "home_ownership"]
+    binning, _, _ = fit_binning(train, "default_flag", features)
+    woe = apply_binning(train, binning)
+    _, model = logistic_regression(woe, "default_flag", [f"{f}_woe" for f in features])
+    scored = predict(woe, calibrate_model(woe, model, 0.08))
+
+    for share in (0.0, 0.05):
+        scale = fit_master_scale(scored, "predicted_proba", "default_flag", 7, "monotonic_default_rate", share)
+        graded = assign_rating_grade(scored, scale)
+        observed = graded.group_by("grade").agg(pl.col("default_flag").mean(), pl.len()).sort(pl.col("grade").cast(pl.Int64))
+        # The artifact's own per-grade stats match what assignment produces...
+        assert observed["len"].to_list() == [g["n"] for g in scale["grades"]]
+        # ...and observed default rate rises monotonically across grades.
+        rates = observed["default_flag"].to_list()
+        assert all(a <= b for a, b in zip(rates, rates[1:])), rates

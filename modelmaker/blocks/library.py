@@ -8,11 +8,12 @@ metadata_transform separately.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import polars as pl
 
 from ..metadata_transforms import broadcast_to_all_outputs, infer_dtypes, narrow_from_single_input, passthrough
-from ..packet import ColumnMeta
+from ..packet import ColumnMeta, ColumnRole
 from .base import BlockSpec, PortSpec, register_block
 
 
@@ -266,16 +267,23 @@ register_block(
 )
 
 
-def groupby_agg(df: pl.DataFrame, by: list[str], aggs: dict[str, str]) -> pl.DataFrame:
+def groupby_agg(df: pl.DataFrame, by: list[str], aggs: dict[str, str | list[str]]) -> pl.DataFrame:
     """Groups `df` by the `by` key columns and aggregates, one row per
     group on `out`. `aggs` maps a column name to the name of a polars
     expression method applied to it, e.g. {"balance": "sum", "pd":
     "mean"}; valid names include sum, mean, median, min, max, std, var,
-    count, n_unique, first, last. Each aggregated column keeps its own
-    name (so a column can be aggregated only once), and only `by` plus the
-    `aggs` keys appear in the output. Key columns keep their roles;
-    aggregated columns lose theirs. Output row order is not guaranteed."""
-    agg_exprs = [getattr(pl.col(c), fn)().alias(c) for c, fn in aggs.items()]
+    count, n_unique, first, last. A single aggregation keeps the column's
+    own name; a list of them (e.g. {"lgd": ["mean", "count", "std"]})
+    gives one column per aggregation, named `<column>_<agg>`. Only `by`
+    plus the aggregated columns appear in the output. Key columns keep
+    their roles; aggregated columns lose theirs. Output row order is not
+    guaranteed."""
+    agg_exprs = []
+    for c, fn in aggs.items():
+        if isinstance(fn, (list, tuple)):
+            agg_exprs += [getattr(pl.col(c), f)().alias(f"{c}_{f}") for f in fn]
+        else:
+            agg_exprs.append(getattr(pl.col(c), fn)().alias(c))
     return df.group_by(by).agg(agg_exprs)
 
 
@@ -340,18 +348,33 @@ register_block(
 )
 
 
-def train_test_split(df: pl.DataFrame, test_size: float = 0.2, seed: int = 0) -> tuple[pl.DataFrame, pl.DataFrame]:
+def train_test_split(
+    df: pl.DataFrame, test_size: float = 0.2, seed: int = 0, stratify_col: str | None = None
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Randomly splits `df`'s rows into two disjoint dataframes on the
     `train` and `test` ports; both keep every column and role. `test_size`
     is the fraction of rows sent to `test` (0-1, default 0.2; the test row
     count is rounded down), the rest go to `train`. `seed` fixes the
-    shuffle, so the same seed gives the same split. Simple random split --
-    not stratified by target."""
-    shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
-    n_test = int(len(shuffled) * test_size)
-    test = shuffled.head(n_test)
-    train = shuffled.tail(len(shuffled) - n_test)
-    return train, test
+    shuffle, so the same seed gives the same split.
+
+    `stratify_col` (e.g. the default flag, or a segment) splits each of its
+    values separately, so `train` and `test` get the same share of each --
+    the usual choice for a low default rate, where a plain random split can
+    leave the test sample with a noticeably different event rate. Left
+    unset, it's a simple random split."""
+    if stratify_col is None:
+        shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
+        n_test = int(len(shuffled) * test_size)
+        test = shuffled.head(n_test)
+        train = shuffled.tail(len(shuffled) - n_test)
+        return train, test
+    trains, tests = [], []
+    for _, part in sorted(df.group_by(stratify_col, maintain_order=True), key=lambda kv: str(kv[0])):
+        shuffled = part.sample(fraction=1.0, shuffle=True, seed=seed)
+        n_test = int(len(shuffled) * test_size)
+        tests.append(shuffled.head(n_test))
+        trains.append(shuffled.tail(len(shuffled) - n_test))
+    return pl.concat(trains), pl.concat(tests)
 
 
 register_block(
@@ -363,6 +386,143 @@ register_block(
         outputs=[PortSpec("train"), PortSpec("test")],
         fn=train_test_split,
         metadata_transform=broadcast_to_all_outputs,
+    )
+)
+
+
+def time_split(
+    df: pl.DataFrame, date_col: str, cutoff: str, oot_end: str | None = None
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Out-of-time split on a date column: rows dated before `cutoff`
+    (an ISO date, "YYYY-MM-DD") go to `development`, rows on or after it to
+    `out_of_time` -- the standard way to hold back the most recent period
+    for validation, instead of two hand-written filters. `oot_end`, when
+    set, also drops rows on/after that date from `out_of_time` (e.g. a
+    period whose outcome window isn't complete yet). `date_col` may be a
+    Date/Datetime column or ISO date strings. Rows with a null date go to
+    neither output. Both outputs keep every column and role."""
+    from datetime import date
+
+    dtype = df.schema[date_col]
+    if dtype == pl.Utf8:
+        d = pl.col(date_col).str.slice(0, 10).str.to_date("%Y-%m-%d", strict=False)
+    elif isinstance(dtype, pl.Datetime):
+        d = pl.col(date_col).dt.date()
+    else:
+        d = pl.col(date_col).cast(pl.Date)
+    cut = date.fromisoformat(cutoff)
+    development = df.filter(d < cut)
+    oot_mask = d >= cut
+    if oot_end is not None:
+        oot_mask = oot_mask & (d < date.fromisoformat(oot_end))
+    out_of_time = df.filter(oot_mask)
+    return development, out_of_time
+
+
+register_block(
+    BlockSpec(
+        category="time_split",
+        block_type="standard",
+        display_name="Out-of-time split",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("development"), PortSpec("out_of_time")],
+        fn=time_split,
+        metadata_transform=broadcast_to_all_outputs,
+    )
+)
+
+
+def derive_columns(df: pl.DataFrame, expressions: dict[str, str]) -> pl.DataFrame:
+    """Adds (or replaces) columns computed from SQL expressions over the
+    existing columns -- ratios, flags, differences, bands -- the everyday
+    feature engineering that otherwise needs a custom code block.
+    `expressions` maps each new column name to a Polars SQL expression,
+    e.g. {"utilisation": "balance / NULLIF(credit_limit, 0)",
+    "headroom": "credit_limit - balance", "is_secured": "collateral_value > 0",
+    "age_band": "CASE WHEN age < 30 THEN 'young' ELSE 'other' END"}.
+    Expressions are evaluated against the input columns (not each other),
+    in one step. New columns are tagged role=feature; a replaced column
+    keeps its role."""
+    return df.with_columns([pl.sql_expr(expr).alias(name) for name, expr in expressions.items()])
+
+
+def _derive_columns_meta(input_metas, outputs, params):
+    (in_meta,) = input_metas.values()
+    (out,) = outputs.values()
+    result = {}
+    for name in out.columns:
+        if name in in_meta:
+            result[name] = replace(in_meta[name], dtype=str(out.schema[name]))
+        else:
+            result[name] = ColumnMeta(dtype=str(out.schema[name]), role=ColumnRole.FEATURE)
+    return {"out": result}
+
+
+register_block(
+    BlockSpec(
+        category="derive_columns",
+        block_type="standard",
+        display_name="Derive columns",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=derive_columns,
+        lazy_fn=derive_columns,  # pure expressions, same over a LazyFrame
+        metadata_transform=_derive_columns_meta,
+    )
+)
+
+
+def one_hot_encode(
+    df: pl.DataFrame, columns: list[str], drop_first: bool = True, max_categories: int = 30, keep_original: bool = False
+) -> pl.DataFrame:
+    """Dummy-encodes categorical `columns` into 0/1 indicator columns named
+    `<column>_<value>` -- what a regression (logistic, GLM, LGD/CCF
+    fractional logit) needs for a categorical driver like product type or
+    seniority. `drop_first` (default) leaves out the alphabetically first
+    category of each column as the reference level (always the same one,
+    whatever the row order), so the dummies aren't collinear with the
+    intercept. A null gets its own `<column>_null` indicator. Refuses a
+    column with more than `max_categories` distinct values (almost
+    certainly an id -- use fit_binning for a high-cardinality driver).
+    `keep_original` keeps the source columns; by default they're dropped.
+
+    The category set comes from the data it's run on, so encode before any
+    train/test split to get the same dummies on both sides."""
+    for c in columns:
+        n = df[c].n_unique()
+        if n > max_categories:
+            raise ValueError(f"'{c}' has {n} distinct values (> max_categories={max_categories}) -- not a categorical to one-hot encode")
+    dummies = []
+    for c in columns:
+        values = df[c].cast(pl.Utf8)
+        levels = sorted(values.drop_nulls().unique().to_list())
+        if drop_first and levels:
+            levels = levels[1:]
+        dummies += [(values == level).fill_null(False).cast(pl.Int8).alias(f"{c}_{level}") for level in levels]
+        if values.null_count():
+            dummies.append(values.is_null().cast(pl.Int8).alias(f"{c}_null"))
+    base = df if keep_original else df.drop(columns)
+    return base.hstack(dummies)
+
+
+def _one_hot_meta(input_metas, outputs, params):
+    (in_meta,) = input_metas.values()
+    (out,) = outputs.values()
+    result = {}
+    for name in out.columns:
+        result[name] = in_meta[name] if name in in_meta else ColumnMeta(dtype=str(out.schema[name]), role=ColumnRole.FEATURE)
+    return {"out": result}
+
+
+register_block(
+    BlockSpec(
+        category="one_hot_encode",
+        block_type="standard",
+        display_name="One-hot encode",
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=one_hot_encode,
+        metadata_transform=_one_hot_meta,
     )
 )
 

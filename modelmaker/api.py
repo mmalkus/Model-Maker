@@ -22,6 +22,7 @@ from .agent.build import AgentBuild, BuildOptions, LLMChoice
 from .agent.controller import BuildController, BuildError
 from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
 from .agent.tools import tools_for_phase
+from .blocks import binning as _binning  # noqa: F401
 from .blocks import data_quality as _data_quality  # noqa: F401
 from .blocks import feature_analysis as _feature_analysis  # noqa: F401
 from .blocks import library as _library  # noqa: F401

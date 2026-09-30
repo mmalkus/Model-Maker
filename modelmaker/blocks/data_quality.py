@@ -156,8 +156,15 @@ def data_quality_rules(df: pl.DataFrame, rules: list[dict]) -> dict:
     error-severity rule passed) to decide whether to halt a pipeline on
     it, e.g. by wiring a downstream block that checks the result."""
     results = []
+    kinds = ("not_null", "unique", "in_set", "between", "row_count_between")
     for rule in rules:
-        kind = rule["rule"]
+        kind = rule.get("rule")
+        if kind not in kinds:
+            raise ValueError(
+                f"rule {rule.get('name', rule)!r} needs \"rule\" set to one of {', '.join(kinds)} "
+                f"(got {kind!r}) -- e.g. {{\"name\": \"dti range\", \"rule\": \"between\", \"column\": \"dti\", \"min\": 0, \"max\": 100}}. "
+                "For SQL-expression row filters use apply_exclusions instead."
+            )
         severity = rule.get("severity", "error")
         if kind == "row_count_between":
             n = df.height

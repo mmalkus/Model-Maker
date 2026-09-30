@@ -5,6 +5,7 @@ export type PortType =
   | 'scalar_metric'
   | 'image'
   | 'master_scale'
+  | 'binning'
   | 'any'
   // Stochastic engine port types (see /stochastic-engine-proposal.md) --
   // each is a plain JSON-shaped dict, rendered by PortDataView's generic
