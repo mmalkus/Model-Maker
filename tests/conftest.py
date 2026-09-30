@@ -25,8 +25,8 @@ import modelmaker  # noqa: E402,F401
 from modelmaker.blocks import binning, data_quality, feature_analysis, library, modelling, stat_tests, stochastic  # noqa: E402,F401
 
 # The demo dataset isn't committed -- it's generated (fixed seed) by
-# modelmaker/demo_data.py. Several tests and the demo project read it from
-# sample_data/, so write it there before collection, and rewrite it if the
+# modelmaker/demo_data.py. The agent tests read it as a file through Read
+# CSV, so write it to sample_data/ before collection, and rewrite it if the
 # generator has changed since it was last written.
 import tempfile  # noqa: E402
 

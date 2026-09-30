@@ -1,7 +1,8 @@
 """The demo dataset and how it reaches a pip-installed user: the generator
-must be deterministic, the data must actually support
-PD, LGD and CCF work with the library's own blocks, and a wheel must carry
-the demo projects plus the generator (not the CSV)."""
+must be deterministic, the demo_credit_data block must produce exactly what
+reading the generated CSV would, the data must actually support PD, LGD and
+CCF work with the library's own blocks, and a wheel must carry the demo
+projects plus the generator (no data files)."""
 
 from __future__ import annotations
 
@@ -15,8 +16,15 @@ import polars as pl
 import pytest
 
 from modelmaker import demo_data
+from modelmaker.blocks.library import demo_credit_data
 from modelmaker.blocks.modelling import compute_ccf, compute_lgd, lgd_regression
+from modelmaker.cache import CacheStore
+from modelmaker.compiler import compile_graph
+from modelmaker.graph import Graph
+from modelmaker.runner import Runner
 from modelmaker.session import ProjectSession
+
+from .helpers import make_block
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO_CSV = REPO_ROOT / "sample_data" / demo_data.FILENAME  # written by conftest.py
@@ -26,7 +34,7 @@ DEFAULT_ONLY = ["default_date", "balance_at_default", "recovery_amount", "workou
 
 @pytest.fixture(scope="module")
 def df() -> pl.DataFrame:
-    return pl.read_csv(DEMO_CSV)
+    return demo_credit_data()
 
 
 def test_generator_is_deterministic(tmp_path):
@@ -34,6 +42,40 @@ def test_generator_is_deterministic(tmp_path):
     b = demo_data.write_csv(tmp_path / "b.csv").read_bytes()
     assert a == b
     assert demo_data.write_csv(tmp_path / "c.csv", seed=demo_data.SEED + 1).read_bytes() != a
+
+
+def test_block_matches_reading_the_generated_csv(df):
+    assert df.height == demo_data.N_ROWS
+    assert df.equals(pl.read_csv(DEMO_CSV))
+
+
+def test_block_row_count_is_configurable_and_a_prefix_of_the_full_data(df):
+    small = demo_credit_data(n_rows=200)
+    assert small.height == 200
+    assert small.equals(df.head(200))
+    assert demo_credit_data(n_rows=12000).height == 12000
+    assert not demo_credit_data(n_rows=200, seed=7).equals(small)
+    with pytest.raises(ValueError, match="at least 1"):
+        demo_credit_data(n_rows=0)
+
+
+def test_block_honours_sample_mode(df):
+    assert demo_credit_data(sample_rows=50).equals(df.head(50))
+    # Sampling never asks for more rows than the block was configured with.
+    assert demo_credit_data(n_rows=30, sample_rows=50).height == 30
+
+
+def test_block_compiles_and_matches_engine_output():
+    graph = Graph(blocks={"b_demo": make_block("b_demo", "demo_credit_data", params={"n_rows": 300})}, wires={})
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_demo")
+    engine_out = runner.cache.get(runner.state["b_demo"].last_successful_key).outputs["out"].data
+
+    source = compile_graph(graph, runner=runner)
+    assert "category=demo_credit_data" in source
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["b_demo_b_demo"].equals(engine_out)
 
 
 def test_default_only_fields_are_filled_exactly_on_defaults(df):
@@ -86,7 +128,7 @@ def test_ccf_is_computable_on_defaulted_cards(df):
 
 def test_workspace_runs_the_demo_green_and_keeps_user_edits(tmp_path, monkeypatch):
     ws = demo_data.create_workspace(tmp_path / "demo")
-    assert (ws / "sample_data" / demo_data.FILENAME).is_file()
+    assert not (ws / "sample_data").exists()  # the demo generates its own data
     project = ws / "projects" / "demo_pd_model" / "model.json"
 
     monkeypatch.chdir(ws)

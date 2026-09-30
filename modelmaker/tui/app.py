@@ -772,8 +772,8 @@ def main() -> None:
             workspace = create_workspace(Path(args.demo))
         except FileNotFoundError as exc:
             raise SystemExit(f"modelmaker-tui: {exc}") from exc
-        # The spawned server inherits this cwd, which is what the demo's
-        # relative sample_data/ path resolves against.
+        # The spawned server inherits this cwd, so its cache and output/
+        # land in the demo folder rather than wherever this was run from.
         os.chdir(workspace)
         args.project = "projects/demo_pd_model"
 

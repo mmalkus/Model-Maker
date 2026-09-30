@@ -27,6 +27,7 @@ AGENT_DISALLOWED: dict[str, str] = {
     "read_json": "input blocks are prepared by the user, not the AI build",
     "read_excel": "input blocks are prepared by the user, not the AI build",
     "read_sql": "input blocks are prepared by the user, not the AI build",
+    "demo_credit_data": "input blocks are prepared by the user, not the AI build",
     "write_csv": "writing files is left to the user",
     "iterate": "fan-out (iterate/collect) isn't supported in AI builds yet",
     "collect": "fan-out (iterate/collect) isn't supported in AI builds yet",

@@ -75,6 +75,37 @@ register_block(
 )
 
 
+def demo_credit_data(n_rows: int = 5000, seed: int = 42, sample_rows: int | None = None) -> pl.DataFrame:
+    """Generates the synthetic retail credit-risk demo dataset (term loans
+    and credit cards, one row per facility) on the `out` port; no inputs,
+    no file. Supports PD (`default_flag`, a 12-month default), LGD
+    (`balance_at_default`, `recovery_amount`, `workout_cost` on defaults --
+    see compute_lgd) and CCF (`credit_limit`, `balance_at_reference`,
+    `balance_at_default` on defaulted credit cards -- see compute_ccf).
+    `n_rows` is the number of records; `seed` fixes the data, so the same
+    seed always gives the same rows, and a smaller `n_rows` gives the first
+    rows of the larger dataset. `sample_rows` is engine-injected in sample
+    mode; leave it unset."""
+    from modelmaker import demo_data
+
+    if n_rows < 1:
+        raise ValueError(f"n_rows must be at least 1, got {n_rows}")
+    return demo_data.to_frame(min(n_rows, sample_rows) if sample_rows is not None else n_rows, seed)
+
+
+register_block(
+    BlockSpec(
+        category="demo_credit_data",
+        block_type="input",
+        display_name="Demo credit data (PD/LGD/CCF)",
+        inputs=[],
+        outputs=[PortSpec("out")],
+        fn=demo_credit_data,
+        metadata_transform=infer_dtypes,
+    )
+)
+
+
 def read_parquet(path: str, sample_rows: int | None = None) -> pl.DataFrame:
     """Reads a Parquet file into a dataframe on the `out` port; no inputs.
     `path` is the file path. Dtypes come from the Parquet schema.
