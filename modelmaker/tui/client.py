@@ -164,7 +164,7 @@ class ModelMakerClient:
     async def set_column_role(self, block_id: str, column: str, role: str) -> dict[str, Any]:
         return await self._post(f"/api/blocks/{block_id}/column_role", json={"column": column, "role": role})
 
-    async def input_schema(self, block_id: str) -> dict[str, list[dict[str, str]]]:
+    async def input_schema(self, block_id: str) -> dict[str, list[dict[str, Any]]]:
         return await self._get(f"/api/blocks/{block_id}/input_schema")
 
     async def delete_block(self, block_id: str) -> dict[str, str]:

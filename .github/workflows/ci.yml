@@ -89,8 +89,9 @@ jobs:
       - name: Check the demo works from the built wheel
         run: |
           python -m pip install dist/*.whl
-          test -f "$(python -c 'import modelmaker, pathlib; print(pathlib.Path(modelmaker.__file__).parent)')/static/index.html"
+          # Out of the checkout, so `import modelmaker` is the installed wheel.
           cd "$RUNNER_TEMP"
+          test -f "$(python -c 'import modelmaker, pathlib; print(pathlib.Path(modelmaker.__file__).parent)')/static/index.html"
           modelmaker-demo demo
           test -f demo/projects/demo_pd_model/model.json
           test -f demo/sample_data/credit_risk_data.csv

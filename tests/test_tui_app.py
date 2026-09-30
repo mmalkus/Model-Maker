@@ -101,6 +101,19 @@ async def _load(app: ModelMakerTUI, pilot) -> None:
     pytest.fail("project never finished loading")
 
 
+async def _wait_for_run_all(app: ModelMakerTUI, pilot, timeout: float = 60.0) -> None:
+    # Run all works in the background; a fixed pause races it on a slow
+    # machine, and the next run request then fails "already in progress".
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await pilot.pause(0.3)
+        await app.refresh_all()
+        statuses = {b["status"] for b in app.graph["blocks"].values()}
+        if "running" not in statuses and "grey" not in statuses:
+            return
+    pytest.fail(f"run all never finished: {statuses}")
+
+
 def test_loads_project_and_focuses_first_block(server_base_url, demo_project_path):
     async def go():
         app = ModelMakerTUI(base_url=server_base_url, initial_project=demo_project_path)
@@ -150,7 +163,7 @@ def test_run_all_after_refreshing_sources(server_base_url, demo_project_path):
             await pilot.press("ctrl+g")  # refresh all sources
             await pilot.pause(2.0)
             await pilot.press("ctrl+r")  # run all
-            await pilot.pause(3.0)
+            await _wait_for_run_all(app, pilot)
             statuses = {b["status"] for b in app.graph["blocks"].values()}
             assert statuses == {"green"}
 
@@ -177,6 +190,8 @@ def test_add_delete_and_undo_block(server_base_url, demo_project_path):
             app.canvas.focus_block(new_id)
             await pilot.pause(0.2)
             await pilot.press("delete")
+            await pilot.pause(0.3)
+            await pilot.press("y")  # the delete ConfirmScreen
             await pilot.pause(0.5)
             assert len(app.graph["blocks"]) == before
 
@@ -211,7 +226,7 @@ def test_compile_opens_and_closes_script_view(server_base_url, demo_project_path
             await pilot.press("ctrl+g")  # refresh sources
             await pilot.pause(2.0)
             await pilot.press("ctrl+r")  # run all -- strict compile needs every block to have actually run
-            await pilot.pause(3.0)
+            await _wait_for_run_all(app, pilot)
             assert all(b["status"] == "green" for b in app.graph["blocks"].values())
 
             await pilot.press("c")
@@ -235,7 +250,7 @@ def test_generate_image_chart_preview_and_export(server_base_url, demo_project_p
             await pilot.press("ctrl+g")  # refresh sources
             await pilot.pause(2.0)
             await pilot.press("ctrl+r")  # run all -- b_clean needs a cached output to wire a chart from
-            await pilot.pause(3.0)
+            await _wait_for_run_all(app, pilot)
             assert app.graph["blocks"]["b_clean"]["status"] == "green"
 
             await pilot.press("a")
@@ -275,6 +290,6 @@ def test_generate_image_chart_preview_and_export(server_base_url, demo_project_p
 
             saved = save_chart(df, out_path, kind="hist", x="credit_score")
             assert saved.exists()
-            assert saved.read_text().strip()
+            assert saved.read_text(encoding="utf-8").strip()
 
     asyncio.run(go())
