@@ -59,14 +59,21 @@ db = ["connectorx>=0.3.3", "pyarrow>=16.0.0"]
 [project.scripts]
 modelmaker-api = "modelmaker.api:main"
 modelmaker-tui = "modelmaker.tui.app:main"
+modelmaker-demo = "modelmaker.demo_data:workspace_main"
 
 [tool.setuptools.packages.find]
 include = ["modelmaker*"]
 
 [tool.setuptools.package-data]
-# Built frontend assets (frontend/`npm run build`, emitted here) -- optional,
-# ships with the package when present so modelmaker-api can serve the UI.
-modelmaker = ["static/**/*"]
+modelmaker = [
+    # Built frontend assets (frontend/`npm run build`, emitted here) --
+    # optional, ships with the package when present so modelmaker-api can
+    # serve the UI.
+    "static/**/*",
+    # The demo project folders, copied from projects/ by setup.py. Their
+    # data is generated on demand by modelmaker/demo_data.py, not shipped.
+    "examples/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

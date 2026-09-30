@@ -6,5 +6,7 @@ __pycache__/
 output/
 *.egg-info/
 modelmaker/static/
+modelmaker/examples/
+sample_data/credit_risk_data.csv
 build/
 .env

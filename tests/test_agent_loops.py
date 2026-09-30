@@ -20,7 +20,7 @@ from modelmaker.agent.tools import tools_for_phase
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
 
-DATA = Path(__file__).resolve().parents[1] / "sample_data" / "pd_model_data.csv"
+DATA = Path(__file__).resolve().parents[1] / "sample_data" / "credit_risk_data.csv"
 
 
 class FakeEndpoint:

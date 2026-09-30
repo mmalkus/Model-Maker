@@ -754,7 +754,28 @@ def main() -> None:
     parser.add_argument("project", nargs="?", help="project folder to load on startup")
     parser.add_argument("--host", help="attach to an already-running modelmaker-api instead of spawning one")
     parser.add_argument("--port", type=int, default=8001, help="port for --host, or for the spawned server")
+    parser.add_argument(
+        "--demo",
+        nargs="?",
+        const="modelmaker-demo",
+        metavar="DIR",
+        help="set up the demo in DIR (default: ./modelmaker-demo, see modelmaker-demo) and open its PD project",
+    )
     args = parser.parse_args()
+
+    if args.demo:
+        if args.project or args.host:
+            parser.error("--demo can't be combined with a project path or --host")
+        from ..demo_data import create_workspace
+
+        try:
+            workspace = create_workspace(Path(args.demo))
+        except FileNotFoundError as exc:
+            raise SystemExit(f"modelmaker-tui: {exc}") from exc
+        # The spawned server inherits this cwd, which is what the demo's
+        # relative sample_data/ path resolves against.
+        os.chdir(workspace)
+        args.project = "projects/demo_pd_model"
 
     server_process: subprocess.Popen | None = None
     if args.host:
