@@ -94,4 +94,17 @@ jobs:
           test -f "$(python -c 'import modelmaker, pathlib; print(pathlib.Path(modelmaker.__file__).parent)')/static/index.html"
           modelmaker-demo demo
           test -f demo/projects/demo_pd_model/model.json
-          test -f demo/sample_data/credit_risk_data.csv
+          cd demo
+          python - <<'EOF'
+          from pathlib import Path
+
+          import modelmaker.api  # registers every block, as the server does
+          from modelmaker.session import ProjectSession
+
+          session = ProjectSession(recovery_path=None)
+          session.load(Path("projects/demo_pd_model/model.json"))
+          session.runner.run_all()
+          not_green = [b.name for bid, b in session.graph.blocks.items() if session.runner.status(bid) != "green"]
+          assert not not_green, f"demo blocks not green: {not_green}"
+          print("demo pipeline ran green from the installed wheel")
+          EOF
