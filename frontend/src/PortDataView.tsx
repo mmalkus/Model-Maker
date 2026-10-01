@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import { DataModal } from './DataModal'
-import { ASSIGNABLE_ROLES, ROLE_LABELS } from './roles'
+import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { Artifact, PortType, PreviewOut } from './types'
 
 // The actual look at a port's data (dataframe preview, image, or plain
@@ -39,6 +39,7 @@ export function PortDataView({
   const [pendingRoles, setPendingRoles] = useState<Record<string, string>>({})
   const [pendingTags, setPendingTags] = useState<Record<string, string[]> | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [assignRoles, setAssignRoles] = useAssignRolesPref()
 
   // This port's own data-analysis artifact, if one exists -- looked up on
   // open so a previously-generated write-up shows up again without
@@ -109,9 +110,10 @@ export function PortDataView({
   const analyzeData = () => {
     setAnalyzing(true)
     api
-      .analyzeData(blockId, port)
+      .analyzeData(blockId, port, assignRoles)
       .then((result) => {
         setPendingTags(result.tags)
+        setPendingRoles((prev) => ({ ...prev, ...result.roles }))
         onChanged?.()
         return api.getArtifact(result.artifact_id)
       })
@@ -160,7 +162,7 @@ export function PortDataView({
             <div style={{ color: '#6b7280', marginBottom: 8 }}>
               {preview.row_count} rows &middot; lineage: {preview.lineage.join(' -> ') || '(none)'}
             </div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
               <button
                 disabled={analyzing}
                 onClick={analyzeData}
@@ -168,6 +170,13 @@ export function PortDataView({
               >
                 {analyzing ? 'Analyzing…' : artifact ? 'Re-analyze' : 'AI analyze data'}
               </button>
+              <label
+                title="Also let the AI set a role (target, id, feature, ...) on columns that don't have one yet. Roles you've already set are never changed."
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}
+              >
+                <input type="checkbox" checked={assignRoles} onChange={(e) => setAssignRoles(e.target.checked)} />
+                set roles
+              </label>
               <button onClick={() => setShowTable(true)}>View full table</button>
             </div>
 

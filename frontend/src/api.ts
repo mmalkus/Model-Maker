@@ -194,8 +194,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ instruction: instruction ?? '', provider }),
     }),
-  analyzeData: (id: string, port?: string, provider?: string) =>
-    request<AnalyzeDataOut>(`/blocks/${id}/analyze_data`, { method: 'POST', body: JSON.stringify({ port, provider }) }),
+  analyzeData: (id: string, port?: string, assignRoles = false, provider?: string) =>
+    request<AnalyzeDataOut>(`/blocks/${id}/analyze_data`, {
+      method: 'POST',
+      body: JSON.stringify({ port, provider, assign_roles: assignRoles }),
+    }),
   suggestNames: (id: string, provider?: string) =>
     request<SuggestNamesOut>(`/blocks/${id}/suggest_names`, { method: 'POST', body: JSON.stringify({ provider }) }),
 

@@ -38,7 +38,7 @@ from .llm import lmstudio_provider as _lmstudio_provider
 from .llm import openai_provider as _openai_provider
 from .llm.redact import column_info_for_llm
 from .llm.settings import LLMSettingsStore
-from .packet import DataFramePacket
+from .packet import ColumnRole, DataFramePacket
 from .runslot import RunBusy, RunFailed, RunSlot
 from .session import ProjectSession, wire_is_valid
 
@@ -216,6 +216,9 @@ class DraftRequest(BaseModel):
 class AnalyzeDataRequest(BaseModel):
     port: str | None = None
     provider: str | None = None
+    # Also have the AI propose a role (target, id, feature, ...) for each
+    # column that doesn't have one yet, and apply it -- see analyze_data.
+    assign_roles: bool = False
 
 
 class SuggestNamesRequest(BaseModel):
@@ -1230,6 +1233,42 @@ def _slug(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_") or "block"
 
 
+ROLE_PARAM_PREFIX = "role:"
+ANALYZE_ROLES_INSTRUCTION = (
+    "\n\nAlso propose a role for each column whose current role is \"unassigned\": add a `params` entry "
+    f"keyed \"{ROLE_PARAM_PREFIX}<exact column name>\" whose value is exactly one of: id, target, weight, date, "
+    "feature, segment, excluded. id, target, weight and date may each go on at most one column. Only include "
+    "a column when its name and statistics make the role reasonably clear; omit it otherwise."
+)
+
+
+def _apply_suggested_roles(block_id: str, packet: DataFramePacket, params: dict[str, Any]) -> dict[str, str]:
+    """Apply the AI's "role:<column>" proposals from an analyze_data
+    response, only to columns that have no role yet -- a role the user (or
+    the block itself) already set is never overwritten. A proposal that
+    set_column_role rejects (unknown role, or a unique role already taken)
+    is skipped rather than failing the whole analysis. Returns what was
+    actually applied."""
+    block = SESSION.graph.blocks[block_id]
+    applied: dict[str, str] = {}
+    for key, role in params.items():
+        if not key.startswith(ROLE_PARAM_PREFIX) or not isinstance(role, str):
+            continue
+        column = key[len(ROLE_PARAM_PREFIX) :]
+        meta = packet.schema_meta.get(column)
+        if meta is None or meta.role != ColumnRole.UNASSIGNED or column in block.column_role_overrides:
+            continue
+        role = role.strip().lower()
+        if role in (ColumnRole.UNASSIGNED.value, ColumnRole.PREDICTED.value):
+            continue
+        try:
+            SESSION.set_column_role(block_id, column, role, actor="agent")
+        except ValueError:
+            continue
+        applied[column] = role
+    return applied
+
+
 @app.post("/api/blocks/{block_id}/analyze_data")
 def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) -> dict[str, Any]:
     """AI-assisted data profiling: looks at this block's own output columns
@@ -1252,8 +1291,11 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     summary = packet.summary or {}
 
     columns = [column_info_for_llm(name, meta, summary.get(name)) for name, meta in packet.schema_meta.items()]
+    instruction = "Analyze these columns as described in the system prompt: write the document and propose tags."
+    if req.assign_roles:
+        instruction += ANALYZE_ROLES_INSTRUCTION
     ctx = DraftContext(
-        instruction="Analyze these columns as described in the system prompt: write the document and propose tags.",
+        instruction=instruction,
         function_name="(not applicable to this action -- see the system prompt)",
         input_ports={"columns": columns},
         mode="analyze_data",
@@ -1271,8 +1313,11 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     }
     port = req.port or block.outputs[0].name
     artifact_title = f"{block.name} :: {port} -- data analysis"
+    roles: dict[str, str] = {}
     with SESSION.edit():
         SESSION.set_column_tags(block_id, tags)
+        if req.assign_roles:
+            roles = _apply_suggested_roles(block_id, packet, result.params or {})
         artifact = SESSION.upsert_data_analysis_artifact(block_id, port, artifact_title, result.explanation)
 
     document_path = None
@@ -1286,6 +1331,7 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     return {
         "document": result.explanation,
         "tags": tags,
+        "roles": roles,
         "document_path": document_path,
         "artifact_id": artifact.id,
     }

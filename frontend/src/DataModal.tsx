@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from './api'
-import { ASSIGNABLE_ROLES, ROLE_LABELS } from './roles'
+import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { PreviewOut } from './types'
 
 export function DataModal({
@@ -35,6 +35,7 @@ export function DataModal({
   // re-run, so the just-applied tags are tracked here for instant feedback.
   const [pendingTags, setPendingTags] = useState<Record<string, string[]> | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [assignRoles, setAssignRoles] = useAssignRolesPref()
   const [analysis, setAnalysis] = useState<{ document: string; documentPath: string | null } | null>(null)
   const [showDocument, setShowDocument] = useState(false)
 
@@ -42,9 +43,10 @@ export function DataModal({
     if (!blockId) return
     setAnalyzing(true)
     api
-      .analyzeData(blockId)
+      .analyzeData(blockId, undefined, assignRoles)
       .then((result) => {
         setPendingTags(result.tags)
+        setPendingRoles((prev) => ({ ...prev, ...result.roles }))
         setAnalysis({ document: result.document, documentPath: result.document_path })
         setShowDocument(true)
         onChanged?.()
@@ -100,13 +102,22 @@ export function DataModal({
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {blockId && (
-            <button
-              disabled={analyzing}
-              onClick={analyzeData}
-              title="Look at this data's column names and summary statistics, tag columns worth flagging, and write a short description -- see the Data Analysis panel below once it's done."
-            >
-              {analyzing ? 'Analyzing…' : 'AI analyze data'}
-            </button>
+            <>
+              <button
+                disabled={analyzing}
+                onClick={analyzeData}
+                title="Look at this data's column names and summary statistics, tag columns worth flagging, and write a short description -- see the Data Analysis panel below once it's done."
+              >
+                {analyzing ? 'Analyzing…' : 'AI analyze data'}
+              </button>
+              <label
+                title="Also let the AI set a role (target, id, feature, ...) on columns that don't have one yet. Roles you've already set are never changed."
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}
+              >
+                <input type="checkbox" checked={assignRoles} onChange={(e) => setAssignRoles(e.target.checked)} />
+                set roles
+              </label>
+            </>
           )}
           <button onClick={onClose}>Close</button>
         </div>
