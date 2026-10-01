@@ -38,19 +38,7 @@ jobs:
           cd "$RUNNER_TEMP"
           modelmaker-demo demo
           cd demo
-          python - <<'EOF'
-          from pathlib import Path
-
-          import modelmaker.api  # registers every block, as the server does
-          from modelmaker.session import ProjectSession
-
-          session = ProjectSession(recovery_path=None)
-          session.load(Path("projects/demo_pd_model/model.json"))
-          session.runner.run_all()
-          not_green = [b.name for bid, b in session.graph.blocks.items() if session.runner.status(bid) != "green"]
-          assert not not_green, f"demo blocks not green: {not_green}"
-          print("demo pipeline ran green from the installed wheel")
-          EOF
+          python "$GITHUB_WORKSPACE/.github/scripts/check_demo.py"
 
       - uses: actions/upload-artifact@v4
         with:
