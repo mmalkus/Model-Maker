@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from rich.text import Text
@@ -266,12 +267,23 @@ class Canvas(VerticalScroll):
         self._upstream: dict[str, set[str]] = {}  # block id -> blocks feeding it
         self._downstream: dict[str, set[str]] = {}  # block id -> blocks it feeds
         self._highlighted: str | None = None
+        # update_graph awaits mid-way (mounting/removing rows and chips), and
+        # the app can start a second one before the first finishes -- the
+        # 2s poll alongside an action's own refresh_all. Interleaved, one
+        # call can try to reorder a chip the other has just removed or not
+        # yet mounted ("BlockChip ... is not a child of HorizontalScroll"),
+        # so updates take turns.
+        self._update_lock = asyncio.Lock()
 
     def compose(self):
         yield self._wires_title
         yield self._wires_table
 
     async def update_graph(self, graph: dict[str, Any]) -> None:
+        async with self._update_lock:
+            await self._update_graph(graph)
+
+    async def _update_graph(self, graph: dict[str, Any]) -> None:
         lanes = graph.get("lanes", {})
         blocks: dict[str, dict[str, Any]] = graph.get("blocks", {})
         wires = graph.get("wires", {})
