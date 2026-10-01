@@ -27,18 +27,20 @@ a workout that cost more than it recovered (LGD > 1) -- because real data
 does that and compute_lgd/compute_ccf's floor/cap exist for it.
 
 Deterministic: a fixed seed and a private RNG, so the same version of this
-module always writes the byte-identical CSV. The CSV is neither committed
-nor shipped in the PyPI package: `modelmaker-demo` (see create_workspace)
-writes it next to a copy of the demo projects, tests/conftest.py writes it
-for the test suite, and it can be written anywhere with:
+module always produces the same rows, and a smaller row count gives a
+prefix of a larger one. Nothing is committed or shipped as a file: the
+demo_credit_data block (blocks/library.py) generates the data in memory,
+tests/conftest.py writes a CSV copy for tests that exercise Read CSV, and
+a file can be written anywhere with:
 
-    python -m modelmaker.demo_data path/to/credit_risk_data.csv
+    python -m modelmaker.demo_data path/to/credit_risk_data.csv --rows 10000
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import random
 import shutil
@@ -336,16 +338,29 @@ def generate(n_rows: int = N_ROWS, seed: int = SEED) -> list[dict]:
     return [_row(rng, i + 1) for i in range(n_rows)]
 
 
+def to_csv_text(n_rows: int = N_ROWS, seed: int = SEED) -> str:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(generate(n_rows, seed))
+    return buffer.getvalue()
+
+
+def to_frame(n_rows: int = N_ROWS, seed: int = SEED) -> "pl.DataFrame":
+    """The dataset as a dataframe -- parsed from the same CSV text
+    write_csv writes, so it has exactly the dtypes and values a Read CSV
+    block would get from that file. Backs the demo_credit_data block."""
+    import polars as pl
+
+    return pl.read_csv(io.StringIO(to_csv_text(n_rows, seed)))
+
+
 def write_csv(path: Path, n_rows: int = N_ROWS, seed: int = SEED) -> Path:
     """Writes the dataset to `path` (parent directories created) and
     returns it. Same arguments, same bytes."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    rows = generate(n_rows, seed)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
+    path.write_bytes(to_csv_text(n_rows, seed).encode("utf-8"))
     return path
 
 
@@ -361,16 +376,11 @@ def bundled_projects_dir() -> Path | None:
 
 
 def create_workspace(dest: Path) -> Path:
-    """Lays out a runnable copy of the demo in `dest`, mirroring the repo:
-
-        dest/projects/<each demo project>/model.json
-        dest/sample_data/credit_risk_data.csv   (generated, not copied)
-
-    Projects save back into their own folder, so they are copied somewhere
-    writable instead of being opened inside site-packages. Idempotent: an
-    existing project folder is left as is (it may hold the user's edits),
-    and the CSV is only written if missing. Start modelmaker-api/-tui from
-    `dest` -- the projects read their data by that cwd-relative path."""
+    """Copies the demo projects into `dest/projects/<name>/`. Projects save
+    back into their own folder, so they are copied somewhere writable
+    instead of being opened inside site-packages. Their data comes from the
+    demo_credit_data block, so no data files are needed. Idempotent: an
+    existing project folder is left as is (it may hold the user's edits)."""
     source = bundled_projects_dir()
     if source is None:
         raise FileNotFoundError("no bundled demo projects found in this install")
@@ -379,9 +389,6 @@ def create_workspace(dest: Path) -> Path:
         target = dest / "projects" / project.name
         if not target.exists():
             shutil.copytree(project, target)
-    data = dest / "sample_data" / FILENAME
-    if not data.exists():
-        write_csv(data)
     return dest
 
 
@@ -389,7 +396,7 @@ def workspace_main(argv: list[str] | None = None) -> None:
     """Entry point for the `modelmaker-demo` console script."""
     parser = argparse.ArgumentParser(
         prog="modelmaker-demo",
-        description="Set up a folder with the demo projects and their (generated) sample data.",
+        description="Copy the demo projects into a writable folder.",
     )
     parser.add_argument("dest", nargs="?", default="modelmaker-demo", help="folder to create (default: ./modelmaker-demo)")
     args = parser.parse_args(argv)
