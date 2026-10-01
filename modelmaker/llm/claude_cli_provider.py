@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
 from .prompts import JSON_ONLY_INSTRUCTIONS, build_user_prompt, contract_for, extract_json_response
@@ -29,23 +30,30 @@ class ClaudeCliProvider(LLMProvider):
 
     def draft(self, ctx: DraftContext) -> DraftResult:
         system = contract_for(ctx.mode, ctx.include_reference) + "\n" + JSON_ONLY_INSTRUCTIONS
+        # Prompt via stdin and system prompt via a file: as argv they can
+        # exceed Windows' 32K command-line limit (WinError 206).
+        fd, system_path = tempfile.mkstemp(prefix="modelmaker-system-", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(system)
         try:
             result = subprocess.run(
                 [
                     self.binary,
                     "-p",
-                    build_user_prompt(ctx),
                     "--output-format",
                     "json",
                     "--tools",
                     "",
                     "--model",
                     self.model,
-                    "--system-prompt",
-                    system,
+                    "--system-prompt-file",
+                    system_path,
                 ],
+                input=build_user_prompt(ctx),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=CLI_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as e:
@@ -60,6 +68,11 @@ class ClaudeCliProvider(LLMProvider):
                 "MODELMAKER_LLM_MODEL to a model your `claude` login can run "
                 "(verify with `claude -p \"hi\" --model <model>` directly)."
             ) from e
+        finally:
+            try:
+                os.unlink(system_path)
+            except OSError:
+                pass
         if result.returncode != 0:
             raise RuntimeError(f"claude CLI exited {result.returncode}: {(result.stderr or result.stdout).strip()}")
 
