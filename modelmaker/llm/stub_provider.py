@@ -33,6 +33,11 @@ class StubProvider(LLMProvider):
             # Deterministic placeholder tags, just enough for a caller to
             # exercise the apply path without a real provider configured.
             tags = {c.name: "stub-tag" for c in columns}
+            if "role:" in ctx.instruction:
+                # Asked for roles too (see api.ANALYZE_ROLES_INSTRUCTION):
+                # the first column as the target, the rest as features.
+                for i, c in enumerate(columns):
+                    tags[f"role:{c.name}"] = "target" if i == 0 else "feature"
             return DraftResult(params=tags, explanation=document)
 
         if ctx.mode == "params_only":

@@ -972,6 +972,47 @@ def test_artifact_becomes_stale_after_its_source_block_changes(client, tmp_path)
     assert client.get("/api/artifacts").json()[0]["stale"] is True
 
 
+def _preview_roles(client, block_id):
+    client.post(f"/api/blocks/{block_id}/refresh")
+    return {c["name"]: c["role"] for c in client.get(f"/api/blocks/{block_id}/preview").json()["columns"]}
+
+
+def test_analyze_data_leaves_roles_alone_by_default(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+
+    body = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()
+
+    assert body["roles"] == {}
+    assert body["tags"] == {"a": ["stub-tag"], "b": ["stub-tag"]}
+    assert _preview_roles(client, read["id"]) == {"a": "unassigned", "b": "unassigned"}
+
+
+def test_analyze_data_assigns_roles_when_asked(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+
+    body = client.post(
+        f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub", "assign_roles": True}
+    ).json()
+
+    assert body["roles"] == {"a": "target", "b": "feature"}
+    # Role proposals don't leak into the free-text tags.
+    assert body["tags"] == {"a": ["stub-tag"], "b": ["stub-tag"]}
+    assert _preview_roles(client, read["id"]) == {"a": "target", "b": "feature"}
+
+
+def test_analyze_data_never_overwrites_an_existing_role(client, tmp_path):
+    read = _green_read_csv_block(client, tmp_path)
+    client.post(f"/api/blocks/{read['id']}/column_role", json={"column": "a", "role": "id"})
+    client.post(f"/api/blocks/{read['id']}/refresh")
+
+    body = client.post(
+        f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub", "assign_roles": True}
+    ).json()
+
+    assert body["roles"] == {"b": "feature"}
+    assert _preview_roles(client, read["id"]) == {"a": "id", "b": "feature"}
+
+
 def test_rename_artifact(client, tmp_path):
     read = _green_read_csv_block(client, tmp_path)
     artifact_id = client.post(f"/api/blocks/{read['id']}/analyze_data", json={"provider": "stub"}).json()["artifact_id"]

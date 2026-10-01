@@ -182,6 +182,9 @@ export interface DraftOut {
 export interface AnalyzeDataOut {
   document: string
   tags: Record<string, string[]>
+  // Column -> role the AI set, when asked to (assign_roles). Only columns
+  // that had no role yet; empty otherwise.
+  roles: Record<string, string>
   // Where the document was written under the project's files/ folder, or
   // null when no project has been saved yet.
   document_path: string | null

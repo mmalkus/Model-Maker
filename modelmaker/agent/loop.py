@@ -497,11 +497,16 @@ class ClaudeCliLoop(AgentLoop):
 
     def _run(self, build: AgentBuild, prompt: str, tools: list[Tool]) -> LoopOutcome:
         config_path = self._mcp_config()
+        # The system prompt (block catalogue included) and the prompt (plan
+        # JSON included) easily exceed Windows' 32K command-line limit
+        # (WinError 206), so they go via a file and stdin, not argv.
+        fd, system_path = tempfile.mkstemp(prefix="modelmaker-system-", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(self.system)
         allowed = [f"mcp__{MCP_SERVER_NAME}__{t.name}" for t in tools]
         cmd = [
             self.binary,
             "-p",
-            prompt,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -515,7 +520,7 @@ class ClaudeCliLoop(AgentLoop):
             "--allowedTools",
             *allowed,
         ]
-        cmd += ["--system-prompt", self.system]
+        cmd += ["--system-prompt-file", system_path]
         if self.session_id:
             cmd += ["--resume", self.session_id]
         env = {**os.environ, "MCP_TOOL_TIMEOUT": str(30 * 60 * 1000), "MCP_TIMEOUT": "60000"}
@@ -526,14 +531,16 @@ class ClaudeCliLoop(AgentLoop):
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     env=env,
                 )
             proc = self._proc
-            assert proc.stdout is not None
+            assert proc.stdin is not None and proc.stdout is not None
+            proc.stdin.write(prompt)
+            proc.stdin.close()
             for line in proc.stdout:
                 line = line.strip()
                 if not line.startswith("{"):
@@ -567,10 +574,11 @@ class ClaudeCliLoop(AgentLoop):
                 stderr = (proc.stderr.read() if proc.stderr else "").strip()
                 error = f"claude CLI exited {proc.returncode}: {stderr[-800:]}"
         finally:
-            try:
-                os.unlink(config_path)
-            except OSError:
-                pass
+            for path in (config_path, system_path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         return LoopOutcome(final_text=final, error=error)
 
 
