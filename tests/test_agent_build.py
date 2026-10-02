@@ -4,6 +4,7 @@ turns instead of an LLM -- against the real runner and the PD sample data."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -479,3 +480,94 @@ def test_approve_while_the_ai_is_still_finishing_its_turn_changes_nothing(prepar
     controller.join(30)
     controller.approve()  # now fine
     assert b.phase in (BUILDING, AWAITING_INPUT)
+
+
+# ---- auto-build and the persisted log ---------------------------------------------------
+
+
+def test_auto_build_builds_without_waiting_for_approval(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    blocks_before = set(session.graph.blocks)
+    controller = make_controller(session, {"plan": [plan_turn], "build": [build_turn]})
+    b = start(controller, anchor, auto_build=True)
+    controller.join(300)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+    assert any(e["kind"] == "auto_approved" for e in b.events_since())
+    assert len(set(session.graph.blocks) - blocks_before) == 4
+    # Still one undo step, like an approved build.
+    assert session.undo() is True
+    assert set(session.graph.blocks) == blocks_before
+
+
+def test_auto_build_waits_when_the_plan_has_questions(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def asks_in_plan(call):
+        result = call(
+            "submit_plan",
+            {
+                "plan": {
+                    "summary": "split",
+                    "questions": ["Which seed?"],
+                    "lanes": [{"key": "est", "name": "Estimation"}],
+                    "steps": [
+                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
+                         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
+                    ],
+                }
+            },
+        )
+        assert result.get("ok"), result
+        return "planned"
+
+    controller = make_controller(session, {"plan": [asks_in_plan, plan_turn], "build": [build_turn]})
+    b = start(controller, anchor, auto_build=True)
+    controller.join(60)
+    assert b.phase == AWAITING_APPROVAL
+    assert any(e["kind"] == "auto_build_paused" for e in b.events_since())
+    # Answering re-plans; the new plan has no questions, so it builds.
+    controller.feedback("Seed 1.")
+    controller.join(300)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+
+
+def test_the_build_log_is_saved_with_models_and_timings(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [plan_turn], "build": [build_turn]})
+    b = controller.start("PD model", [anchor], LLMChoice("anthropic", "some-model"), LLMChoice("openai", "other-model"), BuildOptions(), token="t")
+    controller.join(60)
+    # Written while the build is still waiting for approval, not only at the end.
+    assert b.log_path is not None and b.log_path.is_file()
+    controller.approve()
+    controller.join(300)
+    assert b.phase == DONE
+
+    log = json.loads(b.log_path.read_text(encoding="utf-8"))
+    assert log["id"] == b.id and log["goal"] == "PD model" and log["phase"] == DONE
+    assert log["models"]["plan"] == {"provider": "anthropic", "model": "some-model", "label": "anthropic/some-model"}
+    assert log["models"]["build"]["model"] == "other-model"
+    assert log["created_at"] and log["ended_at"] and log["duration_seconds"] >= 0
+    assert log["options"]["auto_build"] is False
+    assert log["plan"]["summary"] and log["results"] and log["usage"] is not None
+    kinds = [e["kind"] for e in log["events"]]
+    assert "tool" in kinds and kinds[-1] == "phase"
+    assert all("at" in e for e in log["events"])
+
+
+def test_the_build_log_lives_in_the_project_folder_once_saved(prepared, tmp_path):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [plan_turn]})
+    b = start(controller, anchor)
+    controller.join(60)
+    cache_copy = b.log_path
+    assert cache_copy is not None and cache_copy.is_file()
+
+    session.save(tmp_path / "proj" / "model.json")
+    controller.stop()
+    assert b.log_path == tmp_path / "proj" / "ai_builds" / f"{b.id}.json"
+    assert json.loads(b.log_path.read_text(encoding="utf-8"))["phase"] == STOPPED
+    assert not cache_copy.exists()

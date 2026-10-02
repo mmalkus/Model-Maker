@@ -214,6 +214,7 @@ class BuildController:
         b.preflight = run_preflight(b)
         if b.preflight["blocking"] or b.preflight["warnings"]:
             b.log("preflight", **{k: v for k, v in b.preflight.items() if k != "max_rows"})
+            b.save_log()
             return
         self._start_planning()
 
@@ -283,6 +284,17 @@ class BuildController:
             # Ended its turn without a (valid) plan -- let the user nudge it.
             b.log("no_plan", text=outcome.final_text)
             b.set_phase(AWAITING_APPROVAL, note="the AI ended planning without submitting a plan")
+            return
+        if b.options.auto_build and b.phase == AWAITING_APPROVAL and b.plan is not None:
+            if b.plan.get("questions"):
+                # Can't approve over open questions -- wait for the answers
+                # like a normal build; once re-planned, auto-build applies.
+                b.log("auto_build_paused", reason="the plan has open questions")
+                return
+            # Still on this worker turn, so build right here rather than
+            # spawning another one (approve() would find the worker busy).
+            b.log("auto_approved")
+            self._begin_build()()
 
     def feedback(self, text: str) -> AgentBuild:
         """Plan feedback (re-plan), or the answer to an ask_user question."""
@@ -322,6 +334,14 @@ class BuildController:
                 raise BuildError("there's no plan to approve -- send feedback to have the AI plan again")
             if b.plan.get("questions"):
                 raise BuildError("the plan has open questions -- answer them as feedback first")
+            self._spawn(self._begin_build())
+            return b
+
+    def _begin_build(self) -> Callable[[], None]:
+        """Open the build's undo transaction and move to building; returns
+        the build turn to run (on a worker). Caller has checked the plan."""
+        with self._lock:
+            b = self.build
             session = self.session
             self._transaction = ExitStack()
             self._snapshot_before = self._transaction.enter_context(session.transaction())
@@ -333,13 +353,13 @@ class BuildController:
                 resolve_lane(b, lane["key"])
 
             def work() -> None:
+                b.turn_over = False
                 self._build_loop = self.loop_factory(b.build_llm, "build")
                 _record_resolved_model(b.build_llm, self._build_loop)
                 outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
                 self._after_build_turn(outcome)
 
-            self._spawn(work)
-            return b
+            return work
 
     def _maybe_sample(self) -> None:
         """§7: build on a sample when the data is large. Switching sample
@@ -517,4 +537,5 @@ class BuildController:
         if snapshot is not None:
             self.session.restore_snapshot(snapshot)
             b.log("discarded")
+            b.save_log()
         return b

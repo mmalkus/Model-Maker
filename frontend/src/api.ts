@@ -176,7 +176,9 @@ export const api = {
     build_llm?: { provider?: string | null; model?: string | null }
     final_full_run?: boolean
     sample_rows?: number | null
+    auto_build?: boolean
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
+  agentBuildLog: (buildId: string) => request<Record<string, unknown>>(`/agent/builds/${buildId}/log`),
   agentCurrent: (cursor = 0) => request<BuildStateOut>(`/agent/builds/current?cursor=${cursor}`),
   agentAction: (action: 'recheck' | 'run_upstream' | 'proceed' | 'approve' | 'stop' | 'discard') =>
     request<BuildOut>(`/agent/builds/current/${action}`, { method: 'POST' }),

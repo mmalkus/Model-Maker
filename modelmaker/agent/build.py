@@ -6,11 +6,13 @@ which is where the guards, limits, logging and the stop flag live. See
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..packet import ColumnRole, DataFramePacket
@@ -72,11 +74,29 @@ class BuildOptions:
     # None = decide from the data (see controller.approve): sample only
     # when the anchors' data is large.
     sample_rows: int | None = None
+    # Approve the plan as soon as it's submitted (when it has no open
+    # questions) instead of waiting for the user -- see
+    # controller._after_plan_turn.
+    auto_build: bool = False
     limits: BuildLimits = field(default_factory=BuildLimits)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Every build's full log (see AgentBuild.save_log) is written here, one
+# JSON file per build: inside the project folder once it has been saved
+# (so it's versioned with the model it built), else next to the cache.
+BUILD_LOG_DIRNAME = "ai_builds"
+
+
+def build_log_dir(session: "ProjectSession") -> Path:
+    if session.project_path is not None:
+        return session.project_path.parent / BUILD_LOG_DIRNAME
+    from ..session import CACHE_DIR
+
+    return CACHE_DIR / BUILD_LOG_DIRNAME
 
 
 class AgentBuild:
@@ -100,7 +120,11 @@ class AgentBuild:
         self.options = options or BuildOptions()
         self.phase = PREFLIGHT
         self.created_at = _now()
+        self.ended_at: str | None = None
         self.started_monotonic = time.monotonic()
+        self.log_path: Path | None = None  # where save_log last wrote
+        self._log_failed = False
+        self._log_write_lock = threading.Lock()
 
         self.preflight: dict[str, Any] = {"blocking": [], "warnings": []}
         self.plan: dict[str, Any] | None = None
@@ -153,7 +177,83 @@ class AgentBuild:
     def set_phase(self, phase: str, note: str | None = None) -> None:
         with self._lock:
             self.phase = phase
+            if phase in TERMINAL_PHASES and self.ended_at is None:
+                self.ended_at = _now()
         self.log("phase", phase=phase, **({"note": note} if note else {}))
+        # Every phase change rewrites the log, so even a build that dies
+        # mid-way (or a server that's killed) leaves its trail on disk.
+        self.save_log()
+
+    # ---- persisted log --------------------------------------------------
+
+    def log_record(self) -> dict[str, Any]:
+        """Everything about this build worth keeping after the server is
+        gone: who/what/when, the models that ran each phase, the options,
+        every plan round, the outcome, token usage and the full event log."""
+        with self._lock:
+            events = list(self._events)
+            phase = self.phase
+        return {
+            "id": self.id,
+            "goal": self.goal,
+            "anchors": self.anchors,
+            "anchor_names": {a: b.name for a in self.anchors if (b := self.session.graph.blocks.get(a)) is not None},
+            "project": {
+                "name": self.session.project_name,
+                "path": str(self.session.project_path.parent) if self.session.project_path else None,
+            },
+            "phase": phase,
+            "created_at": self.created_at,
+            "ended_at": self.ended_at,
+            "duration_seconds": round(time.monotonic() - self.started_monotonic, 1),
+            "models": {
+                "plan": {**asdict(self.plan_llm), "label": self.plan_llm.label()},
+                "build": {**asdict(self.build_llm), "label": self.build_llm.label()},
+            },
+            "options": asdict(self.options),
+            "preflight": self.preflight,
+            "plan": self.plan,
+            "plan_history": self.plan_history,
+            "pending_question": self.pending_question,
+            "report": self.report,
+            "key_outputs": self.key_outputs,
+            "results": self.results,
+            "deviations": self.deviations,
+            "owned_blocks": sorted(self.owned_blocks),
+            "owned_lanes": sorted(self.owned_lanes),
+            "sample_rows_used": self.sample_rows_used,
+            "counters": self.counters,
+            "usage": self.usage,
+            "error": self.error,
+            "events": events,
+        }
+
+    def save_log(self) -> Path | None:
+        """Write log_record() to build_log_dir()/<id>.json (atomically).
+        Never raises -- an unwritable folder must not fail the build; the
+        failure is noted in the event log instead (once)."""
+        with self._log_write_lock:
+            try:
+                directory = build_log_dir(self.session)
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"{self.id}.json"
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(self.log_record(), indent=2, default=str) + "\n", encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError as e:
+                if not self._log_failed:
+                    self._log_failed = True
+                    self.log("error", message=f"couldn't save the build log: {e}")
+                return None
+            # A build started before the project was first saved moves
+            # into the project folder on its next write; drop the old copy.
+            if self.log_path is not None and self.log_path != path:
+                try:
+                    self.log_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.log_path = path
+            return path
 
     # ---- ownership ------------------------------------------------------
 
@@ -302,9 +402,15 @@ class AgentBuild:
             "anchors": self.anchors,
             "phase": self.phase,
             "created_at": self.created_at,
+            "ended_at": self.ended_at,
             "plan_llm": asdict(self.plan_llm),
             "build_llm": asdict(self.build_llm),
-            "options": {"final_full_run": self.options.final_full_run, "sample_rows": self.options.sample_rows},
+            "options": {
+                "final_full_run": self.options.final_full_run,
+                "sample_rows": self.options.sample_rows,
+                "auto_build": self.options.auto_build,
+            },
+            "log_path": str(self.log_path) if self.log_path else None,
             "preflight": self.preflight,
             "plan": self.plan,
             "plan_rounds": len(self.plan_history),

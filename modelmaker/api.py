@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import os
 import re
 import secrets
@@ -18,7 +19,7 @@ from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
-from .agent.build import AgentBuild, BuildOptions, LLMChoice
+from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildController, BuildError
 from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
 from .agent.tools import tools_for_phase
@@ -40,7 +41,7 @@ from .llm.redact import column_info_for_llm
 from .llm.settings import LLMSettingsStore
 from .packet import ColumnRole, DataFramePacket
 from .runslot import RunBusy, RunFailed, RunSlot
-from .session import ProjectSession, wire_is_valid
+from .session import CACHE_DIR, ProjectSession, wire_is_valid
 
 try:
     from .llm import anthropic_provider as _anthropic_provider
@@ -1529,6 +1530,8 @@ class AgentBuildStart(BaseModel):
     final_full_run: bool = True
     # None = decide from the data size; 0 = never sample.
     sample_rows: int | None = None
+    # Build straight after planning, without waiting for approval.
+    auto_build: bool = False
 
 
 class AgentText(BaseModel):
@@ -1564,7 +1567,7 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001 -- each SDK raises its own type for a missing key
             raise HTTPException(400, f"{label} LLM ({choice.provider}): {e}")
     _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
-    options = BuildOptions(final_full_run=req.final_full_run, sample_rows=req.sample_rows)
+    options = BuildOptions(final_full_run=req.final_full_run, sample_rows=req.sample_rows, auto_build=req.auto_build)
     return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
 
 
@@ -1573,6 +1576,22 @@ def agent_current(cursor: int = 0) -> dict[str, Any]:
     if AGENT.build is None:
         return {"build": None}
     return {"build": AGENT.build.to_dict(cursor), "busy": AGENT._busy(), "canvas_locked": AGENT.canvas_locked()}
+
+
+@app.get("/api/agent/builds/{build_id}/log")
+def agent_build_log(build_id: str) -> dict[str, Any]:
+    """A build's persisted log (see AgentBuild.save_log): models, timings,
+    plan rounds, outcome, usage and every event."""
+    if not re.fullmatch(r"build_[0-9a-f]+", build_id):
+        raise HTTPException(400, "bad build id")
+    current = AGENT.build
+    if current is not None and current.id == build_id:
+        return current.log_record()
+    candidates = [build_log_dir(SESSION) / f"{build_id}.json", CACHE_DIR / BUILD_LOG_DIRNAME / f"{build_id}.json"]
+    for path in candidates:
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    raise HTTPException(404, f"no saved log for {build_id}")
 
 
 @app.post("/api/agent/builds/current/recheck")
