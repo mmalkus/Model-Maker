@@ -126,27 +126,23 @@ def _anchor_context(build: AgentBuild) -> str:
 
 def _catalogue_context(compact: bool = False) -> str:
     """The registry blocks for the system prompt. Full: one line per block
-    with ports and summary (~5k tokens). Compact, for small-context local
-    models (see loop.LMStudioLoop): just the block names per category
-    (~200 tokens) -- the model pulls a category's ports and summaries with
-    list_block_types(group=...), or one block's params with
-    describe_block_type, only for what the goal needs."""
-    entries = catalogue.list_block_types()
+    with tags, ports and summary (~8k tokens). Compact, for small-context
+    local models (see loop.LMStudioLoop): just the tags (~400 tokens) --
+    the model pulls a tag's blocks with list_block_types(tag=...), and one
+    block's ports and params with describe_block_type, only for what the
+    goal needs."""
     if compact:
-        groups: dict[str, list[str]] = {}
-        for e in entries:
-            groups.setdefault(e["group"], []).append(e["category"])
-        lines = [f"- {g}: {', '.join(cats)}" for g, cats in groups.items()]
+        lines = [f"- {t['tag']} ({t['blocks']}): {t['about']}" for t in catalogue.list_tags()]
         return (
-            "## Registry blocks by category\n"
-            "Call list_block_types with group=<category> for ports and summaries, and "
-            "describe_block_type for a block's params, before using it.\n" + "\n".join(lines)
+            "## Registry block tags\n"
+            "Call list_block_types with tag=<tag> to see that tag's blocks, and "
+            "describe_block_type for a block's ports and params, before using it.\n" + "\n".join(lines)
         )
     lines = []
-    for e in entries:
+    for e in catalogue.list_block_types():
         ins = ", ".join(f"{p['name']}:{p['type']}" for p in e["inputs"]) or "-"
         outs = ", ".join(f"{p['name']}:{p['type']}" for p in e["outputs"]) or "-"
-        lines.append(f"- {e['category']} [{e['group']}] ({ins}) -> ({outs}): {e['summary']}")
+        lines.append(f"- {e['category']} [{', '.join(e['tags'])}] ({ins}) -> ({outs}): {e['summary']}")
     return "## Registry blocks\n" + "\n".join(lines)
 
 

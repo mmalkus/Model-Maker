@@ -6,6 +6,7 @@ second list to keep in sync."""
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any
 
 from ..blocks.base import BLOCK_REGISTRY, BlockSpec
@@ -34,6 +35,47 @@ AGENT_DISALLOWED: dict[str, str] = {
 }
 
 
+# The tags an AI build browses the catalogue by, in the order the compact
+# system prompt lists them. Each block declares its own tags (BlockSpec.tags):
+# what it does, and which risk model it's for. list_block_types(tag=...) lists
+# one tag's blocks with a one-sentence summary, so a small local model never
+# has to read the whole catalogue at once. Every block an AI build may add
+# needs at least one tag; keep each tag to ~10 blocks so its listing stays
+# well inside a local model's tool-result cap (both checked by
+# tests/test_agent_foundations.py).
+TAGS: dict[str, str] = {
+    "data_prep": "row/column transformations: derive, filter, select, join, aggregate, encode, treat missings, exclusions",
+    "sampling": "train/test and out-of-time splits",
+    "data_quality": "profiling, data quality rules, missing values, exclusion waterfalls, target over time",
+    "binning_woe": "coarse classing and weight-of-evidence encoding",
+    "feature_selection": "univariate screens, multicollinearity, stepwise selection",
+    "regression": "fitting, applying and calibrating regression models",
+    "scorecard": "points-based scorecards built on binned/WoE features",
+    "rating_scale": "master scales, rating grades and grade-level checks",
+    "performance": "discrimination and accuracy: AUC/Gini, KS, ROC, sample comparison, continuous accuracy",
+    "calibration": "calibration tests and adjustments: Hosmer-Lemeshow, backtests, long-run average, MoC",
+    "stability": "population and characteristic stability, target trend",
+    "pd": "probability of default models: fit, calibrate, grade, backtest",
+    "lgd": "loss given default: recoveries, LGD target, fractional logit, validation",
+    "ccf_ead": "credit conversion factor and exposure at default",
+    "capital_simulation": "economic capital: ASRF, Monte Carlo credit/op-risk simulation, aggregation, VaR/TVaR",
+    "distributions": "fit and sample parametric distributions, dependency structures, risk measures",
+    "proxy_models": "surrogate valuation functions: fit, evaluate, validate, var-covar",
+    "output": "tables, values and charts to report",
+}
+
+
+def _tagged(tag: str) -> list[BlockSpec]:
+    return [
+        spec for spec in BLOCK_REGISTRY.values() if tag in spec.tags and spec.category not in AGENT_DISALLOWED
+    ]
+
+
+def list_tags() -> list[dict[str, Any]]:
+    ensure_blocks_registered()
+    return [{"tag": tag, "blocks": len(_tagged(tag)), "about": about} for tag, about in TAGS.items()]
+
+
 def ensure_blocks_registered() -> None:
     """Import every block library module so BLOCK_REGISTRY is complete --
     the API server does this at import time; the agent may also run from
@@ -52,6 +94,15 @@ def ensure_blocks_registered() -> None:
 def _summary_line(doc: str) -> str:
     first = doc.strip().split("\n\n", 1)[0]
     return " ".join(first.split())
+
+
+def _first_sentence(summary: str, limit: int = 220) -> str:
+    """The first sentence of a summary line, for tag listings -- the whole
+    first paragraph runs to ~1k chars on some blocks."""
+    sentence = re.split(r"(?<=[.!?])\s+(?=[A-Z])|\s+--\s+", summary, maxsplit=1)[0]
+    if len(sentence) > limit:
+        sentence = sentence[:limit].rsplit(" ", 1)[0] + "..."
+    return sentence
 
 
 def _annotation(param: inspect.Parameter) -> str | None:
@@ -105,6 +156,7 @@ def catalogue_entry(spec: BlockSpec, detail: bool = False) -> dict[str, Any]:
         "display_name": spec.display_name,
         "group": spec.group or spec.block_type,
         "block_type": spec.block_type,
+        "tags": list(spec.tags),
         "summary": _summary_line(doc),
         "inputs": [{"name": p.name, "type": p.type, "required": p.required} for p in spec.inputs],
         "outputs": [{"name": p.name, "type": p.type} for p in spec.outputs],
@@ -128,6 +180,18 @@ def list_block_types(group: str | None = None, include_disallowed: bool = False)
             continue
         out.append(catalogue_entry(spec))
     return out
+
+
+def list_blocks_for_tag(tag: str) -> list[dict[str, Any]]:
+    """One tag's blocks, each with a one-sentence summary -- ports and
+    params come from describe_block_type."""
+    if tag not in TAGS:
+        raise KeyError(f"unknown tag {tag!r}; tags are: {', '.join(TAGS)}")
+    ensure_blocks_registered()
+    return [
+        {"category": spec.category, "summary": _first_sentence(_summary_line(inspect.getdoc(spec.fn) or ""))}
+        for spec in _tagged(tag)
+    ]
 
 
 def describe_block_type(category: str) -> dict[str, Any]:

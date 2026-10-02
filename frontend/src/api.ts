@@ -3,6 +3,7 @@ import type {
   Artifact,
   ArtifactSummary,
   BlockOut,
+  BlockTag,
   BlockType,
   BrowseOut,
   BuildOut,
@@ -33,6 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   registry: () => request<RegistryEntry[]>('/registry'),
+  registryTags: () => request<BlockTag[]>('/registry/tags'),
   graph: () => request<GraphOut>('/graph'),
 
   createBlock: (body: {
