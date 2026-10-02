@@ -23,7 +23,7 @@ from modelmaker.agent.build import (
     LLMChoice,
 )
 from modelmaker.agent.controller import BuildController, BuildError
-from modelmaker.agent.loop import ScriptedLoop
+from modelmaker.agent.loop import LLMUnavailable, ScriptedLoop
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
 
@@ -571,3 +571,41 @@ def test_the_build_log_lives_in_the_project_folder_once_saved(prepared, tmp_path
     assert b.log_path == tmp_path / "proj" / "ai_builds" / f"{b.id}.json"
     assert json.loads(b.log_path.read_text(encoding="utf-8"))["phase"] == STOPPED
     assert not cache_copy.exists()
+
+
+def _model_times_out(call):
+    raise LLMUnavailable("local model server at http://x/v1 did not respond within 300s")
+
+
+def test_a_model_timeout_while_planning_pauses_for_a_retry(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [_model_times_out, plan_turn]})
+    b = start(controller, anchor)
+    controller.join(60)
+    assert b.phase == AWAITING_APPROVAL and b.plan is None
+    assert "did not respond" in b.pending_question
+    controller.feedback("continue")
+    controller.join(60)
+    assert b.phase == AWAITING_APPROVAL and b.plan is not None and b.pending_question is None
+
+
+def test_a_model_timeout_while_building_keeps_the_build(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def adds_then_times_out(call):
+        split = call("add_block", {"category": "train_test_split", "lane": "est", "name": "split", "plan_step": "s1"})["block"]
+        call("connect", {"from_block": ANCHOR[0], "from_port": "out", "to_block": split, "to_port": "df"})
+        _model_times_out(call)
+
+    controller = make_controller(session, {"plan": [plan_turn], "build": [adds_then_times_out, lambda call: call("finish", {"report": "ok"}) and ""]})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(60)
+    assert b.phase == AWAITING_INPUT and "did not respond" in b.pending_question
+    assert len(b.owned_blocks) == 1  # what was built so far is kept
+    controller.feedback("continue")
+    controller.join(120)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)

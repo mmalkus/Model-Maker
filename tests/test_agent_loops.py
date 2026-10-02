@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from modelmaker.agent.build import AWAITING_APPROVAL, PLANNING, AgentBuild
-from modelmaker.agent.loop import GeminiLoop, OpenAILoop, make_loop
+from modelmaker.agent.loop import LOCAL_HTTP_TIMEOUT_SECONDS, GeminiLoop, LLMUnavailable, OpenAILoop, make_loop
 from modelmaker.agent.tools import tools_for_phase
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
@@ -241,6 +241,20 @@ def test_stopped_build_makes_no_requests(planning_build):
     finally:
         fake.close()
     assert fake.requests == []
+
+
+def test_self_hosted_openai_endpoints_get_the_long_timeout(monkeypatch):
+    monkeypatch.delenv("MODELMAKER_LLM_TIMEOUT_SECONDS", raising=False)
+    assert OpenAILoop("m", api_key="k").timeout_seconds is None  # api.openai.com: the 300s default
+    assert OpenAILoop("m", api_key="k", base_url="http://192.168.1.138:8080/v1").timeout_seconds == LOCAL_HTTP_TIMEOUT_SECONDS
+    monkeypatch.setenv("MODELMAKER_LLM_TIMEOUT_SECONDS", "60")
+    assert OpenAILoop("m", api_key="k", base_url="http://192.168.1.138:8080/v1").timeout_seconds is None  # env wins
+
+
+def test_an_unreachable_endpoint_raises_llm_unavailable(planning_build):
+    b, _ = planning_build
+    with pytest.raises(LLMUnavailable):
+        OpenAILoop("m", api_key="k", base_url="http://127.0.0.1:9/v1").start(b, "S", "P", [])
 
 
 # ---- LM Studio / llama.cpp (local, compact mode) --------------------------------------

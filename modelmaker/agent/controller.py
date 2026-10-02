@@ -32,7 +32,7 @@ from .build import (
     LLMChoice,
     ToolError,
 )
-from .loop import AgentLoop
+from .loop import AgentLoop, LLMUnavailable
 from .tools import resolve_lane, summarize_value, tools_for_phase
 
 # Sample only when the data is big enough for it to matter.
@@ -177,6 +177,8 @@ class BuildController:
         def target() -> None:
             try:
                 fn()
+            except LLMUnavailable as e:
+                self._pause_for_retry(str(e))
             except Exception as e:  # noqa: BLE001 -- nobody to raise to on a worker thread
                 b = self.build
                 if b is not None:
@@ -186,6 +188,28 @@ class BuildController:
 
         self._worker = threading.Thread(target=target, daemon=True)
         self._worker.start()
+
+    def _pause_for_retry(self, message: str) -> None:
+        """The model's endpoint timed out or was unreachable mid-turn. Keep
+        the build (and its conversation) and let the user retry by replying,
+        rather than throwing away a long build over one slow response."""
+        b = self.build
+        if b is None:
+            return
+        b.log("error", message=message)
+        if b.stop_requested:
+            self._end(STOPPED)
+            return
+        retry = f"The AI model didn't answer: {message}\n\nReply (e.g. \"continue\") to retry, or stop the build."
+        if b.phase == PLANNING:
+            b.pending_question = retry
+            b.set_phase(AWAITING_APPROVAL, note="the model didn't answer")
+        elif b.phase == BUILDING:
+            b.pending_question = retry
+            b.set_phase(AWAITING_INPUT, note="the model didn't answer")
+        else:
+            b.error = message
+            self._end(FAILED)
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the current worker turn (tests, discard)."""
@@ -306,6 +330,7 @@ class BuildController:
             if b.phase == AWAITING_APPROVAL:
                 b.plan_history.append({"plan": b.plan, "feedback": text})
                 b.plan = None
+                b.pending_question = None
                 b.set_phase(PLANNING)
                 b.log("user", text=text)
 

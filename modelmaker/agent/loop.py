@@ -25,6 +25,13 @@ from .build import AgentBuild
 from .tools import Tool
 
 
+class LLMUnavailable(RuntimeError):
+    """The model's endpoint timed out or couldn't be reached. Not the
+    build's fault and often transient (a slow local model, a server still
+    loading), so the controller pauses the build for a retry instead of
+    failing it."""
+
+
 @dataclass
 class LoopOutcome:
     final_text: str = ""
@@ -151,6 +158,9 @@ class AnthropicLoop(AgentLoop):
 # ---- OpenAI-compatible chat completions and Gemini (plain HTTPS) ------------------
 
 HTTP_TIMEOUT_SECONDS = 300
+# Self-hosted OpenAI-compatible servers (llama-server, vLLM, Ollama...) are
+# often slow models on modest hardware and can take many minutes per turn.
+LOCAL_HTTP_TIMEOUT_SECONDS = 900
 
 
 def _post_json(
@@ -168,10 +178,12 @@ def _post_json(
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:800]
         raise RuntimeError(f"{what} returned HTTP {e.code}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"could not reach {what} -- check the base URL and network access") from e
     except TimeoutError as e:
-        raise RuntimeError(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
+        raise LLMUnavailable(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, TimeoutError):
+            raise LLMUnavailable(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
+        raise LLMUnavailable(f"could not reach {what} -- check the base URL and network access") from e
 
 
 def _parse_args(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -210,6 +222,8 @@ class OpenAILoop(AgentLoop):
         self.base_url = (base_url or os.environ.get("MODELMAKER_OPENAI_BASE_URL", openai_provider.DEFAULT_BASE_URL)).rstrip("/")
         self.api_key = api_key or os.environ.get("MODELMAKER_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL")
+        if "api.openai.com" not in self.base_url and not os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS"):
+            self.timeout_seconds = LOCAL_HTTP_TIMEOUT_SECONDS
         if not self.api_key:
             raise RuntimeError("no OpenAI API key configured -- set one in Settings, or export OPENAI_API_KEY")
         if not self.model:
@@ -337,7 +351,7 @@ class LMStudioLoop(OpenAILoop):
 
         self.base_url = (base_url or os.environ.get("MODELMAKER_LLM_BASE_URL", lmstudio_provider.DEFAULT_BASE_URL)).rstrip("/")
         self.api_key = None
-        self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", 900))
+        self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", LOCAL_HTTP_TIMEOUT_SECONDS))
         self.messages = []
         models = self._server_models()
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL") or (models[0]["id"] if models else None)

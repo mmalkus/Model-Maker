@@ -353,7 +353,13 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
   const plan = build.plan
   return (
     <div>
-      {plan ? <PlanView plan={plan} graph={graph} /> : <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>}
+      {plan ? (
+        <PlanView plan={plan} graph={graph} />
+      ) : build.pending_question ? (
+        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      ) : (
+        <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>
+      )}
       <div style={label}>{plan?.questions?.length ? 'Answer its questions' : 'Feedback (optional)'}</div>
       <textarea
         value={feedback}
