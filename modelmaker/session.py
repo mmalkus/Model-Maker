@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -16,7 +17,10 @@ from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
 from .project import graph_from_dict, graph_to_dict, load_project, save_project
 from .runner import RunState, Runner
 
-CACHE_DIR = Path(".modelmaker-cache")
+# Relative to the server's cwd by default. Overridable so several processes
+# on one checkout (parallel test workers, a test-spawned server) don't
+# share -- and clobber -- one cache and one recovery snapshot.
+CACHE_DIR = Path(os.environ.get("MODELMAKER_CACHE_DIR") or ".modelmaker-cache")
 # Where the crash-recovery snapshot lives. Inside the (gitignored) cache
 # directory deliberately: it is regenerable working state, not part of the
 # versioned project.

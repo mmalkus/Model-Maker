@@ -1,10 +1,9 @@
 """Subprocess entry points for executing block calls in isolation (see
-Runner._dispatch and Runner._dispatch_fused_group in runner.py). Kept in
-its own module, importing as little as possible at module level, because
-these are the functions every worker process's
-`multiprocessing.Process(target=...)` points at: each must be picklable by
-reference (importable by dotted path) so it works whether the process was
-created via "fork" or "spawn" (see runner.MP_CONTEXT).
+Runner._run_tasks in runner.py). Kept in its own module, importing as
+little as possible at module level, because these are what every worker
+process runs: a single-use worker (worker_pool.spare_main) looks its task's
+entry point up here by name and calls it with the task's args, plus a
+`result_queue` to report to and the `task_key` to report under.
 
 Running every block call -- grouped or not -- in its own process is what
 makes a runaway or misconfigured block (e.g. group_by on a near-unique

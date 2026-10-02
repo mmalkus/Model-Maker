@@ -17,6 +17,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static
+from textual.worker import WorkerCancelled, WorkerFailed, WorkerState
 
 from .canvas import BlockChip, Canvas, WiresTable
 from .charts import render_chart, save_chart
@@ -122,9 +123,23 @@ class ModelMakerTUI(App):
 
     async def on_mount(self) -> None:
         self.run_worker(self._startup(), exclusive=True)
-        self.set_interval(2.0, self._poll)
+        self._poll_timer = self.set_interval(2.0, self._poll)
 
     async def on_unmount(self) -> None:
+        # Textual can unmount the app while its message loop is still live
+        # (run_test's teardown calls _shutdown directly), so the poll timer
+        # may still fire and a refresh worker may be mid-request. Stop the
+        # timer and drain every worker *before* closing the client -- closed
+        # first, an in-flight worker's next request raises "Cannot send a
+        # request, as the client has been closed" and fails the app.
+        self._poll_timer.stop()
+        self.workers.cancel_all()
+        for worker in list(self.workers):
+            if worker.state != WorkerState.PENDING:
+                try:
+                    await worker.wait()
+                except (WorkerCancelled, WorkerFailed):
+                    pass
         await self.client.aclose()
 
     async def _startup(self) -> None:
