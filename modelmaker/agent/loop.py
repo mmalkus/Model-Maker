@@ -495,12 +495,16 @@ class ClaudeCliLoop(AgentLoop):
         self.token = token
         self.system = ""
         self.session_id: str | None = None
+        # The CLI's total_cost_usd is for the whole session, which every
+        # --resume continues -- so each run adds only the increase.
+        self._session_cost = 0.0
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
 
     def start(self, build, system, prompt, tools):
         self.system = system
         self.session_id = None
+        self._session_cost = 0.0
         return self._run(build, prompt, tools)
 
     def resume(self, build, prompt, tools):
@@ -593,7 +597,10 @@ class ClaudeCliLoop(AgentLoop):
                             build.log("assistant", text=final)
                 elif kind == "result":
                     self.session_id = msg.get("session_id") or self.session_id
-                    cost = msg.get("total_cost_usd")
+                    session_cost = msg.get("total_cost_usd") or 0.0
+                    # Below the last total: the resume started a new session.
+                    cost = session_cost - self._session_cost if session_cost >= self._session_cost else session_cost
+                    self._session_cost = session_cost
                     if cost:
                         build.usage["cost_usd"] = round(build.usage.get("cost_usd", 0.0) + cost, 4)
                     usage = msg.get("usage") or {}
@@ -612,7 +619,7 @@ class ClaudeCliLoop(AgentLoop):
                         cache_read=usage.get("cache_read_input_tokens") or 0,
                         cache_write=usage.get("cache_creation_input_tokens") or 0,
                         output=usage.get("output_tokens") or 0,
-                        cost_usd=cost,
+                        cost_usd=round(cost, 4),
                         turns=msg.get("num_turns"),
                     )
                     if msg.get("is_error"):

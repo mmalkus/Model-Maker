@@ -8,6 +8,7 @@ the real services accept exactly these payloads."""
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -414,3 +415,35 @@ def test_anthropic_usage_counts_cache_reads_and_writes(planning_build):
     assert b.usage["input_tokens"] == 100 + 4000 + 1500 + 10 + 200
     assert b.usage["cache_read_tokens"] == 4000 and b.usage["cache_write_tokens"] == 1700
     assert b.usage["output_tokens"] == 50
+
+
+def test_claude_cli_cost_is_the_session_total_not_a_sum(planning_build, tmp_path):
+    """The CLI reports total_cost_usd for the whole session, and a resume
+    continues the session -- so a build adds the increase, not each total."""
+    from modelmaker.agent.loop import ClaudeCliLoop
+
+    b, _ = planning_build
+    costs = tmp_path / "costs"
+    costs.write_text("0.05\n0.08\n0.02\n")
+    fake = tmp_path / "claude"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, pathlib\n"
+        "sys.stdin.read()\n"
+        f"p = pathlib.Path({str(costs)!r}); lines = p.read_text().split(); p.write_text(' '.join(lines[1:]))\n"
+        "session = 'other' if lines[0] == '0.02' else 's1'\n"
+        "print(json.dumps({'type': 'system', 'session_id': session}))\n"
+        "print(json.dumps({'type': 'result', 'session_id': session, 'total_cost_usd': float(lines[0]), 'num_turns': 1,\n"
+        "  'usage': {'input_tokens': 5, 'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 20, 'output_tokens': 7},\n"
+        "  'result': 'ok'}))\n"
+    )
+    fake.chmod(0o755)
+    loop = ClaudeCliLoop("haiku", "http://127.0.0.1:1", "tok")
+    loop.binary = str(fake)
+    loop.start(b, "S", "P", [])
+    loop.resume(b, "P2", [])
+    assert b.usage["cost_usd"] == pytest.approx(0.08)  # 0.05, then +0.03
+    loop.resume(b, "P3", [])  # the resume came back as a new session: its whole total counts
+    assert b.usage["cost_usd"] == pytest.approx(0.10)
+    assert b.usage["input_tokens"] == 3 * 125 and b.usage["cache_write_tokens"] == 60
+    assert [e["cost_usd"] for e in b.events_since() if e["kind"] == "usage"] == [0.05, 0.03, 0.02]
