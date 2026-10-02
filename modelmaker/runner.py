@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 import multiprocessing
-import queue as queue_mod
+import multiprocessing.connection
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -18,7 +18,7 @@ from .cache import CacheStore
 from .graph import BlockInstance, Graph
 from .metadata_transforms import resolve_metadata_transform
 from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
-from .run_worker import run_fused_group_entry, run_iteration_entry, run_worker_entry
+from .worker_pool import WorkerPool, pool_size_from_env
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 Status = Literal["grey", "green", "orange", "red", "running"]
@@ -39,6 +39,11 @@ Status = Literal["grey", "green", "orange", "red", "running"]
 # run_worker_entry rebuilds a block's function from (category, code)
 # rather than relying on inherited memory.
 MP_CONTEXT = multiprocessing.get_context("spawn")
+
+# Spares started ahead of use so a block run doesn't pay that slower start
+# in line -- still one fresh process per task, see worker_pool.py. Shared
+# by every Runner in this process.
+WORKER_POOL = WorkerPool(MP_CONTEXT, pool_size_from_env())
 
 # How often the dispatch loop wakes up to check for a cancellation request
 # or a worker that died without reporting a result -- small enough that
@@ -725,62 +730,87 @@ class Runner:
         including a group_by fan-out with far more groups or memory use
         than expected -- happens in a child process, so it can only take
         itself down, never this one."""
-        result_queue = MP_CONTEXT.Queue()
-        cancel_event = MP_CONTEXT.Event()
+        results, errors = self._run_tasks(
+            [block_id],
+            {
+                key: ("run_worker_entry", (block.category, block.is_custom, block.code, kwargs))
+                for key, kwargs in tasks.items()
+            },
+            max_workers,
+        )
+        if errors:
+            first_key, first_err = next(iter(errors.items()))
+            suffix = "" if len(tasks) == 1 else f" (group {first_key!r}; {len(errors)}/{len(tasks)} group(s) failed)"
+            raise RuntimeError(f"{first_err}{suffix}")
+        return results
+
+    def _run_tasks(
+        self, active_ids: list[str], tasks: dict[Any, tuple[str, tuple[Any, ...]]], max_workers: int
+    ) -> tuple[dict[Any, Any], dict[Any, str]]:
+        """The shared engine under _dispatch, _dispatch_fused_group and
+        _dispatch_iterations: runs each task -- key -> (run_worker entry
+        point name, its args) -- in a single-use worker process of its own
+        (see worker_pool.py), up to `max_workers` at a time, and returns
+        ({key: result}, {key: error message}).
+
+        Every id in `active_ids` is registered in self._active for the
+        duration, sharing one cancel_event, so status()/is_running() report
+        "running" for each and cancel() against any of them stops them all
+        -- raising RunCancelled here. A worker that dies without reporting
+        (segfault, OS OOM-kill) becomes an error entry, never a hang."""
+        cancel_event = threading.Event()
         pending = list(tasks.items())
-        running: dict[Any, Any] = {}  # task key -> Process
+        running: dict[Any, Any] = {}  # task key -> worker_pool.Worker
         results: dict[Any, Any] = {}
         errors: dict[Any, str] = {}
+        started_at = time.monotonic()
 
         with self._active_lock:
-            self._active[block_id] = {"cancel_event": cancel_event, "started_at": time.monotonic()}
+            for aid in active_ids:
+                self._active[aid] = {"cancel_event": cancel_event, "started_at": started_at}
 
         def _start_next() -> None:
+            # Acquire every free slot's worker before sending any task: a
+            # send can block until its worker has finished importing, and
+            # sending one at a time would serialize the cold starts.
+            batch = []
             while pending and len(running) < max(1, max_workers):
-                key, kwargs = pending.pop(0)
-                p = MP_CONTEXT.Process(
-                    target=run_worker_entry,
-                    args=(block.category, block.is_custom, block.code, kwargs, result_queue, key),
-                    daemon=True,
-                )
-                p.start()
-                running[key] = p
+                key, (entry_name, args) = pending.pop(0)
+                running[key] = WORKER_POOL.acquire()
+                batch.append((key, entry_name, args))
+            for key, entry_name, args in batch:
+                try:
+                    running[key].send_task(entry_name, args, key)
+                except (BrokenPipeError, EOFError, OSError):
+                    pass  # died before taking the task -- reported as a crash by the loop below
 
         try:
             _start_next()
             while running:
                 if cancel_event.is_set():
                     raise RunCancelled("cancelled by user")
-                try:
-                    key, ok, payload = result_queue.get(timeout=POLL_INTERVAL)
-                except queue_mod.Empty:
-                    dead = [k for k, p in running.items() if not p.is_alive()]
-                    for k in dead:
-                        p = running.pop(k)
-                        errors[k] = f"worker process exited unexpectedly (code {p.exitcode}) -- likely out of memory or a crash"
-                    continue
-                proc = running.pop(key, None)
-                if proc is not None:
-                    proc.join(timeout=5)
-                if ok:
-                    results[key] = payload
-                else:
-                    errors[key] = payload
+                by_conn = {w.conn: key for key, w in running.items()}
+                # A worker that dies closes its end of the pipe, which
+                # also makes its conn ready -- recv() then raises EOFError.
+                for conn in multiprocessing.connection.wait(list(by_conn), timeout=POLL_INTERVAL):
+                    key = by_conn[conn]
+                    worker = running.pop(key)
+                    try:
+                        _key, ok, payload, learned = conn.recv()
+                    except (EOFError, OSError):
+                        errors[key] = worker.crash_message()
+                    else:
+                        WORKER_POOL.learn(learned)
+                        (results if ok else errors)[key] = payload
+                    worker.stop()
                 _start_next()
         finally:
-            for p in running.values():
-                if p.is_alive():
-                    p.terminate()
-            for p in running.values():
-                p.join(timeout=5)
+            for worker in running.values():
+                worker.stop()
             with self._active_lock:
-                self._active.pop(block_id, None)
-
-        if errors:
-            first_key, first_err = next(iter(errors.items()))
-            suffix = "" if len(tasks) == 1 else f" (group {first_key!r}; {len(errors)}/{len(tasks)} group(s) failed)"
-            raise RuntimeError(f"{first_err}{suffix}")
-        return results
+                for aid in active_ids:
+                    self._active.pop(aid, None)
+        return results, errors
 
     def _dispatch_fused_group(
         self, exits: list[str], steps: list[dict[str, Any]]
@@ -788,9 +818,8 @@ class Runner:
         """Runs one streaming run's fused group (see _build_fusion_groups)
         to completion in its own subprocess -- same isolation rationale as
         _dispatch above (a crash or runaway allocation only takes down this
-        worker), trimmed to a single task since a fused group is inherently
-        one unit of work, not a pool of independent ones, so there's no
-        worker-pool bookkeeping to do. `exits` is the group's exit block
+        worker), as a single task since a fused group is inherently one
+        unit of work, not a pool of independent ones. `exits` is the group's exit block
         ids -- there can be more than one now that a group is a DAG rather
         than just a chain (see FusionGroup) -- each registered in
         self._active sharing the same cancel_event, so status()/
@@ -799,41 +828,11 @@ class Runner:
         whole subprocess. Returns (schemas, results) on success; raises
         RunCancelled or RuntimeError exactly like _dispatch does on
         cancellation or a worker crash/error."""
-        result_queue = MP_CONTEXT.Queue()
-        cancel_event = MP_CONTEXT.Event()
         task_key = "+".join(exits)
-        started_at = time.monotonic()
-
-        with self._active_lock:
-            for eid in exits:
-                self._active[eid] = {"cancel_event": cancel_event, "started_at": started_at}
-
-        p = MP_CONTEXT.Process(target=run_fused_group_entry, args=(steps, result_queue, task_key), daemon=True)
-        p.start()
-        try:
-            while True:
-                if cancel_event.is_set():
-                    raise RunCancelled("cancelled by user")
-                try:
-                    _key, ok, payload = result_queue.get(timeout=POLL_INTERVAL)
-                    break
-                except queue_mod.Empty:
-                    if not p.is_alive():
-                        raise RuntimeError(
-                            f"worker process exited unexpectedly (code {p.exitcode}) -- likely out of memory or a crash"
-                        )
-                    continue
-        finally:
-            if p.is_alive():
-                p.terminate()
-            p.join(timeout=5)
-            with self._active_lock:
-                for eid in exits:
-                    self._active.pop(eid, None)
-
-        if not ok:
-            raise RuntimeError(payload)
-        return payload
+        results, errors = self._run_tasks(exits, {task_key: ("run_fused_group_entry", (steps,))}, 1)
+        if errors:
+            raise RuntimeError(errors[task_key])
+        return results[task_key]
 
     def _run_grouped(
         self, block_id: str, block: BlockInstance, group_col: str, call_kwargs: dict[str, Any]
@@ -1057,57 +1056,14 @@ class Runner:
         run_iteration_entry, up to `max_workers` at a time -- same
         isolation, cancellation, and crash-handling contract as _dispatch,
         just retargeted at a whole region instead of a single block call."""
-        result_queue = MP_CONTEXT.Queue()
-        cancel_event = MP_CONTEXT.Event()
-        pending = list(range(n_iterations))
-        running: dict[int, Any] = {}
-        results: dict[int, Any] = {}
-        errors: dict[int, str] = {}
-
-        with self._active_lock:
-            self._active[block_id] = {"cancel_event": cancel_event, "started_at": time.monotonic()}
-
-        def _start_next() -> None:
-            while pending and len(running) < max(1, max_workers):
-                i = pending.pop(0)
-                p = MP_CONTEXT.Process(
-                    target=run_iteration_entry,
-                    args=(steps, i, collect_source_id, collect_source_port_index, result_queue, i),
-                    daemon=True,
-                )
-                p.start()
-                running[i] = p
-
-        try:
-            _start_next()
-            while running:
-                if cancel_event.is_set():
-                    raise RunCancelled("cancelled by user")
-                try:
-                    key, ok, payload = result_queue.get(timeout=POLL_INTERVAL)
-                except queue_mod.Empty:
-                    dead = [k for k, p in running.items() if not p.is_alive()]
-                    for k in dead:
-                        p = running.pop(k)
-                        errors[k] = f"worker process exited unexpectedly (code {p.exitcode}) -- likely out of memory or a crash"
-                    continue
-                proc = running.pop(key, None)
-                if proc is not None:
-                    proc.join(timeout=5)
-                if ok:
-                    results[key] = payload
-                else:
-                    errors[key] = payload
-                _start_next()
-        finally:
-            for p in running.values():
-                if p.is_alive():
-                    p.terminate()
-            for p in running.values():
-                p.join(timeout=5)
-            with self._active_lock:
-                self._active.pop(block_id, None)
-
+        results, errors = self._run_tasks(
+            [block_id],
+            {
+                i: ("run_iteration_entry", (steps, i, collect_source_id, collect_source_port_index))
+                for i in range(n_iterations)
+            },
+            max_workers,
+        )
         if errors:
             first_key, first_err = next(iter(errors.items()))
             raise RuntimeError(f"{first_err} ({len(errors)}/{n_iterations} iteration(s) failed)")

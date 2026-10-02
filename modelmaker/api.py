@@ -83,13 +83,19 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUN_SLOT = RunSlot()
 
 
-def _start_background_run(fn: Callable[[], Any], wait_seconds: float = 20.0) -> Any:
-    """Returns fn()'s return value if it finishes within wait_seconds (the
-    common case -- callers that don't care, like the single-block run
-    endpoints, can just ignore it and re-read block state), else None to
-    mean "still running" (poll GET /api/graph)."""
+# How long a run endpoint waits for its run before answering "still
+# running" -- module-level so the test suite can raise it: a heavily loaded
+# test machine can take longer than this for a cold block run.
+RUN_WAIT_SECONDS = 20.0
+
+
+def _start_background_run(fn: Callable[[], Any], wait_seconds: float | None = None) -> Any:
+    """Returns fn()'s return value if it finishes within wait_seconds
+    (default RUN_WAIT_SECONDS; the common case -- callers that don't care,
+    like the single-block run endpoints, can just ignore it and re-read
+    block state), else None to mean "still running" (poll GET /api/graph)."""
     try:
-        return RUN_SLOT.start_background(fn, wait_seconds)
+        return RUN_SLOT.start_background(fn, RUN_WAIT_SECONDS if wait_seconds is None else wait_seconds)
     except (RunBusy, RunFailed) as e:
         raise HTTPException(409, str(e))
 
@@ -1639,6 +1645,10 @@ def main() -> None:
     """Entry point for the `modelmaker-api` console script."""
     import uvicorn
 
+    from .runner import WORKER_POOL
+
+    # Here, not at import: spawned workers re-import this module.
+    WORKER_POOL.prewarm()
     uvicorn.run(
         "modelmaker.api:app",
         host=os.environ.get("MODELMAKER_HOST", "127.0.0.1"),

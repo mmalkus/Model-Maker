@@ -39,8 +39,11 @@ jobs:
       - name: Install
         run: python -m pip install -e ".[dev,anthropic,tui,excel,db]"
 
+      # Parallel across the runner's cores (pytest-xdist): most of the
+      # suite's time is block runs waiting on freshly spawned worker
+      # processes, not CPU, so this is close to a linear speedup.
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto
 
   frontend:
     name: Frontend (lint + build)
