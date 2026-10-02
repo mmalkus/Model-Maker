@@ -984,3 +984,51 @@ def test_the_build_prompt_carries_only_the_block_tags(prepared):
     system = prompts.build_system(b)
     assert "## Registry block tags" in system and "## Registry blocks\n" not in system
     assert "## Registry blocks\n" in prompts.plan_system(b)
+
+
+# ---- what a stage starts with ------------------------------------------------------------
+
+
+def test_a_stage_starts_with_what_is_built_and_the_blocks_it_needs(prepared):
+    from modelmaker.agent import prompts
+
+    session, anchor = prepared
+    b = staged(session, anchor)
+    b.stages[0]["goal"] = "Split, then fit_binning on train"
+    b.call_tool("plan_stage", {"steps": [
+        {"ref": "est1", "category": "train_test_split", "name": "split", "why": "",
+         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]},
+        {"ref": "est2", "category": "fit_binning", "name": "bin", "params": {"features": FEATURES}, "why": "",
+         "inputs": [{"port": "df", "from": "est1", "from_port": "train"}]},
+    ]})
+    b.stages[0]["status"], b.stages[1]["status"], b.stage_index = "done", "active", 1
+    b.stages[1]["blocks"] = ["apply_binning", "logistic_regression"]
+    b.stages[1]["goal"] = "Fit a model, then compare_samples"
+
+    prompt = prompts.stage_prompt(b)
+    # Every block so far, with its outputs: columns once, then "same as".
+    assert f"(id {anchor}; read_csv, anchor; green)" in prompt and "interest_rate [excluded]" in prompt
+    assert "default_flag [target]" in prompt and "application_id [id]" in prompt
+    assert "train: 4,000 rows; same columns as applications.out" in prompt
+    assert "test: 1,000 rows; same columns as applications.out" in prompt
+    # A small statistics table inline, a fitted artifact cut short.
+    assert '"iv_band": "suspicious"' in prompt and "summary: statistics table, 5 rows" in prompt
+    assert "binning (binning):" in prompt and "get_output_summary for all" in prompt
+    # Docs for the listed blocks, and for any block the goal names.
+    for category in ("apply_binning", "logistic_regression", "compare_samples"):
+        assert f"### {category}" in prompt
+    assert "features: list[str] (required)" in prompt and "auto-fills from the target role" in prompt
+    # Still no rows of the data itself.
+    assert "West" not in prompt and "APP000001" not in prompt
+
+
+def test_the_outline_names_real_blocks_per_stage(prepared):
+    session, anchor = prepared
+    b = AgentBuild(session, RunSlot(), "g", [anchor])
+    b.phase = PLANNING
+    r = b.call_tool("submit_plan", {"plan": {"summary": "x", "stages": [
+        {"key": "est", "name": "Estimation", "goal": "fit", "blocks": ["logistic_regression", "made_up", "read_csv"]}]}})
+    assert "['made_up', 'read_csv']" in r["error"]
+    r = b.call_tool("submit_plan", {"plan": {"summary": "x", "stages": [
+        {"key": "est", "name": "Estimation", "goal": "fit", "blocks": ["logistic_regression"]}]}})
+    assert r["ok"] and b.plan["stages"][0]["blocks"] == ["logistic_regression"]

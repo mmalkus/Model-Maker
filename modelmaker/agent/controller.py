@@ -400,7 +400,7 @@ class BuildController:
             for change in b.plan.get("changes_to_existing") or []:
                 b.approved_changes.setdefault(change["block"], []).append(change)
             b.stages = [
-                {**{k: v for k, v in st.items() if k in ("key", "name", "goal", "lane")}, "status": STAGE_PENDING, "plan": None, "summary": None}
+                {**{k: v for k, v in st.items() if k in ("key", "name", "goal", "lane", "blocks")}, "status": STAGE_PENDING, "plan": None, "summary": None}
                 for st in b.plan["stages"]
             ]
             b.stage_index = 0

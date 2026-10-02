@@ -10,10 +10,14 @@ can be different providers (see /agent-builder-proposal.md §4.2, §4.3,
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
+from ..blocks.base import BLOCK_REGISTRY
+from ..packet import ColumnRole, DataFramePacket
 from . import catalogue
-from .build import AgentBuild
+from .build import AgentBuild, ToolError
+from .tools import is_statistics_table, table_rows
 
 COMMON = """You are building a model inside Model-Maker, a visual, Polars-based \
 modelling tool used by credit-risk and actuarial model developers. A model \
@@ -96,7 +100,9 @@ existing lane (its id in `lane`) where it fits. Keep to the stages the goal \
 needs.
 - Gives each stage a `goal`: what it does and produces, and the decisions \
 that shape it -- the split design, the model family, the metrics and \
-samples to report. These are what the user is approving.
+samples to report. These are what the user is approving. List the registry \
+blocks the stage will most likely use in its `blocks`: the build is handed \
+their docs when the stage starts.
 - Does NOT list individual blocks, feature lists or bin settings: those \
 depend on results nobody has seen yet (e.g. which features survive the \
 univariate analysis), so the build plans each stage's blocks once the \
@@ -268,6 +274,104 @@ def build_prompt(build: AgentBuild) -> str:
     )
 
 
+# What a stage's opening prompt carries about the graph so far (see
+# stage_prompt) -- enough that the model doesn't spend its first calls
+# fetching it, within a budget that keeps the prompt from bloating.
+STAGE_TABLE_CHARS = 6_000  # a statistics table's rows, inline, at most (fits a ~20-feature binning summary)
+STAGE_CONTEXT_CHARS = 16_000  # the whole "built so far" section
+STAGE_BLOCK_DOCS = 8  # blocks documented up front
+
+
+def _output_line(build: AgentBuild, block_id: str, port: str, seen: dict[tuple, str]) -> str:
+    """One output port, briefly. `seen` maps a column list already shown
+    to where, so a split's second sample (or a filter's output) reads
+    "same columns as ..." instead of repeating thirty names."""
+    try:
+        _, value = build.current_output(block_id, port)
+    except ToolError:
+        return f"  {port}: no output yet"
+    if isinstance(value, DataFramePacket):
+        if is_statistics_table(build, block_id, port):
+            table = table_rows(value)
+            rows = json.dumps(table["rows"], default=str)
+            if len(rows) <= STAGE_TABLE_CHARS and "rows_shown" not in table:
+                return f"  {port}: statistics table, {table['row_count']} rows: {rows}"
+            return f"  {port}: statistics table, {table['row_count']} rows -- get_output_summary for them"
+        cols = []
+        for name, meta in value.schema_meta.items():
+            role = meta.role.value if hasattr(meta.role, "value") else str(meta.role)
+            cols.append(name + (f" [{role}]" if role not in (ColumnRole.UNASSIGNED.value, ColumnRole.FEATURE.value) else ""))
+        key = tuple(cols)
+        if key in seen:
+            return f"  {port}: {value.data.height:,} rows; same columns as {seen[key]}"
+        seen[key] = f"{build.session.graph.blocks[block_id].name}.{port}"
+        return f"  {port}: {value.data.height:,} rows; columns: {', '.join(cols)}"
+    if isinstance(value, (bytes, bytearray)):
+        return f"  {port}: image"
+    # Metrics and model summaries are worth reading here; a fitted
+    # artifact (binning, distribution, ...) is bulky and is used by wiring it.
+    port_type = next((p.type for p in build.session.graph.blocks[block_id].outputs if p.name == port), None)
+    limit = 600 if port_type in ("scalar_metric", "model") else 160
+    text = json.dumps(value, default=str)
+    return f"  {port} ({port_type}): {text if len(text) <= limit else text[:limit] + '... (get_output_summary for all)'}"
+
+
+def built_so_far(build: AgentBuild) -> str:
+    """The anchors and every block this build has made, in graph order,
+    with their outputs: dataframes as row count + columns (and roles),
+    small statistics tables in full, metrics and models by value."""
+    graph = build.session.graph
+    lines: list[str] = []
+    seen: dict[tuple, str] = {}
+    for bid in graph.topo_order():
+        if bid not in build.anchors and bid not in build.owned_blocks:
+            continue
+        block = graph.blocks[bid]
+        prov = block.provenance or {}
+        tags = [block.category] + (["anchor"] if bid in build.anchors else [])
+        if prov.get("plan_step"):
+            tags.append(f"step {prov['plan_step']}")
+        lines.append(f"- {block.name} (id {bid}; {', '.join(tags)}; {build.session.runner.status(bid)})")
+        lines += [_output_line(build, bid, p.name, seen) for p in block.outputs]
+    text = "\n".join(lines)
+    if len(text) > STAGE_CONTEXT_CHARS:
+        text = text[:STAGE_CONTEXT_CHARS] + "\n... (cut short -- get_graph / get_output_summary for the rest)"
+    return text
+
+
+def _stage_block_names(stage: dict[str, Any]) -> list[str]:
+    """The blocks the outline listed for the stage, then any registry
+    category its goal names."""
+    catalogue.ensure_blocks_registered()
+    names = [c for c in stage.get("blocks") or [] if c in BLOCK_REGISTRY]
+    for category in BLOCK_REGISTRY:
+        if category not in names and re.search(rf"\b{re.escape(category)}\b", stage.get("goal") or ""):
+            names.append(category)
+    return [c for c in names if c not in catalogue.AGENT_DISALLOWED][:STAGE_BLOCK_DOCS]
+
+
+def block_docs(categories: list[str]) -> str:
+    """describe_block_type, compacted: summary, ports, params -- what
+    plan_stage needs to name ports and params right."""
+    out = []
+    for category in categories:
+        d = catalogue.describe_block_type(category)
+        ins = ", ".join(f"{p['name']}:{p['type']}" for p in d["inputs"]) or "-"
+        outs = ", ".join(f"{p['name']}:{p['type']}" + (" (statistics table)" if p.get("statistics_table") else "") for p in d["outputs"])
+        params = []
+        for p in d.get("params") or []:
+            item = f"{p['name']}: {p.get('type') or 'any'}"
+            if p.get("required"):
+                item += " (required)"
+            elif "default" in p:
+                item += f" = {json.dumps(p['default'])}"
+            if p.get("auto_fills_from_role"):
+                item += f" (auto-fills from the {p['auto_fills_from_role']} role)"
+            params.append(item)
+        out.append(f"### {category}\n{d['summary']}\nin: {ins} -> out: {outs}\nparams: {'; '.join(params) or '-'}")
+    return "\n\n".join(out)
+
+
 def stage_prompt(build: AgentBuild) -> str:
     stage = build.current_stage
     n = len(build.stages)
@@ -276,10 +380,21 @@ def stage_prompt(build: AgentBuild) -> str:
         if build.is_last_stage()
         else "When it's built and checked, call complete_stage and end your turn."
     )
-    return (
-        f"Stage {build.stage_index + 1} of {n}: {stage['name']} (key {stage['key']!r}).\n"
-        f"Goal: {stage['goal']}\n\nPlan it with plan_stage, which builds it, and check the results. {then}"
+    parts = [
+        f"Stage {build.stage_index + 1} of {n}: {stage['name']} (key {stage['key']!r}).\nGoal: {stage['goal']}",
+        f"Built so far (current outputs):\n{built_so_far(build)}",
+    ]
+    docs = block_docs(_stage_block_names(stage))
+    if docs:
+        parts.append(
+            "Docs for the blocks this stage is likely to use (describe_block_type has the full text, and "
+            f"list_block_types the rest of the registry):\n\n{docs}"
+        )
+    parts.append(
+        "You don't need get_graph or get_output_summary for anything listed above. Plan the stage with "
+        f"plan_stage, which builds it, and check the results. {then}"
     )
+    return "\n\n".join(parts)
 
 
 def stage_feedback_prompt(build: AgentBuild, feedback: str) -> str:

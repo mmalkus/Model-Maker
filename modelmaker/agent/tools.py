@@ -428,6 +428,12 @@ _PLAN_SCHEMA = {
                         "(e.g. split design, model family, which metrics). Not individual blocks.",
                     },
                     "lane": {"type": "string", "description": "An existing lane id to build into, instead of a new lane."},
+                    "blocks": {
+                        "type": "array",
+                        "items": _STR,
+                        "description": "The registry categories this stage will most likely use -- their docs are "
+                        "handed to the build when the stage starts.",
+                    },
                 },
                 "required": ["key", "name", "goal"],
             },
@@ -498,6 +504,9 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
         keys.add(key)
         if not (stage.get("goal") or "").strip():
             errors.append(f"{where}: needs a goal")
+        unknown = [c for c in stage.get("blocks") or [] if c not in BLOCK_REGISTRY or c in catalogue.AGENT_DISALLOWED]
+        if unknown:
+            errors.append(f"{where}: blocks {unknown} aren't registry blocks an AI build can add")
         lane = stage.get("lane")
         if lane is not None and lane not in graph.lanes:
             errors.append(f"{where}: lane {lane!r} isn't an existing lane id -- leave it out to create a new lane")
