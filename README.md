@@ -227,6 +227,8 @@ modelmaker-api
 
 ## Build with AI
 
+▶ **Demo video:** [docs/demo/build-with-ai-pd-model.mp4](docs/demo/build-with-ai-pd-model.mp4) -- demo credit data → tag roles → the AI builds a logistic-regression PD model (waiting fast-forwarded, ~1.5 min).
+
 Beyond drafting one block at a time, an AI can plan and build a whole model
 graph for you (design: [agent-builder-proposal.md](agent-builder-proposal.md)):
 
