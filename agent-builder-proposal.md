@@ -47,6 +47,14 @@ It has been verified end to end with the real `claude` CLI:
 - **Cost:** about $0.29 for the whole build, planning included.
 
 Where the implementation differs from the text below:
+- **Staged builds.** The plan is an outline of *stages* (data prep,
+  estimation, validation, ...), not a list of blocks. The build plans each
+  stage's blocks (`plan_stage`) just before building it, with the earlier
+  stages' real results in hand, then reports the stage (`complete_stage`)
+  and pauses for the user to review it (`awaiting_stage_review`). Block-level
+  detail planned up front was largely guesswork: which features to keep
+  depends on the binning results, calibration on the fit. §2 and §4.2-§4.3
+  describe this flow.
 - **Custom blocks** are written by the build LLM itself
   (`add_custom_block` / `update_custom_block`), checked against the same
   contract (one polars function, input ports as leading parameters, a valid
@@ -68,7 +76,8 @@ Where the implementation differs from the text below:
 - **Discard** is available only while a build is live. Once it has ended,
   a plain Undo reverts it in one step.
 - **Canvas lock (§7):** this is an HTTP middleware. While a build is
-  `building`, `awaiting_input` or `final_run`, it returns 409 for mutating
+  `building`, `awaiting_input`, `awaiting_stage_review` or `final_run`, it
+  returns 409 for mutating
   `/api/*` calls other than `/api/agent/*`, LLM settings, env vars, project
   save and source checks.
 - **The MCP bridge** is a stateless stdio server
@@ -195,19 +204,26 @@ Written against the codebase as of `0f0499e`.
    them (§4.1). It reports anything that blocks the build, such as "no
    column tagged `target`", and warns about anything out of date, before
    any LLM call.
-4. **Plan.** The agent explores with read-only tools and returns a
-   structured plan (§4.2): lanes, blocks, wiring, key params, any changes
-   to existing blocks, its assumptions, and open questions. The plan
-   appears as ghost blocks on the canvas and as a list in the Build
-   panel. The real graph does not change.
+4. **Plan.** The agent explores with read-only tools and returns an
+   outline plan (§4.2): the stages in build order (one lane each), each
+   with a goal and the decisions that shape it (split design, model
+   family, metrics), plus any changes to existing blocks, its assumptions,
+   and open questions. The new lanes appear as ghost bands on the canvas
+   and the outline as a list in the Build panel. The real graph does not
+   change.
 5. **Review.** The user approves, or sends feedback ("use a 70/30 split,
-   not out-of-time", "drop the correlation step") and the agent re-plans.
+   not out-of-time", "add a calibration stage") and the agent re-plans.
    There is no limit on rounds.
-6. **Build.** With the plan approved, the agent builds in sample mode,
-   lane by lane. It runs each new block, checks its output and fixes what
-   fails. Progress streams into the Build panel as an event feed while
+6. **Build, stage by stage.** With the outline approved, the agent builds
+   in sample mode, one stage at a time. For each it first plans the
+   stage's blocks from what the earlier stages produced (shown as ghost
+   blocks), then runs each new block, checks its output and fixes what
+   fails. It ends the stage with a summary of what it built and found,
+   and waits: the user continues to the next stage, or sends changes to
+   this one. Progress streams into the Build panel as an event feed while
    blocks appear on the canvas. The canvas is read-only for the user
-   during the build, apart from Stop.
+   during the build, apart from Stop. "Build automatically" skips the
+   outline and stage reviews.
 7. **Finish.** A full-data `run_all` runs by default (§7). The agent then
    reports what it built, any deviations from the plan, the key results
    (e.g. Gini on train and test, computed on the full data) and open
@@ -233,9 +249,11 @@ modelmaker/agent/
 
 - `id`, `goal`, and `anchors`: the selected block ids.
 - `phase`: `preflight → planning → awaiting_approval → building
-  (⇄ awaiting_input) → final_run → done | done_with_errors | stopped |
-  failed`.
-- `plan`: the latest structured plan, plus a history of feedback rounds.
+  (⇄ awaiting_input, ⇄ awaiting_stage_review after each stage) →
+  final_run → done | done_with_errors | stopped | failed`.
+- `plan`: the latest outline plan, plus a history of feedback rounds.
+- `stages` and `stage_index`: the outline's stages as the build works
+  through them, each with its status, its step plan and its summary.
 - `owned`: the set of block and wire ids created in this build. This is
   what the ownership guard checks.
 - `approved_changes`: the edits to pre-existing blocks that the approved
@@ -259,8 +277,8 @@ frontend polls it just as it polls `/api/graph` during a sweep.
 | `POST /api/agent/builds` | start: `{goal, anchors, plan_llm?, build_llm?, final_full_run?}` → preflight + planning; each `*_llm` is `{provider, model}` (§9.1) |
 | `POST /api/agent/builds/current/proceed` | continue past preflight warnings (§4.1) |
 | `GET /api/agent/builds/current` | phase, plan, events since cursor, counters |
-| `POST /api/agent/builds/current/feedback` | `{text}` → re-plan |
-| `POST /api/agent/builds/current/approve` | start the build phase |
+| `POST /api/agent/builds/current/feedback` | `{text}` → re-plan, rework the stage under review, or answer a question |
+| `POST /api/agent/builds/current/approve` | start the build phase; after a stage review, go on to the next stage |
 | `POST /api/agent/builds/current/stop` | cooperative stop (between tool calls) |
 | `POST /api/agent/builds/current/discard` | stop + restore `snapshot_before` |
 
@@ -306,23 +324,25 @@ The planner only gets the read-only tools (§5). The final tool call is
 rather than free text means the plan is schema-validated, and a malformed
 one comes back to the model as a tool error it can fix.
 
+The plan is an **outline of stages**, not blocks. Which blocks a stage
+needs, and with which params, usually depends on results nobody has seen
+at planning time: the features worth keeping come out of the univariate
+analysis, the calibration out of the fit. So the user approves the
+decisions that are theirs (the stages, the approach, the assumptions),
+and the build plans each stage's blocks when it gets there (§4.3).
+
 ```jsonc
 {
   "summary": "Logistic PD model with WoE features, OOT validation on 2023.",
   "assumptions": ["default_flag is the 12-month default indicator", "..."],
   "questions": [],                       // non-empty => UI asks before approving
-  "lanes": [{"key": "prep", "name": "Data prep", "purpose": "..."}],
-  "steps": [
-    {
-      "ref": "s1",                        // plan-local id, used by later steps
-      "category": "train_test_split",     // registry category, or "custom"
-      "instruction": null,                // for custom: what the block should do
-      "lane": "prep",
-      "name": "oot split",
-      "inputs": [{"port": "df", "from": "blk_8f2", "from_port": "out"}],  // existing id or a ref
-      "params": {"date_col": "obs_date", "cutoff": "2023-01-01"},
-      "why": "Goal asks for out-of-time validation on 2023."
-    }
+  "stages": [
+    {"key": "prep", "name": "Data prep",
+     "goal": "Out-of-time split at 2023-01-01 on obs_date; stratify the development sample."},
+    {"key": "est", "name": "Estimation",
+     "goal": "Bin and WoE-transform the drivers, keep IV > 0.02, logistic regression."},
+    {"key": "val", "name": "Validation", "lane": "lane_3",   // an existing lane, optional
+     "goal": "Gini/KS on train, test and OOT side by side; characteristic stability."}
   ],
   "changes_to_existing": [
     {"block": "blk_8f2", "change": "set group_by=segment", "why": "..."}
@@ -330,39 +350,40 @@ one comes back to the model as a tool error it can fix.
 }
 ```
 
-**Ghost preview.** The plan is shown two ways:
-
-- **In the Build panel,** as a list grouped by lane.
-- **On the canvas, as ghost blocks.** These are translucent, dashed
-  nodes with dashed wires, placed by the same `layout.py` pass the build
-  phase will use (§8). Planned lanes that don't exist yet show as ghost
-  lane bands.
-
-In detail:
-
-- **Where ghosts live.** Ghost blocks are frontend-only. They are
-  rendered from `plan.steps`, never added to `SESSION.graph`, so they
-  can't be run, saved, compiled or undone.
-- **Linking list and canvas.** Hovering a ghost highlights its plan step,
-  and clicking one scrolls the list to it.
-- **Changes to existing blocks.** Each entry in `changes_to_existing` is
-  shown as a badge on the real block it would modify.
-- **Placement.** `POST /api/agent/builds` responses and
-  `GET .../current` return the plan with each step's computed position
-  and lane, so the frontend doesn't reimplement layout.
-- **Re-planning** replaces the ghosts. **Approve** hides them, and the
-  real blocks appear as they're built. The build phase uses the same
-  layout, so real blocks land roughly where their ghosts were.
-
-If `questions` is non-empty, Approve is disabled until the user answers
-through the feedback box.
+**Preview.** The outline is shown as a numbered list in the Build panel,
+and the lanes it would create as ghost lane bands on the canvas.
+Each entry in `changes_to_existing` is shown as a badge on the real block
+it would modify. If `questions` is non-empty, Approve is disabled until
+the user answers through the feedback box.
 
 ### 4.3 Build (read + write tools)
 
 The build phase starts a fresh conversation. It is seeded with the goal,
-the approved plan, the anchor schemas and the block catalogue, not the
+the approved outline, the anchor schemas and the block catalogue, not the
 planning transcript. That keeps context small, and it makes the approved
-plan (not the exploration) the contract.
+outline (not the exploration) the contract. On approval every stage's lane
+is created, so the outline shows on the canvas; lanes left empty are
+removed when the build ends.
+
+The build works through the stages in order, in that one conversation:
+
+1. **Plan the stage.** `plan_stage(steps)`, with the earlier stages'
+   outputs in view. Each step names its registry category (or `custom`),
+   its inputs (a step of this stage, or an existing block by id,
+   including those earlier stages built), key params and a `why`. Refs are
+   unique across the build, so a block's provenance (`plan_step`, `stage`)
+   is unambiguous. The steps appear as ghost blocks with dashed wires,
+   placed by the same `layout.py` pass `add_block` uses (§8), so each real
+   block lands where its ghost was. Ghosts are frontend-only: rendered
+   from the stage plan, never added to `SESSION.graph`, and each one
+   disappears as its block is built.
+2. **Build it**, step by step (below).
+3. **Report it.** `complete_stage(summary)` ends the turn, and the build
+   waits in `awaiting_stage_review` with the canvas still locked. The user
+   **continues** (`approve`), and the build is resumed with the next stage,
+   or **sends changes** (`feedback`), and it is resumed in the same stage.
+   On the last stage the agent calls `finish` instead. With "Build
+   automatically" the build goes straight on.
 
 The expected rhythm per step:
 
@@ -374,12 +395,12 @@ The expected rhythm per step:
 5. On failure, fix it (`set_params`, or `fix_custom_block`, which reuses
    the existing `suggest_fix` draft flow) and retry.
 
-**Deviations.** Small deviations are allowed and must be recorded with
-`note_deviation(step_ref, what, why)`. Examples: a param value changed to
+**Deviations.** Small deviations from the stage plan are allowed and must
+be recorded with `note_deviation(step_ref, what, why)`. Examples: a param value changed to
 make a fit converge, or an extra custom cleaning block inserted to fix a
-dtype. Structural deviations (dropping a planned lane, switching model
-family) and any change to an existing block that the plan didn't list
-are not. For those the agent calls `ask_user(question)`. This pauses the
+dtype. Structural deviations from the outline (dropping a stage,
+switching model family) and any change to an existing block that the
+outline didn't list are not. For those the agent calls `ask_user(question)`. This pauses the
 build (phase `awaiting_input`) until the user answers or stops it.
 
 **Finishing.** The agent calls `finish(report)`. The report is Markdown:
@@ -675,10 +696,10 @@ Defaults, adjustable in the Build panel:
 
 | Limit | Default | On hit |
 |---|---|---|
-| Tool calls per phase | plan 30, build 150 | stop, report |
+| Tool calls per phase | plan 30, build 200 (stage planning included) | stop, report |
 | Custom blocks per build | 5 | tool error: "use a registry block or ask_user" |
 | Consecutive failed runs of one block | 3 | forced `ask_user` |
-| Wall time | 20 min | stop, report |
+| Wall time | 20 min, not counting time waiting on the user | stop, report |
 | Tokens | shown live, no default cap | — |
 
 Stopping never leaves a half-applied tool call. Everything built so far

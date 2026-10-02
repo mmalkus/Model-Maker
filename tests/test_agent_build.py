@@ -12,6 +12,7 @@ import pytest
 from modelmaker.agent.build import (
     AWAITING_APPROVAL,
     AWAITING_INPUT,
+    AWAITING_STAGE_REVIEW,
     BUILDING,
     DISCARDED,
     DONE,
@@ -76,6 +77,10 @@ def building(session, anchor) -> AgentBuild:
 # ---- plan turns used by several tests ---------------------------------------------
 
 
+ANCHOR: list[str] = []  # set per test so the turns can reference the anchor id
+BUILT: dict[str, str] = {}  # plan step ref -> block id, for later stages' wiring
+
+
 def plan_turn(call):
     assert "error" not in call("get_graph", {})
     call("list_block_types", {"tag": "regression"})
@@ -87,16 +92,9 @@ def plan_turn(call):
                 "summary": "Split, fit a logistic regression, measure Gini on the test set.",
                 "assumptions": ["default_flag is the default indicator"],
                 "questions": [],
-                "lanes": [{"key": "est", "name": "Estimation"}, {"key": "val", "name": "Validation"}],
-                "steps": [
-                    {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                     "inputs": [{"port": "df", "from": ANCHOR[0], "from_port": "out"}], "params": {"seed": 1}, "why": "holdout"},
-                    {"ref": "s2", "category": "logistic_regression", "lane": "est", "name": "pd model",
-                     "inputs": [{"port": "df", "from": "s1", "from_port": "train"}], "params": {"features": FEATURES}, "why": "goal"},
-                    {"ref": "s3", "category": "predict", "lane": "val", "name": "score test",
-                     "inputs": [{"port": "df", "from": "s1", "from_port": "test"}, {"port": "model", "from": "s2", "from_port": "model"}], "why": "oos"},
-                    {"ref": "s4", "category": "auc_gini", "lane": "val", "name": "test gini",
-                     "inputs": [{"port": "df", "from": "s3", "from_port": "predictions"}], "why": "discrimination"},
+                "stages": [
+                    {"key": "est", "name": "Estimation", "goal": "70/30 split; logistic regression on the numeric drivers"},
+                    {"key": "val", "name": "Validation", "goal": "Score the test set and report its Gini"},
                 ],
                 "changes_to_existing": [],
             }
@@ -106,10 +104,32 @@ def plan_turn(call):
     return "Plan submitted."
 
 
-ANCHOR: list[str] = []  # set per test so plan_turn can reference the anchor id
+def plan_one_stage(call):
+    result = call(
+        "submit_plan",
+        {"plan": {"summary": "Split it.", "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split"}]}},
+    )
+    assert result.get("ok"), result
+    return "Plan submitted."
 
 
-def build_turn(call):
+EST_STEPS = [
+    {"ref": "s1", "category": "train_test_split", "name": "split", "params": {"seed": 1}, "why": "holdout",
+     "inputs": [{"port": "df", "from": "ANCHOR", "from_port": "out"}]},
+    {"ref": "s2", "category": "logistic_regression", "name": "pd model", "params": {"features": FEATURES}, "why": "goal",
+     "inputs": [{"port": "df", "from": "s1", "from_port": "train"}]},
+]
+
+
+def est_steps():
+    steps = json.loads(json.dumps(EST_STEPS))
+    steps[0]["inputs"][0]["from"] = ANCHOR[0]
+    return steps
+
+
+def build_est(call):
+    planned = call("plan_stage", {"steps": est_steps()})
+    assert planned.get("ok"), planned
     split = call("add_block", {"category": "train_test_split", "lane": "est", "name": "split", "params": {"seed": 1}, "plan_step": "s1"})["block"]
     call("connect", {"from_block": ANCHOR[0], "from_port": "out", "to_block": split, "to_port": "df"})
     assert call("run_to", {"block": split})["status"] == "green"
@@ -117,6 +137,26 @@ def build_turn(call):
     call("connect", {"from_block": split, "from_port": "train", "to_block": fit, "to_port": "df"})
     ran = call("run_to", {"block": fit})
     assert ran["status"] == "green", ran
+    BUILT.update(s1=split, s2=fit)
+    done = call("complete_stage", {"summary": "Split 70/30 and fitted the PD model on 5 drivers."})
+    assert done.get("ok"), done
+    return "Estimation done."
+
+
+def build_val(call):
+    split, fit = BUILT["s1"], BUILT["s2"]
+    planned = call(
+        "plan_stage",
+        {
+            "steps": [
+                {"ref": "s3", "category": "predict", "name": "score test", "why": "oos",
+                 "inputs": [{"port": "df", "from": split, "from_port": "test"}, {"port": "model", "from": fit, "from_port": "model"}]},
+                {"ref": "s4", "category": "auc_gini", "name": "test gini", "why": "discrimination",
+                 "inputs": [{"port": "df", "from": "s3", "from_port": "predictions"}]},
+            ]
+        },
+    )
+    assert planned.get("ok"), planned
     score = call("add_block", {"category": "predict", "lane": "val", "plan_step": "s3"})["block"]
     call("connect", {"from_block": split, "from_port": "test", "to_block": score, "to_port": "df"})
     call("connect", {"from_block": fit, "from_port": "model", "to_block": score, "to_port": "model"})
@@ -128,6 +168,9 @@ def build_turn(call):
     return "Done."
 
 
+BUILD_TURNS = [build_est, build_val]
+
+
 # ---- lifecycle ------------------------------------------------------------------------
 
 
@@ -135,7 +178,7 @@ def test_full_build_plans_builds_and_reports(prepared):
     session, anchor = prepared
     ANCHOR[:] = [anchor]
     blocks_before = set(session.graph.blocks)
-    controller = make_controller(session, {"plan": [plan_turn], "build": [build_turn]})
+    controller = make_controller(session, {"plan": [plan_turn], "build": list(BUILD_TURNS)})
 
     b = start(controller, anchor)
     # Warns (no excluded? no -- it has one; target present) -> nothing blocks,
@@ -143,25 +186,42 @@ def test_full_build_plans_builds_and_reports(prepared):
     assert b.preflight["blocking"] == []
     controller.join(60)
     assert b.phase == AWAITING_APPROVAL
-    assert b.plan["layout"]["s1"]["x"] >= 0
     assert set(b.plan["lane_layout"]) == {"est", "val"}
     assert set(session.graph.blocks) == blocks_before  # planning changes nothing
 
     controller.approve()
-    assert controller.canvas_locked() or b.phase == DONE
+    controller.join(300)
+    # The first stage is built, then the build waits for the user's review.
+    assert b.phase == AWAITING_STAGE_REVIEW, (b.phase, b.error, b.pending_question)
+    assert controller.canvas_locked()
+    est, val = b.stages
+    assert est["status"] == "done" and "5 drivers" in est["summary"] and val["status"] == "pending"
+    assert [s["ref"] for s in est["plan"]["steps"]] == ["s1", "s2"]
+    # Each stage's lane exists from the start.
+    assert {session.graph.lanes[b.lane_map[k]].name for k in ("est", "val")} == {"Estimation", "Validation"}
+    # Each block landed where its ghost was drawn.
+    for ref in ("s1", "s2"):
+        ghost = est["plan"]["layout"][ref]
+        real = session.graph.blocks[BUILT[ref]]
+        assert (real.position.x, real.position.y, real.lane) == (ghost["x"], ghost["y"], ghost["lane"])
+
+    controller.approve()  # on to the next stage
     controller.join(300)
     assert b.phase == DONE, (b.phase, b.error, b.pending_question)
     assert not controller.canvas_locked()
+    assert val["status"] == "done"
+    assert "Stage 2 of 2: Validation" in controller.loops["build"].prompts[-1]
 
     new = set(session.graph.blocks) - blocks_before
     assert new == b.owned_blocks and len(new) == 4
     for bid in new:
         prov = session.graph.blocks[bid].provenance
         assert prov["source"] == "agent" and prov["build_id"] == b.id and prov["plan_step"]
+        assert prov["stage"] == ("est" if prov["plan_step"] in ("s1", "s2") else "val")
         assert session.runner.status(bid) == "green"
     assert b.results and b.results[0]["label"] == "Test Gini" and "value" in b.results[0]
     reports = [a for a in session.graph.artifacts.values() if a.kind == "build_report"]
-    assert len(reports) == 1 and "Test Gini" in reports[0].document
+    assert len(reports) == 1 and "Test Gini" in reports[0].document and "5 drivers" in reports[0].document
 
     # One undo takes the whole build back out, lanes included.
     lanes_before_undo = set(session.graph.lanes)
@@ -231,7 +291,7 @@ def test_ask_user_pauses_and_the_answer_resumes(prepared):
         call("finish", {"report": "ok"})
         return "done"
 
-    controller = make_controller(session, {"plan": [plan_turn], "build": [asks, finishes]})
+    controller = make_controller(session, {"plan": [plan_one_stage], "build": [asks, finishes]})
     b = start(controller, anchor)
     controller.join(60)
     controller.approve()
@@ -305,7 +365,7 @@ def test_build_on_a_sample_then_full_run(tmp_path, prepared):
         call("finish", {"report": "ok", "key_outputs": [{"block": blk}]})
         return ""
 
-    controller = make_controller(session, {"plan": [plan_turn], "build": [sampled_build]})
+    controller = make_controller(session, {"plan": [plan_one_stage], "build": [sampled_build]})
     b = start(controller, anchor, sample_rows=200)
     controller.join(60)
     controller.approve()
@@ -428,16 +488,85 @@ def test_plan_validation_reports_every_problem(prepared):
         {
             "plan": {
                 "summary": "x",
-                "steps": [
-                    {"ref": "s1", "category": "read_csv", "lane": "nowhere", "name": "a", "inputs": [], "why": ""},
-                    {"ref": "s2", "category": "auc_gini", "lane": "nowhere", "name": "b", "inputs": [{"port": "df", "from": anchor, "from_port": "nope"}], "why": ""},
+                "stages": [
+                    {"key": "est", "name": "Estimation", "goal": "fit"},
+                    {"key": "est", "name": "Again", "goal": ""},
+                    {"key": "val", "name": "Validation", "goal": "check", "lane": "lane_nowhere"},
                 ],
+                "changes_to_existing": [{"block": "blk_missing", "change": "x", "why": "y"}],
             }
         },
     )
     err = r["error"]
-    assert "read_csv can't be added" in err and "lane 'nowhere'" in err and "no output port 'nope'" in err
+    assert "key must be unique" in err and "needs a goal" in err and "'lane_nowhere'" in err and "'blk_missing'" in err
     assert b.phase == PLANNING and b.plan is None
+    assert "no stages" in b.call_tool("submit_plan", {"plan": {"summary": "x", "stages": []}})["error"]
+
+
+def staged(session, anchor, stages=("est", "val")) -> AgentBuild:
+    """A build in its first stage, for calling stage tools directly."""
+    b = building(session, anchor)
+    b.plan = {"summary": "x", "stages": [{"key": k, "name": k.title(), "goal": "g"} for k in stages]}
+    b.stages = [{**st, "status": "pending", "plan": None, "summary": None} for st in b.plan["stages"]]
+    b.stages[0]["status"] = "active"
+    return b
+
+
+def test_stage_plan_validation_reports_every_problem(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    r = b.call_tool(
+        "plan_stage",
+        {
+            "steps": [
+                {"ref": "s1", "category": "read_csv", "lane": "nowhere", "name": "a", "inputs": [], "why": ""},
+                {"ref": "s2", "category": "auc_gini", "name": "b", "inputs": [{"port": "df", "from": anchor, "from_port": "nope"}], "why": ""},
+            ]
+        },
+    )
+    err = r["error"]
+    assert "read_csv can't be added" in err and "lane 'nowhere'" in err and "no output port 'nope'" in err
+    assert b.stages[0]["plan"] is None
+
+    # A step without a lane goes into the stage's own.
+    ok = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "train_test_split", "name": "split", "why": "",
+                                               "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
+    assert ok.get("ok"), ok
+    assert b.stages[0]["plan"]["steps"][0]["lane"] == "est"
+
+    # Refs stay unique across stages, and earlier stages' steps are wired by block id.
+    b.stages[0]["status"], b.stages[1]["status"], b.stage_index = "done", "active", 1
+    r = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "auc_gini", "name": "g", "why": "",
+                                              "inputs": [{"port": "df", "from": "s1", "from_port": "test"}]}]})
+    assert "used by an earlier stage" in r["error"] and "wire from the block it built" in r["error"]
+
+
+def test_stage_tools_keep_to_the_outline(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    assert "plan_stage for this stage" in b.call_tool("complete_stage", {"summary": "x"})["error"]
+    r = b.call_tool("finish", {"report": "early"})
+    assert "stages still to build after this one: Val" in r["error"] and not b.finished
+
+    b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "train_test_split", "name": "split", "why": "",
+                                          "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
+    assert b.call_tool("complete_stage", {"summary": "split done"})["ok"]
+    assert b.stages[0]["status"] == "done" and b.turn_over
+    # Nothing more until the user has reviewed the stage.
+    assert "waiting for the user's review" in b.call_tool("plan_stage", {"steps": []})["error"]
+    assert "waiting for the user's review" in b.call_tool("add_block", {"category": "filter", "lane": "val"})["error"]
+
+    b.stages[1]["status"], b.stage_index = "active", 1
+    assert "call finish instead" in b.call_tool("complete_stage", {"summary": "x"})["error"]
+    assert b.call_tool("finish", {"report": "ok"})["ok"] and b.stages[1]["status"] == "done"
+
+
+def test_finish_can_drop_stages_the_user_agreed_to_drop(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor, stages=("est", "val", "cal"))
+    r = b.call_tool("finish", {"report": "ok", "dropped_stages_reason": "the user only wants the fit for now"})
+    assert r["ok"] and [st["status"] for st in b.stages] == ["done", "skipped", "skipped"]
+    assert [d["what"] for d in b.deviations] == ["dropped stage Val", "dropped stage Cal"]
 
 
 def test_tool_call_limit_stops_the_build(prepared):
@@ -489,11 +618,12 @@ def test_auto_build_builds_without_waiting_for_approval(prepared):
     session, anchor = prepared
     ANCHOR[:] = [anchor]
     blocks_before = set(session.graph.blocks)
-    controller = make_controller(session, {"plan": [plan_turn], "build": [build_turn]})
+    controller = make_controller(session, {"plan": [plan_turn], "build": list(BUILD_TURNS)})
     b = start(controller, anchor, auto_build=True)
     controller.join(300)
     assert b.phase == DONE, (b.phase, b.error, b.pending_question)
-    assert any(e["kind"] == "auto_approved" for e in b.events_since())
+    kinds = [e["kind"] for e in b.events_since()]
+    assert "auto_approved" in kinds and "auto_continued" in kinds  # no stops for the plan or the stage review
     assert len(set(session.graph.blocks) - blocks_before) == 4
     # Still one undo step, like an approved build.
     assert session.undo() is True
@@ -511,18 +641,14 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
                 "plan": {
                     "summary": "split",
                     "questions": ["Which seed?"],
-                    "lanes": [{"key": "est", "name": "Estimation"}],
-                    "steps": [
-                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
-                    ],
+                    "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split"}],
                 }
             },
         )
         assert result.get("ok"), result
         return "planned"
 
-    controller = make_controller(session, {"plan": [asks_in_plan, plan_turn], "build": [build_turn]})
+    controller = make_controller(session, {"plan": [asks_in_plan, plan_turn], "build": list(BUILD_TURNS)})
     b = start(controller, anchor, auto_build=True)
     controller.join(60)
     assert b.phase == AWAITING_APPROVAL
@@ -536,12 +662,14 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
 def test_the_build_log_is_saved_with_models_and_timings(prepared):
     session, anchor = prepared
     ANCHOR[:] = [anchor]
-    controller = make_controller(session, {"plan": [plan_turn], "build": [build_turn]})
+    controller = make_controller(session, {"plan": [plan_turn], "build": list(BUILD_TURNS)})
     b = controller.start("PD model", [anchor], LLMChoice("anthropic", "some-model"), LLMChoice("openai", "other-model"), BuildOptions(), token="t")
     controller.join(60)
     # Written while the build is still waiting for approval, not only at the end.
     assert b.log_path is not None and b.log_path.is_file()
     controller.approve()
+    controller.join(300)
+    controller.approve()  # past the first stage's review
     controller.join(300)
     assert b.phase == DONE
 
@@ -552,6 +680,7 @@ def test_the_build_log_is_saved_with_models_and_timings(prepared):
     assert log["created_at"] and log["ended_at"] and log["duration_seconds"] >= 0
     assert log["options"]["auto_build"] is False
     assert log["plan"]["summary"] and log["results"] and log["usage"] is not None
+    assert [st["status"] for st in log["stages"]] == ["done", "done"] and log["stages"][0]["summary"]
     kinds = [e["kind"] for e in log["events"]]
     assert "tool" in kinds and kinds[-1] == "phase"
     assert all("at" in e for e in log["events"])
@@ -599,7 +728,7 @@ def test_a_model_timeout_while_building_keeps_the_build(prepared):
         call("connect", {"from_block": ANCHOR[0], "from_port": "out", "to_block": split, "to_port": "df"})
         _model_times_out(call)
 
-    controller = make_controller(session, {"plan": [plan_turn], "build": [adds_then_times_out, lambda call: call("finish", {"report": "ok"}) and ""]})
+    controller = make_controller(session, {"plan": [plan_one_stage], "build": [adds_then_times_out, lambda call: call("finish", {"report": "ok"}) and ""]})
     b = start(controller, anchor)
     controller.join(60)
     controller.approve()
@@ -609,3 +738,64 @@ def test_a_model_timeout_while_building_keeps_the_build(prepared):
     controller.feedback("continue")
     controller.join(120)
     assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+
+
+# ---- stage reviews ------------------------------------------------------------------------
+
+
+def test_stage_review_feedback_reworks_the_stage(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def rework(call):
+        fit = BUILT["s2"]
+        assert call("set_params", {"block": fit, "params": {"features": FEATURES[:3]}})["ok"]
+        assert call("run_to", {"block": fit})["status"] == "green"
+        assert call("complete_stage", {"summary": "Refitted on 3 drivers."})["ok"]
+        return "Reworked."
+
+    controller = make_controller(session, {"plan": [plan_turn], "build": [build_est, rework, build_val]})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(300)
+    assert b.phase == AWAITING_STAGE_REVIEW
+    with pytest.raises(BuildError):
+        controller.feedback("   ")
+
+    controller.feedback("Keep only the first three drivers.")
+    controller.join(300)
+    # Still the same stage, back for review with the new summary.
+    assert b.phase == AWAITING_STAGE_REVIEW and b.stage_index == 0
+    assert b.stages[0]["summary"] == "Refitted on 3 drivers."
+    prompt = controller.loops["build"].prompts[-1]
+    assert "Keep only the first three drivers." in prompt and "'Estimation'" in prompt
+
+    controller.approve()
+    controller.join(300)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+
+
+def test_stop_during_a_stage_review(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [plan_turn], "build": list(BUILD_TURNS)})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(300)
+    assert b.phase == AWAITING_STAGE_REVIEW
+    controller.stop()
+    assert b.phase == STOPPED and not controller.canvas_locked()
+    # The empty lane of the stage never built is cleaned up; the built one stays.
+    assert b.lane_map["val"] not in session.graph.lanes and b.lane_map["est"] in session.graph.lanes
+
+
+def test_waiting_on_the_user_doesnt_count_against_the_time_limit(prepared):
+    session, anchor = prepared
+    b = AgentBuild(session, RunSlot(), "g", [anchor])
+    b.started_monotonic -= 3600  # an hour in preflight (waiting on the user)
+    b._waiting_since -= 3600
+    b.set_phase(PLANNING)
+    assert b.active_seconds() < 60
+    b.check_stop()  # within the limit

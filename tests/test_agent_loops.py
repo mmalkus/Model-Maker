@@ -79,11 +79,7 @@ def planning_build(tmp_path):
 def _plan(anchor):
     return {
         "summary": "split",
-        "lanes": [{"key": "est", "name": "Estimation"}],
-        "steps": [
-            {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-             "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
-        ],
+        "stages": [{"key": "est", "name": "Estimation", "goal": f"70/30 holdout split of {anchor}"}],
     }
 
 
@@ -117,7 +113,7 @@ def test_openai_loop_plans_through_the_tools(planning_build):
 
     # A successful submit_plan ends the turn -- no extra request for a closing remark.
     assert len(fake.requests) == 3 and outcome.final_text == "Looking around."
-    assert b.phase == AWAITING_APPROVAL and b.plan["steps"][0]["ref"] == "s1"
+    assert b.phase == AWAITING_APPROVAL and b.plan["stages"][0]["key"] == "est"
     assert b.usage["input_tokens"] == 30 and b.usage["output_tokens"] == 15
 
     path, headers, first = fake.requests[0]

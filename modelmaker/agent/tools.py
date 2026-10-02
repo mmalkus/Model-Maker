@@ -20,7 +20,7 @@ from ..packet import ColumnRole, DataFramePacket
 from ..runslot import RunBusy, RunFailed
 from ..session import new_id, wire_is_valid
 from . import catalogue
-from .build import AWAITING_APPROVAL, AWAITING_INPUT, BUILDING, PLANNING, AgentBuild, ToolError
+from .build import AWAITING_APPROVAL, AWAITING_INPUT, BUILDING, PLANNING, STAGE_ACTIVE, STAGE_DONE, STAGE_SKIPPED, AgentBuild, ToolError
 from .layout import Placer, next_lane_order
 
 READ = frozenset({PLANNING, BUILDING})
@@ -141,7 +141,7 @@ def check_code_excluded(b: AgentBuild, code: str) -> None:
 
 def resolve_lane(b: AgentBuild, lane: str) -> str:
     """A lane argument may be an existing lane id, an existing lane's name
-    (case-insensitive), a plan lane key, or a new name (creates a lane)."""
+    (case-insensitive), a plan stage key, or a new name (creates a lane)."""
     graph = b.session.graph
     lane_map = b.lane_map
     if lane in lane_map and lane_map[lane] in graph.lanes:
@@ -151,8 +151,8 @@ def resolve_lane(b: AgentBuild, lane: str) -> str:
     for lane_id, l in graph.lanes.items():
         if l.name.strip().lower() == lane.strip().lower():
             return lane_id
-    plan_lane = next((l for l in (b.plan or {}).get("lanes", []) if l.get("key") == lane), None)
-    name = plan_lane["name"] if plan_lane else lane
+    stage = next((st for st in (b.plan or {}).get("stages", []) if st.get("key") == lane), None)
+    name = stage["name"] if stage else lane
     lane_id = new_id("lane")
     with b.session.edit():
         b.session.set_lane(lane_id, name, next_lane_order(graph))
@@ -292,6 +292,12 @@ def get_block_error(b: AgentBuild, block: str) -> dict[str, Any]:
 
 
 # ---- planning ------------------------------------------------------------------
+#
+# Two levels (see /agent-builder-proposal.md §4.2): the plan phase submits
+# an outline of stages for the user to approve (submit_plan); the build
+# then plans each stage's blocks (plan_stage) just before building it,
+# with the earlier stages' real results in hand, and reports back when the
+# stage is done (complete_stage).
 
 _PLAN_SCHEMA = {
     "type": "object",
@@ -303,41 +309,22 @@ _PLAN_SCHEMA = {
             "items": _STR,
             "description": "Anything you need the user to decide before building. Non-empty blocks approval until answered.",
         },
-        "lanes": {
+        "stages": {
             "type": "array",
-            "description": "New lanes to create (existing lanes can be referenced by id without listing them).",
-            "items": {
-                "type": "object",
-                "properties": {"key": _STR, "name": _STR, "purpose": _STR},
-                "required": ["key", "name"],
-            },
-        },
-        "steps": {
-            "type": "array",
+            "description": "The modelling stages, in build order. Each is built into one lane.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "ref": {"type": "string", "description": "Plan-local id, e.g. s1."},
-                    "category": {"type": "string", "description": "A registry category, or 'custom'."},
-                    "instruction": {"type": "string", "description": "For custom steps: what the code will do."},
-                    "lane": {"type": "string", "description": "A plan lane key or an existing lane id."},
-                    "name": _STR,
-                    "inputs": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "port": _STR,
-                                "from": {"type": "string", "description": "A step ref or an existing block id."},
-                                "from_port": _STR,
-                            },
-                            "required": ["port", "from", "from_port"],
-                        },
+                    "key": {"type": "string", "description": "Plan-local id, e.g. prep, est, val."},
+                    "name": {"type": "string", "description": "The lane name, e.g. Estimation."},
+                    "goal": {
+                        "type": "string",
+                        "description": "What this stage does and produces, with the decisions that shape it "
+                        "(e.g. split design, model family, which metrics). Not individual blocks.",
                     },
-                    "params": {"type": "object"},
-                    "why": _STR,
+                    "lane": {"type": "string", "description": "An existing lane id to build into, instead of a new lane."},
                 },
-                "required": ["ref", "category", "lane", "name", "inputs", "why"],
+                "required": ["key", "name", "goal"],
             },
         },
         "changes_to_existing": {
@@ -350,7 +337,33 @@ _PLAN_SCHEMA = {
             },
         },
     },
-    "required": ["summary", "steps"],
+    "required": ["summary", "stages"],
+}
+
+_STEP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ref": {"type": "string", "description": "Plan-local id, e.g. s1 -- unique across the whole build."},
+        "category": {"type": "string", "description": "A registry category, or 'custom'."},
+        "instruction": {"type": "string", "description": "For custom steps: what the code will do."},
+        "lane": {"type": "string", "description": "A stage key or an existing lane id. Defaults to this stage's lane."},
+        "name": _STR,
+        "inputs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "port": _STR,
+                    "from": {"type": "string", "description": "A step ref of this stage or an existing block id."},
+                    "from_port": _STR,
+                },
+                "required": ["port", "from", "from_port"],
+            },
+        },
+        "params": {"type": "object"},
+        "why": _STR,
+    },
+    "required": ["ref", "category", "name", "inputs", "why"],
 }
 
 
@@ -364,18 +377,53 @@ def _step_ports(step: dict[str, Any]) -> tuple[dict[str, str] | None, dict[str, 
 
 
 def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
+    """The outline: stages with unique keys, each a new lane or an existing
+    one; changes_to_existing naming real blocks."""
     graph = b.session.graph
     errors: list[str] = []
-    lane_keys = {l.get("key") for l in plan.get("lanes", [])}
-    steps = plan.get("steps") or []
+    stages = plan.get("stages") or []
+    if not stages:
+        errors.append("plan has no stages")
+    keys: set[str] = set()
+    for i, stage in enumerate(stages):
+        key = stage.get("key")
+        where = f"stage {key or i}"
+        if not key or key in keys or key in graph.lanes:
+            errors.append(f"{where}: key must be unique and not an existing lane id")
+        keys.add(key)
+        if not (stage.get("goal") or "").strip():
+            errors.append(f"{where}: needs a goal")
+        lane = stage.get("lane")
+        if lane is not None and lane not in graph.lanes:
+            errors.append(f"{where}: lane {lane!r} isn't an existing lane id -- leave it out to create a new lane")
+    for change in plan.get("changes_to_existing") or []:
+        if change.get("block") not in graph.blocks:
+            errors.append(f"changes_to_existing: no such block {change.get('block')!r}")
+    return errors
+
+
+def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
+    """One stage's steps: real categories and ports, lanes that exist (or a
+    stage key), inputs from an earlier step of this stage or an existing
+    block, refs unique across the whole build. Fills in a missing lane
+    with the current stage's."""
+    graph = b.session.graph
+    errors: list[str] = []
+    stage = b.current_stage
+    stage_keys = {st["key"] for st in b.stages}
+    taken = {
+        s["ref"] for st in b.stages if st is not stage and st.get("plan") for s in st["plan"]["steps"]
+    }
     if not steps:
-        errors.append("plan has no steps")
+        errors.append("the stage plan has no steps")
     refs: dict[str, dict[str, Any]] = {}
     for i, step in enumerate(steps):
         where = f"step {step.get('ref') or i}"
         ref = step.get("ref")
         if not ref or ref in refs or ref in graph.blocks:
             errors.append(f"{where}: ref must be unique and not an existing block id")
+        elif ref in taken:
+            errors.append(f"{where}: ref {ref!r} was used by an earlier stage -- pick a new one")
         cat = step.get("category")
         if cat != "custom" and cat not in BLOCK_REGISTRY:
             errors.append(f"{where}: unknown category {cat!r}")
@@ -385,9 +433,11 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
             errors.append(f"{where}: {cat} can't be added by an AI build ({catalogue.AGENT_DISALLOWED[cat]})")
         if cat == "custom" and not step.get("instruction"):
             errors.append(f"{where}: custom steps need an instruction")
+        if not step.get("lane") and stage is not None:
+            step["lane"] = stage["key"]
         lane = step.get("lane")
-        if lane not in lane_keys and lane not in graph.lanes:
-            errors.append(f"{where}: lane {lane!r} is neither a plan lane key nor an existing lane id")
+        if lane not in stage_keys and lane not in graph.lanes:
+            errors.append(f"{where}: lane {lane!r} is neither a stage key nor an existing lane id")
         in_ports, _ = _step_ports(step)
         for inp in step.get("inputs") or []:
             src = inp.get("from")
@@ -397,6 +447,9 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
                 src_out = _step_ports(src_step)[1] if valid_src else None
             elif src in graph.blocks:
                 src_out = {p.name: p.type for p in graph.blocks[src].outputs}
+            elif src in taken:
+                errors.append(f"{where}: {src!r} is an earlier stage's step -- wire from the block it built (by block id)")
+                continue
             else:
                 errors.append(f"{where}: input from {src!r} is neither an earlier step ref nor an existing block id")
                 continue
@@ -411,23 +464,15 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
                 if a != bt and "any" not in (a, bt):
                     errors.append(f"{where}: can't wire {a} output {src}.{inp['from_port']} into {bt} input {inp['port']}")
         refs[ref] = step
-    for change in plan.get("changes_to_existing") or []:
-        if change.get("block") not in graph.blocks:
-            errors.append(f"changes_to_existing: no such block {change.get('block')!r}")
     return errors
 
 
 def layout_plan(b: AgentBuild, plan: dict[str, Any]) -> None:
-    """Attach ghost positions (see §4.2): each step's x/y, and the bands of
-    lanes the plan would create -- computed by the same Placer the build
-    phase uses."""
+    """Attach the ghost bands (see §4.2) of the lanes the outline would
+    create, one per stage that doesn't name an existing lane."""
     graph = b.session.graph
-    new_lanes = [(l["key"], l["name"]) for l in plan.get("lanes", []) if l.get("key") not in graph.lanes]
+    new_lanes = [(st["key"], st["name"]) for st in plan["stages"] if not st.get("lane")]
     placer = Placer(graph, new_lanes)
-    plan["layout"] = {}
-    for step in plan["steps"]:
-        x, y = placer.place(step["lane"])
-        plan["layout"][step["ref"]] = {"lane": step["lane"], "x": x, "y": y}
     plan["lane_layout"] = {
         key: {"name": g.name, "top": g.top, "height": g.height}
         for key, g in placer.lanes.items()
@@ -435,10 +480,23 @@ def layout_plan(b: AgentBuild, plan: dict[str, Any]) -> None:
     }
 
 
+def layout_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Ghost positions for one stage's steps -- computed by the same Placer
+    add_block uses, after whatever the earlier stages built, so a real
+    block lands where its ghost was."""
+    placer = Placer(b.session.graph)
+    layout = {}
+    for step in steps:
+        lane_id = b.lane_map.get(step["lane"], step["lane"])
+        x, y = placer.place(lane_id)
+        layout[step["ref"]] = {"lane": lane_id, "x": x, "y": y}
+    return layout
+
+
 @tool(
     "submit_plan",
-    "Submit your build plan for the user's review. This ends the planning phase: after it succeeds, end "
-    "your turn. If it returns errors, fix them and submit again.",
+    "Submit your outline plan -- the stages, in order -- for the user's review. This ends the planning "
+    "phase: after it succeeds, end your turn. If it returns errors, fix them and submit again.",
     {"plan": _PLAN_SCHEMA},
     ["plan"],
     frozenset({PLANNING}),
@@ -454,6 +512,57 @@ def submit_plan(b: AgentBuild, plan: dict[str, Any]) -> dict[str, Any]:
     b.set_phase(AWAITING_APPROVAL)
     b.turn_over = True
     return {"ok": True, "message": "Plan submitted for the user's review. End your turn now."}
+
+
+def _require_active_stage(b: AgentBuild) -> dict[str, Any]:
+    stage = b.current_stage
+    if stage is None:
+        raise ToolError("this build has no stages to plan")
+    if stage["status"] != STAGE_ACTIVE:
+        raise ToolError(f"stage {stage['key']!r} is already complete -- end your turn")
+    return stage
+
+
+@tool(
+    "plan_stage",
+    "Plan the current stage's blocks, now that you can see what the earlier stages produced. Call it "
+    "before building the stage, and again if the stage's steps change. Steps wire from earlier steps of "
+    "this stage or from existing blocks by id (including blocks built in earlier stages).",
+    {"steps": {"type": "array", "items": _STEP_SCHEMA}},
+    ["steps"],
+    WRITE,
+)
+def plan_stage(b: AgentBuild, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    stage = _require_active_stage(b)
+    errors = validate_steps(b, steps)
+    if errors:
+        raise ToolError("stage plan has problems, fix and resubmit:\n- " + "\n- ".join(errors))
+    stage["plan"] = {"steps": steps, "layout": layout_steps(b, steps)}
+    b.log("stage", key=stage["key"], name=stage["name"], status="planned", steps=len(steps))
+    return {"ok": True, "next": "build the steps in order: add_block with plan_step, connect, run_to, check"}
+
+
+@tool(
+    "complete_stage",
+    "Report the current stage as built and checked. `summary` is Markdown for the user: what you built and "
+    "what the results show (headline numbers, and decisions you made from them, e.g. features dropped for "
+    "low IV). After calling it, end your turn -- the user reviews the stage before the next one starts. On "
+    "the last stage, call finish instead.",
+    {"summary": _STR},
+    ["summary"],
+    WRITE,
+)
+def complete_stage(b: AgentBuild, summary: str) -> dict[str, Any]:
+    stage = _require_active_stage(b)
+    if b.is_last_stage():
+        raise ToolError("this is the last stage -- call finish instead")
+    if not stage.get("plan"):
+        raise ToolError("call plan_stage for this stage (and build it) first")
+    stage["status"] = STAGE_DONE
+    stage["summary"] = summary
+    b.log("stage", key=stage["key"], name=stage["name"], status="done", summary=summary)
+    b.turn_over = True
+    return {"ok": True, "message": "Stage complete. End your turn now -- you'll be resumed for the next stage."}
 
 
 # ---- building ------------------------------------------------------------------
@@ -786,8 +895,8 @@ def run_to(b: AgentBuild, block: str) -> dict[str, Any]:
 
 @tool(
     "note_deviation",
-    "Record a small deviation from the approved plan (e.g. a param changed to make a fit converge, or an "
-    "extra cleaning step). Structural changes need ask_user instead.",
+    "Record a small deviation from the stage plan or the approved outline (e.g. a param changed to make a "
+    "fit converge, or an extra cleaning step). Structural changes need ask_user instead.",
     {"plan_step": _STR, "what": _STR, "why": _STR},
     ["what", "why"],
     WRITE,
@@ -800,7 +909,7 @@ def note_deviation(b: AgentBuild, what: str, why: str, plan_step: str | None = N
 @tool(
     "ask_user",
     "Pause the build and ask the user something you can't decide yourself (a structural change to the "
-    "plan, a change to one of their blocks that wasn't approved, or repeated failures). After calling "
+    "approved outline, a change to one of their blocks that wasn't approved, or repeated failures). After calling "
     "it, end your turn -- you'll be resumed with their answer.",
     {"question": _STR},
     ["question"],
@@ -815,9 +924,10 @@ def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
 
 @tool(
     "finish",
-    "Finish the build. `report` is Markdown for the user: what you built, deviations, key results and "
-    "concerns. `key_outputs` lists the blocks/ports holding the headline metrics, so they can be refreshed "
-    "after the final full-data run. After calling it, end your turn.",
+    "Finish the build, once the last stage is built and checked. `report` is Markdown for the user: what "
+    "you built, deviations, key results and concerns. `key_outputs` lists the blocks/ports holding the "
+    "headline metrics, so they can be refreshed after the final full-data run. If the user agreed (through "
+    "ask_user) to drop the remaining stages, say why in `dropped_stages_reason`. After calling it, end your turn.",
     {
         "report": _STR,
         "key_outputs": {
@@ -828,13 +938,31 @@ def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
                 "required": ["block"],
             },
         },
+        "dropped_stages_reason": _STR,
     },
     ["report"],
     WRITE,
 )
-def finish(b: AgentBuild, report: str, key_outputs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def finish(
+    b: AgentBuild, report: str, key_outputs: list[dict[str, Any]] | None = None, dropped_stages_reason: str | None = None
+) -> dict[str, Any]:
+    stage = b.current_stage
+    remaining = b.stages[b.stage_index + 1 :] if stage is not None else []
+    if remaining and not dropped_stages_reason:
+        names = ", ".join(st["name"] for st in remaining)
+        raise ToolError(
+            f"stages still to build after this one: {names}. Finish this stage with complete_stage -- or, if the "
+            "user agreed to drop them, pass dropped_stages_reason."
+        )
     for k in key_outputs or []:
         b.require_block(k["block"])
+    if stage is not None:
+        stage["status"] = STAGE_DONE
+        b.log("stage", key=stage["key"], name=stage["name"], status="done")
+    for st in remaining:
+        st["status"] = STAGE_SKIPPED
+        b.deviations.append({"what": f"dropped stage {st['name']}", "why": dropped_stages_reason})
+        b.log("stage", key=st["key"], name=st["name"], status="skipped")
     b.report = report
     b.key_outputs = list(key_outputs or [])
     b.finished = True

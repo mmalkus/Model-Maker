@@ -30,7 +30,7 @@ const edgeTypes = { dataWire: DataWireEdge }
 
 // Build phases during which the server refuses user edits (see api.py's
 // agent canvas lock) -- mirrored here only to say so up front.
-const BUILD_LOCKING = new Set(['building', 'awaiting_input', 'final_run'])
+const BUILD_LOCKING = new Set(['building', 'awaiting_input', 'awaiting_stage_review', 'final_run'])
 const BUILD_TERMINAL = new Set(['done', 'done_with_errors', 'stopped', 'failed', 'discarded'])
 const BUILD_BLOCK_TOOLS = new Set(['add_block', 'add_custom_block', 'run_to', 'set_params', 'update_custom_block', 'connect'])
 
@@ -358,13 +358,29 @@ function AppInner() {
   )
 
   // ---- AI build overlays (see BuildPanel / agent-builder-proposal.md §4.2) --
-  // While a plan awaits review: its steps as ghost blocks (plus ghost bands
-  // for lanes it would create) and its wiring as dashed edges. While
-  // building: a highlight on whichever block the AI last touched.
+  // While the outline awaits review: ghost bands for the lanes it would
+  // create. While building: the current stage's planned-but-not-built
+  // steps as ghost blocks, wired with dashed edges -- to each other, or to
+  // the real blocks they build on -- and a highlight on whichever block
+  // the AI last touched.
   const reviewPlan = build?.phase === 'awaiting_approval' ? build.plan : null
+  const stagePlan = build && BUILD_LOCKING.has(build.phase) ? (build.stages?.[build.stage_index]?.plan ?? null) : null
+  const buildId = build?.id
+  const builtRefs = useMemo(() => {
+    const m = new Map<string, string>()
+    if (!graph || !buildId || !stagePlan) return m
+    for (const [id, b] of Object.entries(graph.blocks)) {
+      if (b.provenance?.build_id === buildId && b.provenance.plan_step) m.set(b.provenance.plan_step, id)
+    }
+    return m
+  }, [graph, buildId, stagePlan])
+  const ghostSteps = useMemo(
+    () => (stagePlan ? stagePlan.steps.filter((s) => stagePlan.layout?.[s.ref] && !builtRefs.has(s.ref)) : []),
+    [stagePlan, builtRefs],
+  )
+
   const ghostNodes: (GhostFlowNode | GhostLaneNode)[] = useMemo(() => {
-    if (!reviewPlan) return []
-    const lanes: GhostLaneNode[] = Object.entries(reviewPlan.lane_layout ?? {}).map(([key, l]) => ({
+    const lanes: GhostLaneNode[] = Object.entries(reviewPlan?.lane_layout ?? {}).map(([key, l]) => ({
       id: `ghostlane_${key}`,
       type: 'ghostLane' as const,
       position: { x: BAND_X, y: l.top },
@@ -373,34 +389,34 @@ function AppInner() {
       zIndex: -9,
       data: { name: l.name, height: l.height },
     }))
-    const steps: GhostFlowNode[] = reviewPlan.steps
-      .filter((s) => reviewPlan.layout?.[s.ref])
-      .map((s) => ({
-        id: `ghost_${s.ref}`,
-        type: 'ghostBlock' as const,
-        position: { x: reviewPlan.layout[s.ref].x, y: reviewPlan.layout[s.ref].y },
-        draggable: false,
-        selectable: false,
-        data: { step: s, highlighted: false },
-      }))
+    const steps: GhostFlowNode[] = ghostSteps.map((s) => ({
+      id: `ghost_${s.ref}`,
+      type: 'ghostBlock' as const,
+      position: { x: stagePlan!.layout[s.ref].x, y: stagePlan!.layout[s.ref].y },
+      draggable: false,
+      selectable: false,
+      data: { step: s, highlighted: false },
+    }))
     return [...lanes, ...steps]
-  }, [reviewPlan])
+  }, [reviewPlan, stagePlan, ghostSteps])
 
   const ghostEdges: AiEdge[] = useMemo(() => {
-    if (!reviewPlan) return []
-    const refs = new Set(reviewPlan.steps.map((s) => s.ref))
-    return reviewPlan.steps.flatMap((s) =>
-      s.inputs.map((inp, i) => ({
-        id: `ghostedge_${s.ref}_${i}`,
-        source: refs.has(inp.from) ? `ghost_${inp.from}` : inp.from,
-        sourceHandle: refs.has(inp.from) ? GHOST_OUT : inp.from_port,
-        target: `ghost_${s.ref}`,
-        targetHandle: GHOST_IN,
-        style: { stroke: '#a78bfa', strokeDasharray: '6 4' },
-        selectable: false as const,
-      })),
+    const refs = new Set(ghostSteps.map((s) => s.ref))
+    return ghostSteps.flatMap((s) =>
+      s.inputs.map((inp, i) => {
+        const built = builtRefs.get(inp.from)
+        return {
+          id: `ghostedge_${s.ref}_${i}`,
+          source: built ?? (refs.has(inp.from) ? `ghost_${inp.from}` : inp.from),
+          sourceHandle: !built && refs.has(inp.from) ? GHOST_OUT : inp.from_port,
+          target: `ghost_${s.ref}`,
+          targetHandle: GHOST_IN,
+          style: { stroke: '#a78bfa', strokeDasharray: '6 4' },
+          selectable: false as const,
+        }
+      }),
     )
-  }, [reviewPlan])
+  }, [ghostSteps, builtRefs])
 
   const aiActiveBlock = useMemo(() => {
     if (!build || !BUILD_LOCKING.has(build.phase)) return null

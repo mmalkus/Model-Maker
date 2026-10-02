@@ -261,6 +261,8 @@ export interface Provenance {
   plan_llm?: string
   build_llm?: string
   plan_step?: string | null
+  // The outline stage it was built in.
+  stage?: string | null
   modified_by_user?: boolean
   // Approved changes AI builds made to a pre-existing (user) block.
   changes?: { build_id: string; at: string; change: string }[]
@@ -274,6 +276,7 @@ export type BuildPhase =
   | 'awaiting_approval'
   | 'building'
   | 'awaiting_input'
+  | 'awaiting_stage_review'
   | 'final_run'
   | 'done'
   | 'done_with_errors'
@@ -298,17 +301,33 @@ export interface PlanStep {
   why: string
 }
 
+// The outline the user approves (see agent/tools.submit_plan): stages,
+// not blocks -- the build plans each stage's blocks as it gets to it.
+export interface PlanStage {
+  key: string
+  name: string
+  goal: string
+  // An existing lane to build into, instead of a new one.
+  lane?: string
+}
+
 export interface BuildPlan {
   summary: string
   assumptions?: string[]
   questions?: string[]
-  lanes?: { key: string; name: string; purpose?: string }[]
-  steps: PlanStep[]
+  stages: PlanStage[]
   changes_to_existing?: { block: string; change: string; why: string }[]
-  // Ghost-block positions (see agent/tools.layout_plan) and the bands of
-  // lanes the plan would create.
-  layout: Record<string, { lane: string; x: number; y: number }>
+  // The bands of the lanes the outline would create (see agent/tools.layout_plan).
   lane_layout: Record<string, { name: string; top: number; height: number }>
+}
+
+// A stage as the build works through it (see AgentBuild.stages).
+export interface BuildStage extends PlanStage {
+  status: 'pending' | 'active' | 'done' | 'skipped'
+  // Its steps (agent/tools.plan_stage), with ghost-block positions.
+  plan: { steps: PlanStep[]; layout: Record<string, { lane: string; x: number; y: number }> } | null
+  // What the build reported when it completed the stage.
+  summary: string | null
 }
 
 export interface BuildEvent {
@@ -333,6 +352,8 @@ export interface BuildOut {
   preflight: { blocking: PreflightIssue[]; warnings: PreflightIssue[]; max_rows?: number | null }
   plan: BuildPlan | null
   plan_rounds: number
+  stages: BuildStage[]
+  stage_index: number
   pending_question: string | null
   report: string | null
   results: { block: string; port: string | null; label?: string | null; value?: unknown; row_count?: number; error?: string }[]

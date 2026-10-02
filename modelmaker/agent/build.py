@@ -21,14 +21,20 @@ if TYPE_CHECKING:
     from ..runslot import RunSlot
     from ..session import ProjectSession
 
-# Phases. "building" and "awaiting_input" are the ones during which the
-# canvas is locked for the user (see api's agent lock middleware) --
-# "final_run" too, since it's still the build's run.
+# Phases. "building", "awaiting_input" and "awaiting_stage_review" are the
+# ones during which the canvas is locked for the user (see api's agent lock
+# middleware) -- "final_run" too, since it's still the build's run.
+#
+# Not to be confused with the plan's *stages* (data prep, estimation,
+# validation, ...): the plan is an outline of stages, and the build plans
+# and builds one stage at a time, pausing in awaiting_stage_review after
+# each (see controller._after_build_turn).
 PREFLIGHT = "preflight"
 PLANNING = "planning"
 AWAITING_APPROVAL = "awaiting_approval"
 BUILDING = "building"
 AWAITING_INPUT = "awaiting_input"
+AWAITING_STAGE_REVIEW = "awaiting_stage_review"
 FINAL_RUN = "final_run"
 DONE = "done"
 DONE_WITH_ERRORS = "done_with_errors"
@@ -36,8 +42,16 @@ STOPPED = "stopped"
 FAILED = "failed"
 DISCARDED = "discarded"
 
-LOCKING_PHASES = frozenset({BUILDING, AWAITING_INPUT, FINAL_RUN})
+LOCKING_PHASES = frozenset({BUILDING, AWAITING_INPUT, AWAITING_STAGE_REVIEW, FINAL_RUN})
 TERMINAL_PHASES = frozenset({DONE, DONE_WITH_ERRORS, STOPPED, FAILED, DISCARDED})
+# Waiting on the user: doesn't count against the build's time limit.
+WAITING_PHASES = frozenset({PREFLIGHT, AWAITING_APPROVAL, AWAITING_INPUT, AWAITING_STAGE_REVIEW})
+
+# A stage's status (AgentBuild.stages).
+STAGE_PENDING = "pending"
+STAGE_ACTIVE = "active"
+STAGE_DONE = "done"
+STAGE_SKIPPED = "skipped"  # dropped, with the user's agreement (tools.finish)
 
 
 class ToolError(Exception):
@@ -62,7 +76,8 @@ class LLMChoice:
 @dataclass
 class BuildLimits:
     plan_tool_calls: int = 30
-    build_tool_calls: int = 150
+    # The build also plans each stage's blocks now (plan_stage).
+    build_tool_calls: int = 200
     custom_blocks: int = 5
     consecutive_failures_per_block: int = 3
     wall_seconds: float = 20 * 60
@@ -75,8 +90,9 @@ class BuildOptions:
     # when the anchors' data is large.
     sample_rows: int | None = None
     # Approve the plan as soon as it's submitted (when it has no open
-    # questions) instead of waiting for the user -- see
-    # controller._after_plan_turn.
+    # questions), and go straight on to each next stage, instead of
+    # waiting for the user -- see controller._after_plan_turn and
+    # _after_build_turn.
     auto_build: bool = False
     limits: BuildLimits = field(default_factory=BuildLimits)
 
@@ -122,13 +138,24 @@ class AgentBuild:
         self.created_at = _now()
         self.ended_at: str | None = None
         self.started_monotonic = time.monotonic()
+        # Time spent waiting on the user (see active_seconds).
+        self._waited_seconds = 0.0
+        self._waiting_since: float | None = time.monotonic()
         self.log_path: Path | None = None  # where save_log last wrote
         self._log_failed = False
         self._log_write_lock = threading.Lock()
 
         self.preflight: dict[str, Any] = {"blocking": [], "warnings": []}
+        # The approved outline: summary, assumptions, questions, stages,
+        # changes_to_existing (see tools.submit_plan).
         self.plan: dict[str, Any] | None = None
         self.plan_history: list[dict[str, Any]] = []  # [{plan, feedback}]
+        # The outline's stages as the build works through them, set on
+        # approval: [{key, name, goal, lane?, status, plan, summary}] --
+        # `plan` is that stage's steps (tools.plan_stage), `summary` what
+        # the build reported when it completed the stage.
+        self.stages: list[dict[str, Any]] = []
+        self.stage_index = 0
         self.pending_question: str | None = None
         self.report: str | None = None
         self.key_outputs: list[dict[str, Any]] = []
@@ -176,6 +203,10 @@ class AgentBuild:
 
     def set_phase(self, phase: str, note: str | None = None) -> None:
         with self._lock:
+            now = time.monotonic()
+            if self._waiting_since is not None:
+                self._waited_seconds += now - self._waiting_since
+            self._waiting_since = now if phase in WAITING_PHASES else None
             self.phase = phase
             if phase in TERMINAL_PHASES and self.ended_at is None:
                 self.ended_at = _now()
@@ -183,6 +214,25 @@ class AgentBuild:
         # Every phase change rewrites the log, so even a build that dies
         # mid-way (or a server that's killed) leaves its trail on disk.
         self.save_log()
+
+    def active_seconds(self) -> float:
+        """Seconds since the start, less the time spent waiting on the user
+        (reviewing the plan or a stage, answering a question)."""
+        with self._lock:
+            now = time.monotonic()
+            waiting = now - self._waiting_since if self._waiting_since is not None else 0.0
+            return now - self.started_monotonic - self._waited_seconds - waiting
+
+    # ---- stages ---------------------------------------------------------
+
+    @property
+    def current_stage(self) -> dict[str, Any] | None:
+        if 0 <= self.stage_index < len(self.stages):
+            return self.stages[self.stage_index]
+        return None
+
+    def is_last_stage(self) -> bool:
+        return self.stage_index >= len(self.stages) - 1
 
     # ---- persisted log --------------------------------------------------
 
@@ -214,6 +264,7 @@ class AgentBuild:
             "preflight": self.preflight,
             "plan": self.plan,
             "plan_history": self.plan_history,
+            "stages": self.stages,
             "pending_question": self.pending_question,
             "report": self.report,
             "key_outputs": self.key_outputs,
@@ -301,6 +352,7 @@ class AgentBuild:
             "plan_llm": self.plan_llm.label(),
             "build_llm": self.build_llm.label(),
             "plan_step": plan_step,
+            "stage": stage["key"] if (stage := self.current_stage) else None,
             "modified_by_user": False,
         }
 
@@ -354,7 +406,7 @@ class AgentBuild:
         if self.stop_requested:
             raise BuildStopped("The user stopped this build. End your turn now without calling more tools.")
         limit = self.options.limits.wall_seconds
-        if time.monotonic() - self.started_monotonic > limit:
+        if self.active_seconds() > limit:
             self.stop_requested = True
             raise BuildStopped(f"The build hit its {limit / 60:.0f}-minute time limit. End your turn now.")
 
@@ -373,6 +425,12 @@ class AgentBuild:
                 raise ToolError(f"unknown tool {name!r}")
             if self.phase not in tool.phases:
                 raise ToolError(f"{name} isn't available in the {self.phase} phase")
+            stage = self.current_stage
+            if stage is not None and stage["status"] == STAGE_DONE and not self.finished:
+                # complete_stage ended the turn; a model that keeps going
+                # (the claude CLI loop can't be cut off mid-turn) mustn't
+                # start on the next stage before the user has reviewed this one.
+                raise ToolError(f"stage {stage['name']!r} is complete and waiting for the user's review -- end your turn now")
             counter = "plan_tool_calls" if self.phase == PLANNING else "build_tool_calls"
             limit = getattr(self.options.limits, counter)
             self.counters[counter] += 1
@@ -414,6 +472,8 @@ class AgentBuild:
             "preflight": self.preflight,
             "plan": self.plan,
             "plan_rounds": len(self.plan_history),
+            "stages": self.stages,
+            "stage_index": self.stage_index,
             "pending_question": self.pending_question,
             "report": self.report,
             "results": self.results,

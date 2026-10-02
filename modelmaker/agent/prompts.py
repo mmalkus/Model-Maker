@@ -1,8 +1,11 @@
 """System prompts and opening messages for an AI build's two phases. The
-build phase starts a fresh conversation seeded with the approved plan --
-not the planning transcript -- so the plan is the contract and the plan
-and build LLMs can be different providers (see /agent-builder-proposal.md
-§4.3, §9.1)."""
+plan phase produces an outline of stages, not blocks: which blocks a stage
+needs depends on what the earlier stages produce, so the build plans each
+stage's blocks just before building it. The build phase starts a fresh
+conversation seeded with the approved outline -- not the planning
+transcript -- so the outline is the contract and the plan and build LLMs
+can be different providers (see /agent-builder-proposal.md §4.2, §4.3,
+§9.1). One build conversation runs through every stage."""
 
 from __future__ import annotations
 
@@ -79,37 +82,54 @@ A good plan:
 - Restates the goal in `summary`, lists real `assumptions` (e.g. which column \
 is the default flag and why), and puts anything the user must decide in \
 `questions` (leave it empty if nothing is unclear -- don't ask for the sake of it).
-- Lays steps out in lanes; reuse existing lanes by id where they fit, and \
-create new ones (in `lanes`) only when needed.
-- Wires every step's inputs from an earlier step ref or an existing block id, \
-with real port names.
-- Gives key params (feature lists, bins, split settings) with a short `why` per step.
+- Is an outline of `stages` in build order (e.g. Data prep, Feature \
+engineering, Estimation, Validation) -- each becomes one lane. Reuse an \
+existing lane (its id in `lane`) where it fits. Keep to the stages the goal \
+needs.
+- Gives each stage a `goal`: what it does and produces, and the decisions \
+that shape it -- the split design, the model family, the metrics and \
+samples to report. These are what the user is approving.
+- Does NOT list individual blocks, feature lists or bin settings: those \
+depend on results nobody has seen yet (e.g. which features survive the \
+univariate analysis), so the build plans each stage's blocks once the \
+earlier stages have run. Check the registry has what the stages need.
 - Lists in changes_to_existing any change to a block that already exists, \
 including wiring into one of its inputs.
 
 After submit_plan succeeds, end your turn with a one-line summary."""
 
-BUILD_INSTRUCTIONS = """## Your job now: build the approved plan
+BUILD_INSTRUCTIONS = """## Your job now: build the approved outline, one stage at a time
 
-Work step by step, in plan order:
-1. add_block (or add_custom_block) with `plan_step` set to the step's ref and \
-the step's lane key/id as `lane`.
-2. connect its inputs.
-3. run_to it and check the result: the status, the columns and row count, a \
-metric in a sane range. Use get_output_summary when you need the statistics.
-4. If it fails, read the error, fix it (set_params / update_custom_block) and \
-run again. After 3 failures of one block, ask_user.
+For the current stage:
+1. Look at what you're building on (get_output_summary on the earlier \
+stages' outputs) and call plan_stage with this stage's steps: category, \
+inputs wired from this stage's step refs or existing block ids (blocks built \
+in earlier stages included), key params (feature lists, bins, split \
+settings) chosen from the results so far, and a short `why` each.
+2. Then build the steps in order:
+   a. add_block (or add_custom_block) with `plan_step` set to the step's ref \
+and the stage key as `lane`.
+   b. connect its inputs.
+   c. run_to it and check the result: the status, the columns and row count, \
+a metric in a sane range. Use get_output_summary when you need the statistics.
+   d. If it fails, read the error, fix it (set_params / update_custom_block) \
+and run again. After 3 failures of one block, ask_user.
+3. When the stage is built and green, call complete_stage with a short \
+Markdown summary: what you built, the headline numbers, and the decisions \
+you made from them. Then end your turn: the user reviews the stage, and you \
+are resumed with the next one (or with their changes to this one).
 
-Small deviations from the plan are fine -- record each with note_deviation. \
-Structural changes (dropping a lane, a different model family) and any change \
-to a user block the plan didn't list need ask_user.
+Small deviations from the stage plan are fine -- record each with \
+note_deviation. Structural changes to the approved outline (dropping a stage, \
+a different model family) and any change to a user block the outline didn't \
+list need ask_user.
 
-The build is running on {sample_note}. When everything is built and green, \
-call finish with a Markdown report (what you built, deviations, headline \
-results, concerns -- e.g. weak features, instability, anything you'd check \
-next) and key_outputs pointing at the headline metric blocks. The app then \
-runs the whole graph on the full data and refreshes those metrics. End your \
-turn after finish."""
+The build is running on {sample_note}. On the last stage, instead of \
+complete_stage, call finish with a Markdown report (what you built across \
+all stages, deviations, headline results, concerns -- e.g. weak features, \
+instability, anything you'd check next) and key_outputs pointing at the \
+headline metric blocks. The app then runs the whole graph on the full data \
+and refreshes those metrics. End your turn after finish."""
 
 
 def _anchor_context(build: AgentBuild) -> str:
@@ -193,13 +213,36 @@ def _plan_for_prompt(plan: dict[str, Any]) -> dict[str, Any]:
 
 def build_prompt(build: AgentBuild) -> str:
     lane_map = build.lane_map
-    lanes = "\n".join(f"- plan lane {k!r} -> lane id {v}" for k, v in lane_map.items()) or "- (no new lanes)"
+    lanes = "\n".join(f"- stage {k!r} -> lane id {v}" for k, v in lane_map.items()) or "- (no new lanes)"
     feedback = [h["feedback"] for h in build.plan_history if h.get("feedback")]
     fb = ("\n\nFeedback the user gave while planning:\n" + "\n".join(f"- {f}" for f in feedback)) if feedback else ""
     return (
         f"Goal: {build.goal}\n\nAnchor blocks:\n{_anchor_context(build)}{_preflight_context(build)}{fb}\n\n"
-        f"The user approved this plan:\n```json\n{json.dumps(_plan_for_prompt(build.plan or {}), indent=1)}\n```\n\n"
-        f"New lanes have been created:\n{lanes}\n\nBuild it now."
+        f"The user approved this outline:\n```json\n{json.dumps(_plan_for_prompt(build.plan or {}), indent=1)}\n```\n\n"
+        f"Each stage's lane:\n{lanes}\n\n{stage_prompt(build)}"
+    )
+
+
+def stage_prompt(build: AgentBuild) -> str:
+    stage = build.current_stage
+    n = len(build.stages)
+    then = (
+        "When it's built and checked, call finish -- this is the last stage."
+        if build.is_last_stage()
+        else "When it's built and checked, call complete_stage and end your turn."
+    )
+    return (
+        f"Stage {build.stage_index + 1} of {n}: {stage['name']} (key {stage['key']!r}).\n"
+        f"Goal: {stage['goal']}\n\nPlan it with plan_stage, then build it. {then}"
+    )
+
+
+def stage_feedback_prompt(build: AgentBuild, feedback: str) -> str:
+    stage = build.current_stage
+    return (
+        f"The user reviewed stage {stage['name']!r} and wants changes:\n\n{feedback}\n\n"
+        "Make them (call plan_stage again if the steps change), check the results, then call complete_stage "
+        "again with an updated summary and end your turn."
     )
 
 

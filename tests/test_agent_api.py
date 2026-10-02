@@ -34,11 +34,7 @@ def _plan(anchor):
             {
                 "plan": {
                     "summary": "split",
-                    "lanes": [{"key": "est", "name": "Estimation"}],
-                    "steps": [
-                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
-                    ],
+                    "stages": [{"key": "est", "name": "Estimation", "goal": "70/30 holdout split of the anchor"}],
                 }
             },
         )
@@ -93,7 +89,7 @@ def test_build_endpoints_and_canvas_lock(client):
     started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
     assert started.status_code == 200, started.text
     b = _wait(c, "awaiting_approval")
-    assert b["plan"]["layout"]["s1"]["y"] >= 0
+    assert b["plan"]["lane_layout"]["est"]["name"] == "Estimation"
     # Nothing's locked while planning/reviewing.
     assert c.post("/api/blocks", json={"category": "filter", "params": {"expr": "dti > 0"}}).status_code == 200
 
@@ -231,9 +227,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
                 bad = await session.call_tool("add_block", {"category": "filter", "lane": "x"})
                 plan = await session.call_tool(
                     "submit_plan",
-                    {"plan": {"summary": "s", "lanes": [{"key": "est", "name": "Estimation"}], "steps": [
-                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                         "inputs": [{"port": "df", "from": c.anchor, "from_port": "out"}], "why": "x"}]}},
+                    {"plan": {"summary": "s", "stages": [{"key": "est", "name": "Estimation", "goal": "split"}]}},
                 )
                 return tools, graph, summary, bad, plan
 
