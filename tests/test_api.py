@@ -34,6 +34,15 @@ def test_registry_groups_modelling_and_tests_blocks(client):
     assert by_category["filter"]["group"] == "standard"
 
 
+def test_registry_carries_tags_for_the_palette_filter(client):
+    by_category = {b["category"]: b for b in client.get("/api/registry").json()}
+    assert by_category["logistic_regression"]["tags"] == ["regression", "scorecard", "pd"]
+    assert by_category["read_csv"]["tags"] == []
+    tags = client.get("/api/registry/tags").json()
+    assert tags[0] == {"tag": "data_prep", "about": tags[0]["about"]} and tags[0]["about"]
+    assert {t["tag"] for t in tags} >= {"pd", "lgd", "calibration"}
+
+
 def test_create_wire_run_and_preview(client, tmp_path):
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("a,b\n1,10\n2,20\n3,30\n")

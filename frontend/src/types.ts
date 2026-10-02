@@ -26,9 +26,17 @@ export interface RegistryEntry {
   category: string
   block_type: BlockType
   group: string
+  // What the block does and which risk model it's for (BlockSpec.tags) --
+  // the palette filters on these
+  tags: string[]
   display_name: string
   inputs: PortSpec[]
   outputs: PortSpec[]
+}
+
+export interface BlockTag {
+  tag: string
+  about: string
 }
 
 export interface BlockOut {

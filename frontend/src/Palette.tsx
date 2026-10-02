@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
-import type { RegistryEntry } from './types'
+import type { BlockTag, RegistryEntry } from './types'
 
 function InlineAdd({ placeholder, onSubmit }: { placeholder: string; onSubmit: (value: string) => void }) {
   const [open, setOpen] = useState(false)
@@ -78,9 +78,13 @@ export function Palette({
 }) {
   const [entries, setEntries] = useState<RegistryEntry[]>([])
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [tags, setTags] = useState<BlockTag[]>([])
+  // '' shows every block; otherwise only blocks carrying this tag
+  const [tagFilter, setTagFilter] = useState('')
 
   useEffect(() => {
     api.registry().then(setEntries).catch(console.error)
+    api.registryTags().then(setTags).catch(console.error)
   }, [])
 
   const toggleGroup = (group: string) => {
@@ -94,6 +98,7 @@ export function Palette({
 
   const groups: Record<string, RegistryEntry[]> = {}
   for (const e of entries) {
+    if (tagFilter && !e.tags.includes(tagFilter)) continue
     ;(groups[e.group] ??= []).push(e)
   }
   const orderedGroupNames = [...GROUP_ORDER.filter((g) => groups[g]), ...Object.keys(groups).filter((g) => !GROUP_ORDER.includes(g))]
@@ -111,6 +116,23 @@ export function Palette({
   return (
     <div style={{ width: 200, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto' }}>
       <h3 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--brand-ink)' }}>Blocks</h3>
+
+      {tags.length > 0 && (
+        <select
+          value={tagFilter}
+          onChange={(e) => setTagFilter(e.target.value)}
+          title={tags.find((t) => t.tag === tagFilter)?.about ?? 'Show only blocks with this tag'}
+          aria-label="Filter blocks by tag"
+          style={{ width: '100%', marginBottom: 12, fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 6 }}
+        >
+          <option value="">All tags</option>
+          {tags.map((t) => (
+            <option key={t.tag} value={t.tag} title={t.about}>
+              {t.tag.replace(/_/g, ' ')}
+            </option>
+          ))}
+        </select>
+      )}
 
       <div style={{ marginBottom: 12 }}>
         {AI_BLOCK_TYPES.map(({ blockType, label, title }) => (
@@ -135,7 +157,8 @@ export function Palette({
       </div>
 
       {orderedGroupNames.map((group) => {
-        const collapsed = collapsedGroups.has(group)
+        // a tag filter shows its matches even in groups the user collapsed
+        const collapsed = !tagFilter && collapsedGroups.has(group)
         return (
           <div key={group} style={{ marginBottom: 12 }}>
             <button

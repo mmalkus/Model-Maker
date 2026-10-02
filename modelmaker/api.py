@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
+from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildController, BuildError
 from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
@@ -429,12 +430,19 @@ def registry() -> list[dict[str, Any]]:
             "category": spec.category,
             "block_type": spec.block_type,
             "group": spec.group or spec.block_type,
+            "tags": list(spec.tags),
             "display_name": spec.display_name,
             "inputs": [asdict(p) for p in spec.inputs],
             "outputs": [asdict(p) for p in spec.outputs],
         }
         for spec in BLOCK_REGISTRY.values()
     ]
+
+
+@app.get("/api/registry/tags")
+def registry_tags() -> list[dict[str, str]]:
+    """The block tags, in display order, for the palette's tag filter."""
+    return [{"tag": tag, "about": about} for tag, about in BLOCK_TAGS.items()]
 
 
 @app.get("/api/graph")
