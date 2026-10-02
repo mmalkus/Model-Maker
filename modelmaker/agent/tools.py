@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import polars as pl
+
 from ..blocks.base import BLOCK_REGISTRY
 from ..graph import _compile_code_to_fn
 from ..llm.redact import column_info_for_llm
@@ -176,6 +178,59 @@ def check_excluded(b: AgentBuild, params: dict[str, Any], where: str) -> None:
                 f"{where}: param {name!r} names {hits}, which the user tagged 'excluded' -- excluded columns "
                 "must not be used. Leave them out."
             )
+
+
+SUSPICIOUS_BAND = "suspicious"  # fit_binning's iv_band for IV >= 0.5
+
+
+def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
+    """{feature: IV} for every feature a fit_binning in the graph banded
+    'suspicious' -- an IV that high usually means the column is partly the
+    outcome (leakage)."""
+    out: dict[str, float | None] = {}
+    for bid, blk in b.session.graph.blocks.items():
+        if blk.is_custom or blk.category != "fit_binning":
+            continue
+        try:
+            _, value = b.current_output(bid, "summary")
+        except ToolError:
+            continue
+        if not isinstance(value, DataFramePacket) or not {"feature", "iv_band"} <= set(value.data.columns):
+            continue
+        for row in value.data.filter(pl.col("iv_band") == SUSPICIOUS_BAND).iter_rows(named=True):
+            out[row["feature"]] = row.get("iv")
+    return out
+
+
+def flag_suspicious(b: AgentBuild, category: str, params: dict[str, Any], where: str) -> str | None:
+    """When a model-fitting block's features include one fit_binning banded
+    'suspicious' (directly or as its _woe column), record a concern the
+    user will see at the stage review and in the report -- whatever the
+    model says about it -- and return a warning for the tool result."""
+    spec = BLOCK_REGISTRY.get(category)
+    if spec is None or "regression" not in spec.tags:
+        return None
+    suspicious = suspicious_features(b)
+    if not suspicious:
+        return None
+    used = set()
+    for name, value in (params or {}).items():
+        if _FEATURE_PARAM.search(name):
+            used |= {v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str)}
+    hits = sorted({base for v in used for base in (v, v.removesuffix("_woe")) if base in suspicious})
+    if not hits:
+        return None
+    for feature in hits:
+        iv = suspicious[feature]
+        b.add_concern(
+            f"{where} uses {feature}{f' (IV {iv:.2f})' if isinstance(iv, float) else ''}, which fit_binning banded "
+            "'suspicious' -- an IV that high usually means leakage."
+        )
+    return (
+        f"{', '.join(hits)} {'was' if len(hits) == 1 else 'were'} banded 'suspicious' by fit_binning (IV >= 0.5), which "
+        "usually means leakage. This is recorded as a concern for the user. Unless they have already agreed to it, "
+        "ask_user before keeping it in the model."
+    )
 
 
 def check_code_excluded(b: AgentBuild, code: str) -> None:
@@ -663,7 +718,11 @@ def add_block(
     x, y = Placer(b.session.graph).place(lane_id)
     with b.session.edit():
         block = b.session.add_block(category, name=name, lane=lane_id, x=x, y=y, params=params)
-    return _finish_add(b, block, plan_step)
+    out = _finish_add(b, block, plan_step)
+    warning = flag_suspicious(b, category, params, block.name)
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 def _validate_custom(b: AgentBuild, code: str, inputs: list[str], metadata_transform: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -869,7 +928,11 @@ def set_params(b: AgentBuild, block: str, params: dict[str, Any]) -> dict[str, A
         b.session.update_block(block, actor="agent", params=merged)
     b.record_approved_change(block, f"set params {sorted(params)}")
     b.failures.pop(block, None)
-    return {"ok": True, "params": merged}
+    out = {"ok": True, "params": merged}
+    warning = flag_suspicious(b, blk.category, merged, blk.name) if not blk.is_custom else None
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 @tool(

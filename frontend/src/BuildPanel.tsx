@@ -520,6 +520,7 @@ function StageReview({ build, act, busy }: { build: BuildOut; act: Act; busy: bo
         <div style={label}>{stage.name} is built</div>
         <div style={{ whiteSpace: 'pre-wrap' }}>{stage.summary}</div>
       </div>
+      <Concerns concerns={(build.concerns ?? []).filter((c) => c.stage === stage.key)} />
       {next && (
         <div style={{ color: '#4b5563', marginBottom: 6 }}>
           Next: <strong>{next.name}</strong> -- {next.goal}
@@ -571,6 +572,20 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   )
 }
 
+// What the app itself flagged (see AgentBuild.concerns) -- not the model's
+// account, so it shows whether or not the model mentions it.
+function Concerns({ concerns }: { concerns: BuildOut['concerns'] }) {
+  if (!concerns.length) return null
+  return (
+    <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', color: '#92400e' }}>
+      <div style={{ ...label, color: '#92400e' }}>Flagged by the app</div>
+      {concerns.map((c, i) => (
+        <div key={i}>⚠ {c.what}</div>
+      ))}
+    </div>
+  )
+}
+
 // Only a build that ran to the end writes a report (see controller._attach_report).
 const REPORTED = new Set(['done', 'done_with_errors'])
 
@@ -590,6 +605,11 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
               <code style={{ wordBreak: 'break-word' }}>{JSON.stringify(r.value ?? r.error ?? r.row_count)}</code>
             </div>
           ))}
+        </div>
+      )}
+      {(build.concerns ?? []).length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <Concerns concerns={build.concerns} />
         </div>
       )}
       {build.report && <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto' }}>{build.report}</div>}
@@ -653,6 +673,7 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
     const steps = e.status === 'planned' ? ` (${e.steps} step${e.steps === 1 ? '' : 's'})` : ''
     return { text: `— ${verb} stage ${String(e.name)}${steps}`, tone: 'info' }
   }
+  if (e.kind === 'concern') return { text: `⚠ ${String(e.what)}`, tone: 'err' }
   if (e.kind === 'auto_continued') return { text: 'Going straight on to the next stage (building automatically)', tone: 'info' }
   if (e.kind !== 'tool') return null
   const args = (e.args ?? {}) as Record<string, unknown>

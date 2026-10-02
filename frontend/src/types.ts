@@ -358,6 +358,8 @@ export interface BuildOut {
   report: string | null
   results: { block: string; port: string | null; label?: string | null; value?: unknown; row_count?: number; error?: string }[]
   deviations: { plan_step?: string; what: string; why: string }[]
+  // Problems the app spotted itself, e.g. a 'suspicious'-IV feature in a model.
+  concerns: { stage: string | null; what: string }[]
   owned_blocks: string[]
   sample_rows_used: number | null
   counters: Record<string, number>

@@ -554,6 +554,9 @@ class BuildController:
                 label = r.get("label") or f"{session.graph.blocks[r['block']].name}.{r.get('port')}"
                 value = r.get("value", r.get("error", r.get("row_count")))
                 doc.append(f"- **{label}:** `{value}`")
+        if b.concerns:
+            doc.append("\n## Concerns the app flagged\n")
+            doc += [f"- {c['what']}" for c in b.concerns]
         stages = [st for st in b.stages if st.get("summary")]
         if stages:
             doc.append("\n## Stages\n")

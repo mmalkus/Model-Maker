@@ -899,3 +899,26 @@ def test_custom_blocks_can_be_turned_off(prepared):
     system = prompts.build_system(b)
     assert "Custom blocks are turned off" in system and "add_custom_block" not in system
     assert "add_custom_block" not in prompts.plan_system(b)
+
+
+def test_a_suspicious_feature_in_a_model_is_flagged_by_the_app(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    fit, _ = _binned(session, anchor, b)
+    summary = b.call_tool("get_output_summary", {"block": fit, "port": "summary"})
+    assert {r["feature"]: r["iv_band"] for r in summary["rows"]}["credit_score"] == "suspicious"
+
+    # Selecting the column isn't using it as a driver.
+    picked = b.call_tool("add_block", {"category": "select", "lane": "est", "params": {"cols": ["credit_score", "dti"]}})
+    assert "warning" not in picked and b.concerns == []
+
+    model = b.call_tool("add_block", {"category": "logistic_regression", "lane": "est", "name": "pd model",
+                                      "params": {"features": ["credit_score_woe", "dti_woe"]}})
+    assert "credit_score" in model["warning"] and "ask_user" in model["warning"]
+    assert len(b.concerns) == 1 and b.concerns[0]["stage"] == "est"
+    assert "pd model uses credit_score (IV" in b.concerns[0]["what"]
+    # Flagged once per block, however often its params change.
+    again = b.call_tool("set_params", {"block": model["block"], "params": {"features": ["credit_score_woe"]}})
+    assert "warning" in again and len(b.concerns) == 1
+    assert b.call_tool("set_params", {"block": model["block"], "params": {"features": ["dti_woe"]}}).get("warning") is None
+    assert any(e["kind"] == "concern" for e in b.events_since())

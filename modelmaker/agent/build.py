@@ -165,6 +165,10 @@ class AgentBuild:
         self.key_outputs: list[dict[str, Any]] = []
         self.results: list[dict[str, Any]] = []
         self.deviations: list[dict[str, Any]] = []
+        # Problems the app itself spotted (not the model's say-so), e.g. a
+        # feature fit_binning banded 'suspicious' used in a model -- shown
+        # at the stage review and in the report: [{stage, what}].
+        self.concerns: list[dict[str, Any]] = []
         self.error: str | None = None
 
         self.owned_blocks: set[str] = set()
@@ -238,6 +242,13 @@ class AgentBuild:
     def is_last_stage(self) -> bool:
         return self.stage_index >= len(self.stages) - 1
 
+    def add_concern(self, what: str) -> None:
+        if any(c["what"] == what for c in self.concerns):
+            return
+        stage = self.current_stage
+        self.concerns.append({"stage": stage["key"] if stage else None, "what": what})
+        self.log("concern", what=what)
+
     # ---- persisted log --------------------------------------------------
 
     def log_record(self) -> dict[str, Any]:
@@ -274,6 +285,7 @@ class AgentBuild:
             "key_outputs": self.key_outputs,
             "results": self.results,
             "deviations": self.deviations,
+            "concerns": self.concerns,
             "owned_blocks": sorted(self.owned_blocks),
             "owned_lanes": sorted(self.owned_lanes),
             "sample_rows_used": self.sample_rows_used,
@@ -485,6 +497,7 @@ class AgentBuild:
             "report": self.report,
             "results": self.results,
             "deviations": self.deviations,
+            "concerns": self.concerns,
             "owned_blocks": sorted(self.owned_blocks),
             "sample_rows_used": self.sample_rows_used,
             "counters": self.counters,
