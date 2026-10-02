@@ -105,8 +105,9 @@ for local OpenAI-compatible servers (LM Studio, llama.cpp `llama-server
   (`pd`, `regression`, `calibration`, ...; about 400 tokens, against about
   8,000 for the full catalogue). The model lists a tag's blocks with
   `list_block_types(tag=…)` (one-sentence summaries, under 2k chars per tag)
-  and reads ports and params with `describe_block_type` as needed. Tags live
-  in `AGENT_TAGS` in `modelmaker/agent/catalogue.py`.
+  and reads ports and params with `describe_block_type` as needed. Each block
+  declares its tags (`BlockSpec.tags`); the tag list and descriptions are
+  `TAGS` in `modelmaker/agent/catalogue.py`.
 - **Context:** tool results are capped at 6,000 chars. When the
   conversation passes about 85% of the context window, the oldest tool
   results are replaced by a stub. The window is read from the server

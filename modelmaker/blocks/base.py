@@ -65,6 +65,10 @@ class BlockSpec:
     # this to cluster related blocks (e.g. "modelling", "tests") regardless
     # of what pipeline role each one plays.
     group: str | None = None
+    # What the block does and which risk model it serves (e.g. "regression",
+    # "pd") -- an AI build browses the catalogue by tag (see
+    # agent/catalogue.py's TAGS, which every tag here must appear in).
+    tags: tuple[str, ...] = ()
     # Optional lazy-mode twin of `fn`: same params, but reads/returns
     # pl.LazyFrame instead of pl.DataFrame. None (the default, and every
     # custom/AI-authored block) means this block never participates in a

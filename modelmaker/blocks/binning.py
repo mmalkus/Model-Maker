@@ -351,6 +351,7 @@ register_block(
         block_type="standard",
         group="modelling",
         display_name="Univariate analysis & binning",
+        tags=("binning_woe", "feature_selection", "scorecard"),
         inputs=[PortSpec("df")],
         outputs=[
             PortSpec("binning", type="binning"),
@@ -442,6 +443,7 @@ register_block(
         block_type="standard",
         group="modelling",
         display_name="Apply binning (WoE)",
+        tags=("binning_woe", "scorecard"),
         inputs=[PortSpec("df"), PortSpec("binning", type="binning")],
         outputs=[PortSpec("out")],
         fn=apply_binning,
@@ -490,6 +492,7 @@ register_block(
         block_type="output",
         group="modelling",
         display_name="Scorecard points table",
+        tags=("scorecard",),
         inputs=[PortSpec("model", type="model"), PortSpec("binning", type="binning")],
         outputs=[PortSpec("table")],
         fn=scorecard_table,

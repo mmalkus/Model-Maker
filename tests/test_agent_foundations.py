@@ -14,7 +14,7 @@ import pytest
 from modelmaker.agent.build import ToolError
 from modelmaker.agent.catalogue import (
     AGENT_DISALLOWED,
-    AGENT_TAGS,
+    TAGS,
     describe_block_type,
     list_block_types,
     list_blocks_for_tag,
@@ -256,24 +256,25 @@ def test_disallowed_blocks_are_hidden_by_default():
 
 
 def test_every_addable_block_is_tagged():
+    used = set()
     for e in list_block_types():
-        assert e["tags"], f"{e['category']} has no tag in AGENT_TAGS"
-    for tag, (_, categories) in AGENT_TAGS.items():
-        for category in categories:
-            assert category in BLOCK_REGISTRY, f"tag {tag} names unknown block {category}"
-            assert category not in AGENT_DISALLOWED, f"tag {tag} names {category}, which an AI build can't add"
+        assert e["tags"], f"{e['category']} has no tags"
+        unknown = set(e["tags"]) - set(TAGS)
+        assert not unknown, f"{e['category']} has tags missing from catalogue.TAGS: {unknown}"
+        used |= set(e["tags"])
+    assert used == set(TAGS), f"tags no block uses: {set(TAGS) - used}"
 
 
 def test_every_tag_listing_fits_a_local_models_tool_result():
     list_tool = TOOLS["list_block_types"].fn
     assert len(json.dumps(list_tool(None))) < LMStudioLoop.max_result_chars / 2
-    for tag in AGENT_TAGS:
+    for tag in TAGS:
         assert len(json.dumps(list_tool(None, tag=tag))) < LMStudioLoop.max_result_chars / 2, tag
 
 
 def test_list_block_types_by_tag():
     list_tool = TOOLS["list_block_types"].fn
-    assert {t["tag"] for t in list_tool(None)["tags"]} == set(AGENT_TAGS)
+    assert {t["tag"] for t in list_tool(None)["tags"]} == set(TAGS)
     pd = {e["category"]: e["summary"] for e in list_blocks_for_tag("pd")}
     assert "logistic_regression" in pd and "auc_gini" not in pd
     assert pd["grade_backtest"] == "Grade-level PD back-test"  # trimmed to the first sentence
