@@ -167,6 +167,7 @@ function StartForm({
   const [planLlm, setPlanLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
   const [buildLlm, setBuildLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
   const [fullRun, setFullRun] = useState(true)
+  const [autoBuild, setAutoBuild] = useState(false)
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
@@ -191,6 +192,14 @@ function StartForm({
           </span>
         ))}
       </div>
+
+      <label
+        style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}
+        title="Skip the plan review: the AI starts building as soon as its plan is ready (it still stops to ask if the plan has open questions)"
+      >
+        <input type="checkbox" checked={autoBuild} onChange={(e) => setAutoBuild(e.target.checked)} />
+        Build automatically once the plan is ready
+      </label>
 
       <details style={{ marginTop: 8 }}>
         <summary style={{ cursor: 'pointer', color: '#4b5563' }}>Models and options</summary>
@@ -225,14 +234,17 @@ function StartForm({
             build_llm: buildLlm.provider || buildLlm.model ? buildLlm : undefined,
             final_full_run: fullRun,
             sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
+            auto_build: autoBuild,
           })
         }
       >
-        Plan the build
+        {autoBuild ? 'Plan and build' : 'Plan the build'}
       </button>
       <div style={{ color: '#6b7280', marginTop: 6 }}>
-        The AI plans first and changes nothing until you approve. It only sees column names, roles and summary statistics --
-        never rows.
+        {autoBuild
+          ? 'The AI plans, then builds straight away -- Stop or Discard at any time, and one Undo reverts the build.'
+          : 'The AI plans first and changes nothing until you approve.'}{' '}
+        It only sees column names, roles and summary statistics -- never rows.
       </div>
     </div>
   )
@@ -289,6 +301,7 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.build_llm.model ?? 'default'}
         {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
         {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
+        {build.options.auto_build ? ' · builds automatically' : ''}
       </div>
     </div>
   )
@@ -340,7 +353,13 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
   const plan = build.plan
   return (
     <div>
-      {plan ? <PlanView plan={plan} graph={graph} /> : <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>}
+      {plan ? (
+        <PlanView plan={plan} graph={graph} />
+      ) : build.pending_question ? (
+        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      ) : (
+        <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>
+      )}
       <div style={label}>{plan?.questions?.length ? 'Answer its questions' : 'Feedback (optional)'}</div>
       <textarea
         value={feedback}
@@ -484,20 +503,38 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
           ))}
         </div>
       )}
-      {(REPORTED.has(build.phase) || (build.owned_blocks.length > 0 && build.phase !== 'discarded')) && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', color: '#6b7280', marginTop: 8 }}>
-          {REPORTED.has(build.phase) && (
-            <button onClick={() => onOpenReport(build.id)} title="Results, deviations from the plan, failures and warnings, in full">
-              Open full report
-            </button>
-          )}
-          {build.owned_blocks.length > 0 && build.phase !== 'discarded' && (
-            <span>{build.owned_blocks.length} block(s) built · Undo reverts the whole build</span>
-          )}
-        </div>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', color: '#6b7280', marginTop: 8 }}>
+        {REPORTED.has(build.phase) && (
+          <button onClick={() => onOpenReport(build.id)} title="Results, deviations from the plan, failures and warnings, in full">
+            Open full report
+          </button>
+        )}
+        <button
+          onClick={() => downloadLog(build.id)}
+          title={`Models, timings, every plan round and every step the AI took${build.log_path ? `\nSaved at ${build.log_path}` : ''}`}
+        >
+          Download log
+        </button>
+        {build.owned_blocks.length > 0 && build.phase !== 'discarded' && (
+          <span>{build.owned_blocks.length} block(s) built · Undo reverts the whole build</span>
+        )}
+      </div>
     </div>
   )
+}
+
+function downloadLog(buildId: string) {
+  api
+    .agentBuildLog(buildId)
+    .then((log) => {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${buildId}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+    .catch((e) => alert((e as Error).message))
 }
 
 // ---- event feed ---------------------------------------------------------------------

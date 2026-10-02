@@ -247,3 +247,21 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
     assert api.AGENT.build.phase == "awaiting_approval"
     events = [e for e in api.AGENT.build.events_since(0) if e["kind"] == "tool"]
     assert [e["tool"] for e in events][-4:] == ["get_graph", "get_output_summary", "add_block", "submit_plan"]
+
+
+def test_auto_build_and_build_log_endpoints(client):
+    c = client
+    c.scripts.update({"plan": [_plan(c.anchor)], "build": [_ask]})
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "auto_build": True})
+    assert started.status_code == 200, started.text
+    assert started.json()["options"]["auto_build"] is True
+    # No approve call: the plan goes straight to building.
+    b = _wait(c, "awaiting_input")
+    assert b["log_path"]
+    stopped = c.post("/api/agent/builds/current/stop").json()
+
+    log = c.get(f"/api/agent/builds/{stopped['id']}/log").json()
+    assert log["phase"] == "stopped" and log["models"]["plan"]["provider"] == "claude_cli"
+    assert any(e["kind"] == "auto_approved" for e in log["events"])
+    assert c.get("/api/agent/builds/build_00000000/log").status_code == 404
+    assert c.get("/api/agent/builds/..%2Fsecrets/log").status_code in (400, 404)

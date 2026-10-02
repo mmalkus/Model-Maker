@@ -32,7 +32,7 @@ from .build import (
     LLMChoice,
     ToolError,
 )
-from .loop import AgentLoop
+from .loop import AgentLoop, LLMUnavailable
 from .tools import resolve_lane, summarize_value, tools_for_phase
 
 # Sample only when the data is big enough for it to matter.
@@ -177,6 +177,8 @@ class BuildController:
         def target() -> None:
             try:
                 fn()
+            except LLMUnavailable as e:
+                self._pause_for_retry(str(e))
             except Exception as e:  # noqa: BLE001 -- nobody to raise to on a worker thread
                 b = self.build
                 if b is not None:
@@ -186,6 +188,28 @@ class BuildController:
 
         self._worker = threading.Thread(target=target, daemon=True)
         self._worker.start()
+
+    def _pause_for_retry(self, message: str) -> None:
+        """The model's endpoint timed out or was unreachable mid-turn. Keep
+        the build (and its conversation) and let the user retry by replying,
+        rather than throwing away a long build over one slow response."""
+        b = self.build
+        if b is None:
+            return
+        b.log("error", message=message)
+        if b.stop_requested:
+            self._end(STOPPED)
+            return
+        retry = f"The AI model didn't answer: {message}\n\nReply (e.g. \"continue\") to retry, or stop the build."
+        if b.phase == PLANNING:
+            b.pending_question = retry
+            b.set_phase(AWAITING_APPROVAL, note="the model didn't answer")
+        elif b.phase == BUILDING:
+            b.pending_question = retry
+            b.set_phase(AWAITING_INPUT, note="the model didn't answer")
+        else:
+            b.error = message
+            self._end(FAILED)
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the current worker turn (tests, discard)."""
@@ -214,6 +238,7 @@ class BuildController:
         b.preflight = run_preflight(b)
         if b.preflight["blocking"] or b.preflight["warnings"]:
             b.log("preflight", **{k: v for k, v in b.preflight.items() if k != "max_rows"})
+            b.save_log()
             return
         self._start_planning()
 
@@ -283,6 +308,17 @@ class BuildController:
             # Ended its turn without a (valid) plan -- let the user nudge it.
             b.log("no_plan", text=outcome.final_text)
             b.set_phase(AWAITING_APPROVAL, note="the AI ended planning without submitting a plan")
+            return
+        if b.options.auto_build and b.phase == AWAITING_APPROVAL and b.plan is not None:
+            if b.plan.get("questions"):
+                # Can't approve over open questions -- wait for the answers
+                # like a normal build; once re-planned, auto-build applies.
+                b.log("auto_build_paused", reason="the plan has open questions")
+                return
+            # Still on this worker turn, so build right here rather than
+            # spawning another one (approve() would find the worker busy).
+            b.log("auto_approved")
+            self._begin_build()()
 
     def feedback(self, text: str) -> AgentBuild:
         """Plan feedback (re-plan), or the answer to an ask_user question."""
@@ -294,6 +330,7 @@ class BuildController:
             if b.phase == AWAITING_APPROVAL:
                 b.plan_history.append({"plan": b.plan, "feedback": text})
                 b.plan = None
+                b.pending_question = None
                 b.set_phase(PLANNING)
                 b.log("user", text=text)
 
@@ -322,6 +359,14 @@ class BuildController:
                 raise BuildError("there's no plan to approve -- send feedback to have the AI plan again")
             if b.plan.get("questions"):
                 raise BuildError("the plan has open questions -- answer them as feedback first")
+            self._spawn(self._begin_build())
+            return b
+
+    def _begin_build(self) -> Callable[[], None]:
+        """Open the build's undo transaction and move to building; returns
+        the build turn to run (on a worker). Caller has checked the plan."""
+        with self._lock:
+            b = self.build
             session = self.session
             self._transaction = ExitStack()
             self._snapshot_before = self._transaction.enter_context(session.transaction())
@@ -333,13 +378,13 @@ class BuildController:
                 resolve_lane(b, lane["key"])
 
             def work() -> None:
+                b.turn_over = False
                 self._build_loop = self.loop_factory(b.build_llm, "build")
                 _record_resolved_model(b.build_llm, self._build_loop)
                 outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
                 self._after_build_turn(outcome)
 
-            self._spawn(work)
-            return b
+            return work
 
     def _maybe_sample(self) -> None:
         """§7: build on a sample when the data is large. Switching sample
@@ -517,4 +562,5 @@ class BuildController:
         if snapshot is not None:
             self.session.restore_snapshot(snapshot)
             b.log("discarded")
+            b.save_log()
         return b
