@@ -75,7 +75,7 @@ def test_block_compiles_and_matches_engine_output():
     assert "category=demo_credit_data" in source
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_demo_b_demo"].equals(engine_out)
+    assert ns["b_demo"].equals(engine_out)
 
 
 def test_default_only_fields_are_filled_exactly_on_defaults(df):

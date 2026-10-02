@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import builtins
 import inspect
+import keyword
 import textwrap
 from datetime import datetime, timezone
 
@@ -16,8 +18,59 @@ class CompileError(Exception):
 
 
 def _sanitize(name: str) -> str:
+    """Turn a display name into an identifier: every run of non-identifier
+    characters collapses to a single underscore ("KS - test b" ->
+    "KS_test_b", not "KS___test_b"), with none left dangling at either end."""
     out = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
-    return out if out and not out[0].isdigit() else f"_{out}"
+    out = "_".join(part for part in out.split("_") if part)
+    if not out:
+        return "x"
+    return out if not out[0].isdigit() else f"_{out}"
+
+
+# Names the compiled script itself already binds at module level (imports,
+# OUTPUT_DIR, the group_by helper) -- a block or port name that sanitizes to
+# one of these must not rebind it.
+_SCRIPT_GLOBALS = frozenset({"os", "pl", "OUTPUT_DIR", "ThreadPoolExecutor", "_combine_group_results"})
+_RESERVED_FN_NAMES = frozenset(keyword.kwlist) | _SCRIPT_GLOBALS
+# Variables additionally stay off builtins (a block named "Input" or "Sum"
+# shouldn't shadow input()/sum() for every block body below it). Function
+# names deliberately don't: registry functions like `filter` have always
+# been emitted under their plain category name.
+_RESERVED_VAR_NAMES = _RESERVED_FN_NAMES | frozenset(dir(builtins))
+
+
+def _unique_name(base: str, used: set[str]) -> str:
+    """`base` itself if free, else the first free `base_2`, `base_3`, ...
+    -- claimed in `used` before returning."""
+    name = base
+    n = 2
+    while name in used:
+        name = f"{base}_{n}"
+        n += 1
+    used.add(name)
+    return name
+
+
+def _claim_custom_port_names(graph: Graph, order: list[str], used_var_names: set[str]) -> dict[tuple[str, str], str]:
+    """Reserve every user-chosen port name (see BlockInstance.port_names)
+    up front, before any auto-generated name is handed out -- otherwise an
+    earlier block's auto name ("WoE") could take the name the user
+    explicitly gave a later block's output. A custom name that collides
+    with a reserved name or an earlier custom one falls back to the auto
+    scheme (session.rename_port already rejects duplicates up front)."""
+    claimed: dict[tuple[str, str], str] = {}
+    for bid in order:
+        block = graph.blocks[bid]
+        for port in block.outputs:
+            custom = block.port_names.get(port.name)
+            if not custom:
+                continue
+            var = _sanitize(custom)
+            if var not in used_var_names:
+                used_var_names.add(var)
+                claimed[(bid, port.name)] = var
+    return claimed
 
 
 def _alloc_output_vars(
@@ -26,21 +79,25 @@ def _alloc_output_vars(
     out_ports: list[str],
     var_names: dict[tuple[str, str], str],
     used_var_names: set[str],
+    claimed: dict[tuple[str, str], str],
 ) -> list[str]:
     """Pick the compiled script's variable name(s) for `bid`'s output
-    port(s) -- a user-chosen port name (see BlockInstance.port_names) when
-    one's set and not already taken, else the block-name/id/port scheme,
-    which is always unique by construction. Shared between the ordinary
-    per-block call emission and a fused group's exit(s) (see
-    _fused_group_call_lines) so a name picked for a streaming exit reads
-    exactly like any other block's output would."""
+    port(s) -- the user-chosen port name when one was claimed (see
+    _claim_custom_port_names), else the block's name (plus the port name,
+    for a multi-output block), numbered `_2`, `_3`, ... only when that's
+    already taken. Shared between the ordinary per-block call emission and
+    a fused group's exit(s) (see _fused_group_call_lines) so a name picked
+    for a streaming exit reads exactly like any other block's output would.
+    A custom block's function is itself named after the block (see
+    compile_graph), so its output always takes the port-name form instead
+    of ending up numbered: `Double_A_out = Double_A(...)`."""
     varlist = []
     for p in out_ports:
-        custom = block.port_names.get(p)
-        var = _sanitize(custom) if custom else None
-        if var is None or var in used_var_names:
-            var = f"{_sanitize(block.name)}_{bid}" if len(out_ports) == 1 else f"{_sanitize(block.name)}_{bid}_{p}"
-        used_var_names.add(var)
+        var = claimed.get((bid, p))
+        if var is None:
+            plain = len(out_ports) == 1 and not block.is_custom
+            base = _sanitize(block.name) if plain else _sanitize(f"{block.name}_{p}")
+            var = _unique_name(base, used_var_names)
         var_names[(bid, p)] = var
         varlist.append(var)
     return varlist
@@ -129,6 +186,7 @@ def _fused_group_call_lines(
     fn_names: dict[str, str],
     var_names: dict[tuple[str, str], str],
     used_var_names: set[str],
+    claimed: dict[tuple[str, str], str],
 ) -> list[str]:
     """Emit one fusion group (see _build_compile_fusion_groups) as a
     single polars lazy plan: every member becomes a `_lz_<id> = fn(...)`
@@ -157,7 +215,7 @@ def _fused_group_call_lines(
         lines.append(f"{lazy_var[bid]} = {call}")
 
     exits = [bid for bid in group.members if bid in group.exits]
-    exit_vars = [_alloc_output_vars(bid, graph.blocks[bid], ["out"], var_names, used_var_names)[0] for bid in exits]
+    exit_vars = [_alloc_output_vars(bid, graph.blocks[bid], ["out"], var_names, used_var_names, claimed)[0] for bid in exits]
     collect_call = f"pl.collect_all([{', '.join(lazy_var[bid] for bid in exits)}], engine='streaming')"
     if len(exit_vars) == 1:
         lines.append(f"({exit_vars[0]},) = {collect_call}")
@@ -267,7 +325,7 @@ def compile_graph(
     # naturally gets its own def (different source text -> different key
     # below) alongside any non-fused read_csv elsewhere in the script.
     seen_fns: dict[tuple[str, str], str] = {}
-    used_fn_names: set[str] = set()
+    used_fn_names: set[str] = set(_RESERVED_FN_NAMES)
     for bid in order:
         block = graph.blocks[bid]
         group = fused_group_of.get(bid)
@@ -296,10 +354,9 @@ def compile_graph(
         # well-known function name shared by every instance); a different
         # *bodied* block already claiming it only bites two custom blocks
         # that happen to share a category but were drafted with different
-        # bodies, where the block id disambiguates them.
+        # bodies, where a `_2`, `_3`, ... suffix disambiguates them.
         base_name = _sanitize(block.name) if block.is_custom else _sanitize(block.category)
-        fn_name = base_name if base_name not in used_fn_names else f"{base_name}_{bid}"
-        used_fn_names.add(fn_name)
+        fn_name = _unique_name(base_name, used_fn_names)
         seen_fns[fn_sig] = fn_name
         fn_names[bid] = fn_name
         src = src.replace(f"def {fn.__name__}(", f"def {fn_name}(", 1)
@@ -310,7 +367,10 @@ def compile_graph(
 
     call_lines: list[str] = []
     var_names: dict[tuple[str, str], str] = {}
-    used_var_names: set[str] = set()
+    # Seeded with every function name too, so an output variable can never
+    # rebind a function a later call site still needs.
+    used_var_names: set[str] = set(_RESERVED_VAR_NAMES) | set(fn_names.values())
+    claimed_port_names = _claim_custom_port_names(graph, order, used_var_names)
     current_lane: str | None = "__unset__"
     uses_group_by = any(graph.blocks[bid].group_by for bid in order)
     emitted_groups: set[int] = set()
@@ -331,7 +391,7 @@ def compile_graph(
             if id(group) in emitted_groups:
                 continue  # already emitted in full when we reached the group's first member
             emitted_groups.add(id(group))
-            call_lines.extend(_fused_group_call_lines(group, graph, fn_names, var_names, used_var_names))
+            call_lines.extend(_fused_group_call_lines(group, graph, fn_names, var_names, used_var_names, claimed_port_names))
             call_lines.append("")
             continue
 
@@ -367,11 +427,10 @@ def compile_graph(
         # A port the user's named (see BlockInstance.port_names, settable
         # by clicking that output's data in the UI) becomes the variable
         # holding it here, so the compiled script reads with the same
-        # names the user gave the data -- falling back to the
-        # block-name/id/port scheme, which is always unique by
-        # construction, for any port left unnamed or whose chosen name
-        # collides with another one already used in this script.
-        varlist = _alloc_output_vars(bid, block, out_ports, var_names, used_var_names)
+        # names the user gave the data -- falling back to the block's own
+        # name (numbered only when needed) for any port left unnamed or
+        # whose chosen name collides with another one in this script.
+        varlist = _alloc_output_vars(bid, block, out_ports, var_names, used_var_names, claimed_port_names)
 
         if block.group_by:
             call_lines.extend(_grouped_call_lines(bid, block, fn_names[bid], dataframe_ports, kwarg_pairs, varlist))

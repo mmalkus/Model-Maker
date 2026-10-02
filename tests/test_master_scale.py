@@ -146,7 +146,7 @@ def test_compiled_master_scale_pipeline_matches_engine_output(tmp_path):
     exec(compile(source, "<compiled>", "exec"), ns)
 
     engine_out = runner.cache.get(runner.state["b_assign"].last_successful_key).outputs["out"]
-    compiled_out = ns["b_assign_b_assign"]
+    compiled_out = ns["b_assign"]
     assert compiled_out.to_dicts() == engine_out.data.to_dicts()
 
 

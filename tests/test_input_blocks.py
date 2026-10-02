@@ -135,7 +135,7 @@ def test_read_parquet_compiles_and_matches_engine_output(tmp_path):
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_read_b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
+    assert ns["b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
 
 
 def test_read_excel_compiles_and_matches_engine_output(tmp_path):
@@ -149,7 +149,7 @@ def test_read_excel_compiles_and_matches_engine_output(tmp_path):
     source = compile_graph(graph, runner=runner)
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_read_b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
+    assert ns["b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
 
 
 def _sqlite_db(tmp_path, rows):
@@ -239,4 +239,4 @@ def test_read_sql_compiles_and_matches_engine_output(tmp_path, monkeypatch):
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_read_b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
+    assert ns["b_read"].to_dicts() == _output_of(runner, "b_read").to_dicts()
