@@ -50,6 +50,19 @@ class AgentLoop(ABC):
         build.stop_requested between tool calls."""
 
 
+def add_anthropic_usage(build: AgentBuild, fresh, cache_read, cache_write, output) -> None:
+    """Anthropic usage (Messages API, or the claude CLI's result) into the
+    build's totals. input_tokens counts every prompt token -- fresh, read
+    from the prompt cache, and written to it -- and the two cache parts are
+    kept separately too: a cache write costs more than fresh input and a
+    read a tenth of it, so they explain the bill."""
+    fresh, cache_read, cache_write = fresh or 0, cache_read or 0, cache_write or 0
+    build.usage["input_tokens"] += fresh + cache_read + cache_write
+    build.usage["cache_read_tokens"] = build.usage.get("cache_read_tokens", 0) + cache_read
+    build.usage["cache_write_tokens"] = build.usage.get("cache_write_tokens", 0) + cache_write
+    build.usage["output_tokens"] += output or 0
+
+
 # ---- scripted (tests) --------------------------------------------------------
 
 Turn = Callable[[Callable[[str, dict], dict]], str]
@@ -127,8 +140,13 @@ class AnthropicLoop(AgentLoop):
                 model=self.model, max_tokens=MAX_TOKENS, system=system, tools=defs, messages=self.messages
             )
             usage = response.usage
-            build.usage["input_tokens"] += (usage.input_tokens or 0) + (getattr(usage, "cache_read_input_tokens", 0) or 0)
-            build.usage["output_tokens"] += usage.output_tokens or 0
+            add_anthropic_usage(
+                build,
+                usage.input_tokens,
+                getattr(usage, "cache_read_input_tokens", 0),
+                getattr(usage, "cache_creation_input_tokens", 0),
+                usage.output_tokens,
+            )
             content = [block.model_dump(exclude_none=True) for block in response.content]
             self.messages.append({"role": "assistant", "content": content})
             texts = [c["text"] for c in content if c.get("type") == "text" and c.get("text", "").strip()]
@@ -579,8 +597,24 @@ class ClaudeCliLoop(AgentLoop):
                     if cost:
                         build.usage["cost_usd"] = round(build.usage.get("cost_usd", 0.0) + cost, 4)
                     usage = msg.get("usage") or {}
-                    build.usage["input_tokens"] += (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0)
-                    build.usage["output_tokens"] += usage.get("output_tokens") or 0
+                    add_anthropic_usage(
+                        build,
+                        usage.get("input_tokens"),
+                        usage.get("cache_read_input_tokens"),
+                        usage.get("cache_creation_input_tokens"),
+                        usage.get("output_tokens"),
+                    )
+                    # One per CLI run (a turn of the build), so the log
+                    # shows where in the build the spend went.
+                    build.log(
+                        "usage",
+                        fresh=usage.get("input_tokens") or 0,
+                        cache_read=usage.get("cache_read_input_tokens") or 0,
+                        cache_write=usage.get("cache_creation_input_tokens") or 0,
+                        output=usage.get("output_tokens") or 0,
+                        cost_usd=cost,
+                        turns=msg.get("num_turns"),
+                    )
                     if msg.get("is_error"):
                         error = str(msg.get("result") or msg.get("subtype") or "claude CLI error")
                     elif msg.get("result"):

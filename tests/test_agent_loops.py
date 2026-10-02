@@ -403,3 +403,14 @@ def test_provenance_names_the_auto_detected_model(planning_build):
     explicit = LLMChoice("lmstudio", "chosen")
     _record_resolved_model(explicit, type("L", (), {"model": "other"})())
     assert explicit.model == "chosen"
+
+
+def test_anthropic_usage_counts_cache_reads_and_writes(planning_build):
+    from modelmaker.agent.loop import add_anthropic_usage
+
+    b, _ = planning_build
+    add_anthropic_usage(b, 100, 4000, 1500, 50)
+    add_anthropic_usage(b, 10, None, 200, None)
+    assert b.usage["input_tokens"] == 100 + 4000 + 1500 + 10 + 200
+    assert b.usage["cache_read_tokens"] == 4000 and b.usage["cache_write_tokens"] == 1700
+    assert b.usage["output_tokens"] == 50
