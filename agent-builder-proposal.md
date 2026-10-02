@@ -101,10 +101,12 @@ base URLs as Settings:
 for local OpenAI-compatible servers (LM Studio, llama.cpp `llama-server
 --jinja`, Ollama, vLLM):
 - **Setup:** no API key, and the model is auto-detected.
-- **Compact catalogue:** the system prompt lists block *names per category*
-  (about 170 tokens, against about 5,150 for the full catalogue), and the
-  model fetches ports and summaries with `list_block_types(group=…)` and
-  params with `describe_block_type` as needed.
+- **Compact catalogue:** the system prompt lists only the block *tags*
+  (`pd`, `regression`, `calibration`, ...; about 400 tokens, against about
+  8,000 for the full catalogue). The model lists a tag's blocks with
+  `list_block_types(tag=…)` (one-sentence summaries, under 2k chars per tag)
+  and reads ports and params with `describe_block_type` as needed. Tags live
+  in `AGENT_TAGS` in `modelmaker/agent/catalogue.py`.
 - **Context:** tool results are capped at 6,000 chars. When the
   conversation passes about 85% of the context window, the oldest tool
   results are replaced by a stub. The window is read from the server
@@ -398,7 +400,7 @@ server.
 
 | Tool | Returns |
 |---|---|
-| `list_block_types(group?)` | catalogue entries: category, display name, group, ports + types, one-line description |
+| `list_block_types(tag?)` | one tag's blocks: category and a one-sentence summary; without a tag, the tags |
 | `describe_block_type(category)` | full docstring, parameters with types/defaults, role-bound params (e.g. `target_col` auto-fills from the `target` role) |
 | `get_graph()` | blocks (id, category, name, lane, status, params, ports, `owned` flag), wires, lanes |
 | `get_output_summary(block, port?)` | by port type: dataframe → columns, dtypes, roles, tags, row count, summary stats (**`rows=0`**); scalar_metric → the value; model → coefficients/fit stats; image → "image, N bytes" only; others → the JSON-shaped dict, truncated |

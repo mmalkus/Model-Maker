@@ -196,15 +196,20 @@ def _block_brief(b: AgentBuild, bid: str) -> dict[str, Any]:
 
 @tool(
     "list_block_types",
-    "List the registry blocks you can add: category, what it does, and its ports. Call describe_block_type "
-    "for a block's parameters before adding it. Optionally filter by group (e.g. modelling, tests, quality).",
-    {"group": _STR},
+    "List the registry blocks with a given tag (e.g. pd, regression, calibration): category and a "
+    "one-sentence summary. Without a tag, lists the tags. Call describe_block_type for a block's ports "
+    "and parameters before adding it.",
+    {"tag": _STR},
     [],
     READ,
 )
-def list_block_types(b: AgentBuild, group: str | None = None) -> dict[str, Any]:
-    blocks = catalogue.list_block_types(group)
-    return {"groups": sorted({e["group"] for e in blocks}), "blocks": blocks}
+def list_block_types(b: AgentBuild, tag: str | None = None) -> dict[str, Any]:
+    if not tag:
+        return {"tags": catalogue.list_tags(), "next": "call list_block_types with one of these tags"}
+    try:
+        return {"tag": tag, "blocks": catalogue.list_blocks_for_tag(tag)}
+    except KeyError as e:
+        raise ToolError(str(e.args[0])) from None
 
 
 @tool(

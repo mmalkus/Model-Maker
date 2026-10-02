@@ -303,8 +303,11 @@ def test_lmstudio_loop_keeps_within_the_context_window(planning_build, monkeypat
     assert any(e["kind"] == "context" for e in b.events_since(0))
 
 
-def test_lmstudio_loop_caps_long_tool_results(planning_build):
+def test_lmstudio_loop_caps_long_tool_results(planning_build, monkeypatch):
+    from modelmaker.agent import catalogue
+
     b, _ = planning_build
+    monkeypatch.setattr(catalogue, "list_tags", lambda: [{"tag": f"t{i}", "blocks": 1, "about": "x" * 100} for i in range(100)])
     fake = FakeEndpoint([_oa_message(None, [("c1", "list_block_types", "{}")]), _oa_message("done")], models=LOCAL_MODELS)
     try:
         loop = make_loop("lmstudio", None, api_base_url="", token="", base_url=fake.url)
@@ -320,12 +323,14 @@ def test_lmstudio_unreachable_server_is_a_clear_error():
         make_loop("lmstudio", None, api_base_url="", token="", base_url="http://127.0.0.1:9/v1")
 
 
-def test_compact_catalogue_lists_blocks_by_category():
+def test_compact_catalogue_lists_tags_only():
     from modelmaker.agent import prompts
 
     compact, full = prompts._catalogue_context(True), prompts._catalogue_context(False)
     assert len(compact) * 8 < len(full)
-    assert "- modelling: " in compact and "logistic_regression" in compact and "list_block_types" in compact
+    assert "- pd (" in compact and "- regression (" in compact and "list_block_types" in compact
+    assert "logistic_regression" not in compact  # block names come from list_block_types(tag=...)
+    assert "- logistic_regression [regression, scorecard, pd]" in full
     assert "read_csv" not in compact  # disallowed blocks stay out either way
 
 

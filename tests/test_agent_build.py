@@ -78,7 +78,7 @@ def building(session, anchor) -> AgentBuild:
 
 def plan_turn(call):
     assert "error" not in call("get_graph", {})
-    call("list_block_types", {"group": "modelling"})
+    call("list_block_types", {"tag": "regression"})
     call("describe_block_type", {"category": "logistic_regression"})
     result = call(
         "submit_plan",

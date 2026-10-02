@@ -5,12 +5,22 @@ block catalogue."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
 import pytest
 
-from modelmaker.agent.catalogue import AGENT_DISALLOWED, describe_block_type, list_block_types
+from modelmaker.agent.build import ToolError
+from modelmaker.agent.catalogue import (
+    AGENT_DISALLOWED,
+    AGENT_TAGS,
+    describe_block_type,
+    list_block_types,
+    list_blocks_for_tag,
+)
+from modelmaker.agent.loop import LMStudioLoop
+from modelmaker.agent.tools import TOOLS
 from modelmaker.blocks.base import BLOCK_REGISTRY
 from modelmaker.llm.redact import column_info_for_llm
 from modelmaker.packet import ColumnMeta, ColumnRole, ColumnStats
@@ -243,6 +253,32 @@ def test_disallowed_blocks_are_hidden_by_default():
     listed = {e["category"] for e in list_block_types()}
     assert not listed & set(AGENT_DISALLOWED)
     assert "logistic_regression" in listed
+
+
+def test_every_addable_block_is_tagged():
+    for e in list_block_types():
+        assert e["tags"], f"{e['category']} has no tag in AGENT_TAGS"
+    for tag, (_, categories) in AGENT_TAGS.items():
+        for category in categories:
+            assert category in BLOCK_REGISTRY, f"tag {tag} names unknown block {category}"
+            assert category not in AGENT_DISALLOWED, f"tag {tag} names {category}, which an AI build can't add"
+
+
+def test_every_tag_listing_fits_a_local_models_tool_result():
+    list_tool = TOOLS["list_block_types"].fn
+    assert len(json.dumps(list_tool(None))) < LMStudioLoop.max_result_chars / 2
+    for tag in AGENT_TAGS:
+        assert len(json.dumps(list_tool(None, tag=tag))) < LMStudioLoop.max_result_chars / 2, tag
+
+
+def test_list_block_types_by_tag():
+    list_tool = TOOLS["list_block_types"].fn
+    assert {t["tag"] for t in list_tool(None)["tags"]} == set(AGENT_TAGS)
+    pd = {e["category"]: e["summary"] for e in list_blocks_for_tag("pd")}
+    assert "logistic_regression" in pd and "auc_gini" not in pd
+    assert pd["grade_backtest"] == "Grade-level PD back-test"  # trimmed to the first sentence
+    with pytest.raises(ToolError, match="unknown tag 'modelling'"):
+        list_tool(None, tag="modelling")
 
 
 def test_role_bound_params_are_marked():
