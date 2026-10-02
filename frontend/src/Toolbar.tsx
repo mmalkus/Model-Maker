@@ -309,8 +309,8 @@ export function Toolbar({
             <strong>Compiled script</strong>
             <button onClick={() => setCompiled(null)}>Close</button>
           </div>
-          <div style={{ overflow: 'auto', flex: 1 }}>
-            <CodeEditor value={compiled} readOnly maxHeight={10_000} />
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <CodeEditor value={compiled} readOnly fill />
           </div>
         </div>
       )}

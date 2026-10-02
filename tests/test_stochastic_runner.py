@@ -90,6 +90,6 @@ def test_compiled_script_passes_block_id_for_a_standard_stochastic_block(tmp_pat
 
     namespace: dict = {}
     exec(compile(script, "<compiled>", "exec"), namespace)  # noqa: S102 -- test-only, compiling our own output
-    compiled_samples = namespace["b_sample_b_sample"]  # {block.name}_{block_id}, see compiler._alloc_output_vars
+    compiled_samples = namespace["b_sample"]  # the block's name, see compiler._alloc_output_vars
     live_samples = runner.cache.get(runner.compute_key("b_sample")).outputs["samples"].data
     assert compiled_samples["sample"].to_list() == live_samples["sample"].to_list()

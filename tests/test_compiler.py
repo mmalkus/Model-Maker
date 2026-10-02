@@ -47,7 +47,7 @@ def test_compiled_script_runs_and_matches_engine_output(tmp_path):
     exec(compile(source, "<compiled>", "exec"), ns)
 
     engine_out = runner.cache.get(runner.state["b_select"].last_successful_key).outputs["out"]
-    compiled_out = ns["b_select_b_select"]
+    compiled_out = ns["b_select"]
     assert compiled_out.to_dicts() == engine_out.data.to_dicts()
 
 
@@ -58,7 +58,7 @@ def test_compile_scopes_to_requested_output_only(tmp_path):
     runner.run_all()
 
     source = compile_graph(graph, runner=runner, output_blocks=["b_filter"])
-    assert "b_select" not in source
+    assert "b_select = " not in source
     assert "b_filter" in source
 
 
@@ -133,7 +133,7 @@ def test_two_blocks_of_the_same_type_compile_to_one_shared_function(tmp_path):
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_filter_b_filter"].to_dicts() != ns["b_filter2_b_filter2"].to_dicts()
+    assert ns["b_filter"].to_dicts() != ns["b_filter2"].to_dicts()
 
 
 def test_compiled_calls_are_sectioned_by_lane(tmp_path):
@@ -260,7 +260,7 @@ def test_compiled_grouped_block_matches_engine_output(tmp_path):
     exec(compile(source, "<compiled>", "exec"), ns)
 
     engine_out = runner.cache.get(runner.state["b_gini"].last_successful_key).outputs["metric"]
-    compiled_out = ns["b_gini_b_gini"]
+    compiled_out = ns["b_gini"]
     assert compiled_out.sort("region").to_dicts() == engine_out.data.sort("region").to_dicts()
 
 
@@ -274,7 +274,54 @@ def test_naming_a_port_uses_that_name_as_the_compiled_variable(tmp_path):
 
     source = compile_graph(graph, runner=runner)
     assert "clean_rows = " in source
-    assert "b_select_b_select" not in source
+    assert "b_select = " not in source
+
+
+def test_compiled_variables_are_named_after_blocks_and_numbered_only_on_collision(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_read"].name = "Read CSV"
+    graph.blocks["b_filter"].name = "KS - test b"
+    graph.blocks["b_select"].name = "KS - test b"
+    # A later block's user-chosen name wins over an earlier block's auto name.
+    graph.blocks["b_filter2"] = make_block("b_filter2", "filter", params={"expr": "a > 2"}, x=3)
+    graph.blocks["b_filter2"].name = "Filter"
+    graph.blocks["b_filter3"] = make_block("b_filter3", "filter", params={"expr": "a > 0"}, x=4)
+    graph.blocks["b_filter3"].port_names = {"out": "Filter"}
+    graph.wires["w3"] = Wire("w3", "b_read", "out", "b_filter2", "df")
+    graph.wires["w4"] = Wire("w4", "b_read", "out", "b_filter3", "df")
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert "Read_CSV = read_csv(" in source
+    assert "KS_test_b = filter(" in source
+    assert "KS_test_b_2 = select(" in source
+    assert "Filter = filter(df=Read_CSV, expr='a > 0')" in source
+    assert "Filter_2 = filter(df=Read_CSV, expr='a > 2')" in source
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["KS_test_b_2"].to_dicts() == [{"a": 2}, {"a": 3}]
+
+
+def test_a_block_name_never_shadows_a_function_or_builtin(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    graph.blocks["b_filter"].name = "select"  # the next block's function
+    graph.blocks["b_select"].name = "len"
+
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+    runner.run_all()
+
+    source = compile_graph(graph, runner=runner)
+    assert "select_2 = filter(" in source
+    assert "len_2 = select(df=select_2" in source
+
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["len_2"].to_dicts() == [{"a": 2}, {"a": 3}]
 
 
 def test_stream_false_by_default_leaves_compiled_output_unchanged(tmp_path):
@@ -322,7 +369,7 @@ def test_stream_true_fuses_a_chain_into_one_collect_all_and_matches_engine_outpu
     exec(compile(source, "<compiled>", "exec"), ns)
 
     engine_out = runner.cache.get(runner.state["b_agg"].last_successful_key).outputs["out"]
-    compiled_out = ns["b_agg_b_agg"]
+    compiled_out = ns["b_agg"]
     assert compiled_out.sort("b").to_dicts() == engine_out.data.sort("b").to_dicts()
 
 
@@ -349,14 +396,14 @@ def test_stream_true_fan_out_uses_a_single_collect_all_for_both_exits(tmp_path):
     # One fused group covering all four blocks, one collect_all producing
     # both exits -- b_filter is never independently collected.
     assert source.count("pl.collect_all(") == 1
-    assert "b_sel1_b_sel1, b_sel2_b_sel2 = pl.collect_all(" in source or (
-        "b_sel2_b_sel2, b_sel1_b_sel1 = pl.collect_all(" in source
+    assert "b_sel1, b_sel2 = pl.collect_all(" in source or (
+        "b_sel2, b_sel1 = pl.collect_all(" in source
     )
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert sorted(ns["b_sel1_b_sel1"]["a"].to_list()) == [4, 5, 6, 7, 8, 9, 10]
-    assert sorted(ns["b_sel2_b_sel2"]["b"].to_list()) == sorted(
+    assert sorted(ns["b_sel1"]["a"].to_list()) == [4, 5, 6, 7, 8, 9, 10]
+    assert sorted(ns["b_sel2"]["b"].to_list()) == sorted(
         ["x" if i % 2 == 0 else "y" for i in range(4, 11)]
     )
 
@@ -371,12 +418,11 @@ def test_stream_true_output_blocks_forces_an_interior_member_to_be_named(tmp_pat
     # so it wouldn't normally need its own exit -- requesting it as an
     # explicit output_blocks target forces one anyway.
     source = compile_graph(graph, runner=runner, stream=True, output_blocks=["b_filter"])
-    assert "b_filter_b_filter" in source
-    assert "pl.collect_all(" in source
+    assert "(b_filter,) = pl.collect_all(" in source
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
-    assert ns["b_filter_b_filter"].to_dicts() == [{"a": 2, "b": 20}, {"a": 3, "b": 30}]
+    assert ns["b_filter"].to_dicts() == [{"a": 2, "b": 20}, {"a": 3, "b": 30}]
 
 
 def test_stream_true_splits_around_a_non_fusable_custom_block(tmp_path):
@@ -412,4 +458,5 @@ def test_stream_true_splits_around_a_non_fusable_custom_block(tmp_path):
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
     engine_out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
-    assert ns["b_custom_b_custom"].to_dicts() == engine_out.data.to_dicts()
+    # The function itself is named "b_custom", so its output is named by port.
+    assert ns["b_custom_out"].to_dicts() == engine_out.data.to_dicts()

@@ -23,6 +23,7 @@ export function CodeEditor({
   onSave,
   readOnly = false,
   maxHeight = 320,
+  fill = false,
 }: {
   value: string
   onChange?: (value: string) => void
@@ -31,6 +32,10 @@ export function CodeEditor({
   onSave?: () => void
   readOnly?: boolean
   maxHeight?: number
+  // Stretch to the parent's height and scroll inside the editor, instead of
+  // growing up to maxHeight -- for a panel that already bounds the editor,
+  // so there's one scrollbar rather than the panel's plus the editor's own.
+  fill?: boolean
 }) {
   const host = useRef<HTMLDivElement | null>(null)
   const view = useRef<EditorView | null>(null)
@@ -48,7 +53,9 @@ export function CodeEditor({
       python(),
       theme,
       EditorView.lineWrapping,
-      EditorView.theme({ '.cm-scroller': { maxHeight: `${maxHeight}px` } }),
+      fill
+        ? EditorView.theme({ '&': { height: '100%' } })
+        : EditorView.theme({ '.cm-scroller': { maxHeight: `${maxHeight}px` } }),
       keymap.of([
         {
           key: 'Mod-s',
@@ -75,7 +82,7 @@ export function CodeEditor({
     // Rebuilt only when the editor's own configuration changes -- `value` is
     // synced by the effect below instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly, maxHeight])
+  }, [readOnly, maxHeight, fill])
 
   useEffect(() => {
     const editor = view.current
@@ -83,5 +90,5 @@ export function CodeEditor({
     editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: value } })
   }, [value])
 
-  return <div ref={host} />
+  return <div ref={host} style={fill ? { height: '100%' } : undefined} />
 }
