@@ -358,6 +358,7 @@ register_block(
             PortSpec("bins", required=False),
             PortSpec("summary", required=False),
         ],
+        aggregate_outputs=("bins", "summary"),
         fn=fit_binning,
         metadata_transform=_fit_binning_meta,
     )
@@ -495,6 +496,7 @@ register_block(
         tags=("scorecard",),
         inputs=[PortSpec("model", type="model"), PortSpec("binning", type="binning")],
         outputs=[PortSpec("table")],
+        aggregate_outputs=("table",),
         fn=scorecard_table,
         metadata_transform=infer_dtypes,
     )

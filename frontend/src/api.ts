@@ -179,6 +179,7 @@ export const api = {
     final_full_run?: boolean
     sample_rows?: number | null
     auto_build?: boolean
+    allow_custom_blocks?: boolean
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
   agentBuildLog: (buildId: string) => request<Record<string, unknown>>(`/agent/builds/${buildId}/log`),
   agentCurrent: (cursor = 0) => request<BuildStateOut>(`/agent/builds/current?cursor=${cursor}`),

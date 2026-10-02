@@ -1540,6 +1540,8 @@ class AgentBuildStart(BaseModel):
     sample_rows: int | None = None
     # Build straight after planning, without waiting for approval.
     auto_build: bool = False
+    # Let the build write custom code blocks (else registry blocks only).
+    allow_custom_blocks: bool = True
 
 
 class AgentText(BaseModel):
@@ -1575,7 +1577,12 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001 -- each SDK raises its own type for a missing key
             raise HTTPException(400, f"{label} LLM ({choice.provider}): {e}")
     _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
-    options = BuildOptions(final_full_run=req.final_full_run, sample_rows=req.sample_rows, auto_build=req.auto_build)
+    options = BuildOptions(
+        final_full_run=req.final_full_run,
+        sample_rows=req.sample_rows,
+        auto_build=req.auto_build,
+        allow_custom_blocks=req.allow_custom_blocks,
+    )
     return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
 
 
@@ -1649,7 +1656,7 @@ def agent_mcp_tools(x_agent_token: str | None = Header(default=None)) -> list[di
     """The MCP bridge's tool list (see agent/mcp_server.py): the tools for
     the build's current phase."""
     build = _require_agent_token(x_agent_token)
-    return [t.definition() for t in tools_for_phase(build.phase)]
+    return [t.definition() for t in tools_for_phase(build.phase, allow_custom=build.options.allow_custom_blocks)]
 
 
 @app.post("/api/agent/mcp/call")

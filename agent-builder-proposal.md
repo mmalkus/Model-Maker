@@ -47,6 +47,10 @@ It has been verified end to end with the real `claude` CLI:
 - **Cost:** about $0.29 for the whole build, planning included.
 
 Where the implementation differs from the text below:
+- **Custom blocks can be turned off per build** (`allow_custom_blocks`,
+  "Allow custom code blocks" in the Build panel). Off, the custom-code
+  tools aren't offered, `plan_stage` refuses custom steps, and the prompt
+  says to ask the user when the registry can't do something.
 - **Staged builds.** The plan is an outline of *stages* (data prep,
   estimation, validation, ...), not a list of blocks. The build plans each
   stage's blocks (`plan_stage`) just before building it, with the earlier
@@ -165,11 +169,14 @@ Written against the codebase as of `0f0499e`.
    graphs therefore get validation, caching, staleness, compile and git
    exactly as hand-built ones do. The agent is just another client of the
    session, like the React canvas and the TUI.
-2. **Schema and statistics, never rows.** This is the rule every existing
-   LLM feature already follows (see the `DraftContext` docstring). Tool
-   results carry column names, dtypes, roles, summary stats, scalar
-   metrics and model summaries. They never carry `packet.data` rows. §5
-   covers where this is and isn't airtight.
+2. **Schema and statistics, never records.** This is the rule every
+   existing LLM feature already follows (see the `DraftContext`
+   docstring). Tool results carry column names, dtypes, roles, summary
+   stats, scalar metrics and model summaries. They never carry records'
+   rows. The one kind of table whose rows they do carry is a *statistics
+   table* -- one row per feature, bin, grade, period or sample -- and only
+   when a registry block declares that output one. §5 covers where this
+   is and isn't airtight.
 3. **The user's blocks are the user's.** The agent may read and wire from
    any block. It may only modify or delete blocks it created in the
    current build, plus the specific changes to existing blocks that the
@@ -458,9 +465,30 @@ server.
   display blocks (`display_table`, `display_value`) for the user's
   benefit.
 
-**On "never rows":** `get_output_summary` never returns `packet.data`,
-and `_packet_preview` is called with `rows=0`. That doesn't make the
-channel leak-proof, though, and the proposal shouldn't pretend it does:
+**On "never records":** `get_output_summary` never returns a dataframe's
+rows, with one exception: an output its registry block lists in
+`BlockSpec.aggregate_outputs` -- a statistics table such as
+`fit_binning`'s `summary` and `bins`, `compare_samples`' `table` or the
+simulation quantile tables -- comes back with its rows (rounded, at most
+200 rows and 20,000 characters, `id`-role columns dropped).
+
+- **Why:** without them the model saw only, say, the range of IV over 19
+  features, and in a live Haiku build it filled in the per-feature values
+  itself (wrongly) and missed `fit_binning`'s "suspicious" (likely
+  leakage) band. The prompt now also says to quote only numbers seen in a
+  tool result, and to ask before using a "suspicious" feature.
+- **Declared, not inferred:** the flag lives on the registry `BlockSpec`,
+  set by hand per port. A size threshold would be gamed by a custom block
+  doing `df.head(10)`; custom blocks never qualify, whatever they return.
+- **Category labels** in a bins table are shown (e.g. `region = West`).
+  `fit_binning` pools any category below its minimum share into
+  `__other__`, so a label is a level shared by many rows, not one
+  customer's value. A statistics table cut into very small cells (e.g.
+  `target_trend` on a period with one loan) can still describe one
+  record; that's accepted, like the min/max caveats below.
+
+That doesn't make the channel leak-proof, though, and the proposal
+shouldn't pretend it does:
 
 - `min`/`max` of string and id columns are real values.
 - Custom code written by the agent could filter to one row, and that

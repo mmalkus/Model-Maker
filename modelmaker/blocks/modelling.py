@@ -1213,6 +1213,7 @@ register_block(
         tags=("calibration", "pd", "lgd", "ccf_ead"),
         inputs=[PortSpec("df")],
         outputs=[PortSpec("table"), PortSpec("metric", type="scalar_metric")],
+        aggregate_outputs=("table",),
         fn=long_run_average,
         metadata_transform=lambda _im, outputs, _p: {k: {c: ColumnMeta(dtype=str(v.schema[c])) for c in v.columns} for k, v in outputs.items()},
     )

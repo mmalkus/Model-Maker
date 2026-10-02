@@ -56,8 +56,13 @@ def tool(name: str, description: str, properties: dict[str, Any], required: list
     return reg
 
 
-def tools_for_phase(phase: str) -> list[Tool]:
-    return [t for t in TOOLS.values() if phase in t.phases]
+# The tools that write custom code -- left out when a build has custom
+# blocks turned off (BuildOptions.allow_custom_blocks).
+CUSTOM_TOOLS = frozenset({"add_custom_block", "update_custom_block"})
+
+
+def tools_for_phase(phase: str, allow_custom: bool = True) -> list[Tool]:
+    return [t for t in TOOLS.values() if phase in t.phases and (allow_custom or t.name not in CUSTOM_TOOLS)]
 
 
 # ---- shared helpers ----------------------------------------------------------
@@ -112,6 +117,46 @@ def summarize_value(value: Any, with_stats: bool = True) -> dict[str, Any]:
     if isinstance(value, (bytes, bytearray)):
         return {"type": "image", "bytes": len(value), "note": "images aren't shown to the build"}
     return {"type": type(value).__name__, "value": _json_preview(value)}
+
+
+# A statistics table's rows (see BlockSpec.aggregate_outputs): at most this
+# many, and at most this much JSON -- a bins table for 30 features is a
+# few hundred rows.
+TABLE_ROW_LIMIT = 200
+TABLE_CHAR_LIMIT = 20_000
+
+
+def is_statistics_table(b: AgentBuild, block_id: str, port: str) -> bool:
+    """Whether a block's output port is one its registry spec declares a
+    statistics table. Never true for a custom block: the build writes
+    those, so it can't vouch for their rows."""
+    block = b.session.graph.blocks.get(block_id)
+    if block is None or block.is_custom:
+        return False
+    spec = BLOCK_REGISTRY.get(block.category)
+    return spec is not None and port in spec.aggregate_outputs
+
+
+def _round(value: Any) -> Any:
+    if isinstance(value, float):
+        return float(f"{value:.6g}")
+    return value
+
+
+def table_rows(packet: DataFramePacket) -> dict[str, Any]:
+    """A statistics table as the model sees it: its rows, rounded, within
+    TABLE_ROW_LIMIT/TABLE_CHAR_LIMIT -- id-role columns left out even
+    here."""
+    df = packet.data
+    keep = [n for n, m in packet.schema_meta.items() if m.role != ColumnRole.ID and n in df.columns]
+    rows = [{k: _round(v) for k, v in r.items()} for r in df.select(keep).head(TABLE_ROW_LIMIT).iter_rows(named=True)]
+    while rows and len(json.dumps(rows, default=str)) > TABLE_CHAR_LIMIT:
+        rows = rows[: len(rows) * 3 // 4]
+    rows = json.loads(json.dumps(rows, default=str))
+    out: dict[str, Any] = {"type": "statistics_table", "row_count": df.height, "columns": keep, "rows": rows}
+    if len(rows) < df.height:
+        out["rows_shown"] = f"the first {len(rows)} of {df.height} rows -- the rest are left out"
+    return out
 
 
 _FEATURE_PARAM = re.compile(r"^(features?|cols?|columns?|risk_factors|by|on|x|y)$|_cols?$|_columns?$")
@@ -260,7 +305,8 @@ def get_graph(b: AgentBuild) -> dict[str, Any]:
     "get_output_summary",
     "Summary of a block's last successful output on one port: for a dataframe the columns (dtype, role, "
     "null count, distinct count, mean/std/min/max) and row count -- never the rows themselves; for a "
-    "metric or model the value. Defaults to the block's first output port.",
+    "statistics table (e.g. fit_binning's summary, compare_samples' table -- one row per feature, bin or "
+    "sample) its rows; for a metric or model the value. Defaults to the block's first output port.",
     {"block": _BLOCK, "port": _STR},
     ["block"],
     READ,
@@ -268,7 +314,11 @@ def get_graph(b: AgentBuild) -> dict[str, Any]:
 def get_output_summary(b: AgentBuild, block: str, port: str | None = None) -> dict[str, Any]:
     port, value = b.current_output(block, port)
     status = b.session.runner.status(block)
-    out = {"block": block, "port": port, "status": status, **summarize_value(value)}
+    if isinstance(value, DataFramePacket) and is_statistics_table(b, block, port):
+        summary = table_rows(value)
+    else:
+        summary = summarize_value(value)
+    out = {"block": block, "port": port, "status": status, **summary}
     if status == "orange":
         out["note"] = "this output is stale (the block or its upstream changed since it ran) -- run_to it for a current one"
     return out
@@ -431,7 +481,9 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
             continue
         if cat in catalogue.AGENT_DISALLOWED:
             errors.append(f"{where}: {cat} can't be added by an AI build ({catalogue.AGENT_DISALLOWED[cat]})")
-        if cat == "custom" and not step.get("instruction"):
+        if cat == "custom" and not b.options.allow_custom_blocks:
+            errors.append(f"{where}: custom blocks are turned off for this build -- use registry blocks")
+        elif cat == "custom" and not step.get("instruction"):
             errors.append(f"{where}: custom steps need an instruction")
         if not step.get("lane") and stage is not None:
             step["lane"] = stage["key"]
@@ -871,6 +923,9 @@ def run_to(b: AgentBuild, block: str) -> dict[str, Any]:
             s = summarize_value(value, with_stats=False)
             if s["type"] == "dataframe":
                 s = {"type": "dataframe", "row_count": s["row_count"], "columns": [c["name"] for c in s["columns"]]}
+                if is_statistics_table(b, block, p.name):
+                    s["type"] = "statistics_table"
+                    s["note"] = "get_output_summary shows its rows"
             outputs[p.name] = s
         out["outputs"] = outputs
         return out

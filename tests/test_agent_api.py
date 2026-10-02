@@ -259,3 +259,17 @@ def test_auto_build_and_build_log_endpoints(client):
     assert any(e["kind"] == "auto_approved" for e in log["events"])
     assert c.get("/api/agent/builds/build_00000000/log").status_code == 404
     assert c.get("/api/agent/builds/..%2Fsecrets/log").status_code in (400, 404)
+
+
+def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
+    c = client
+    c.scripts.update({"plan": [_plan(c.anchor)], "build": [_ask]})
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "allow_custom_blocks": False})
+    assert started.json()["options"]["allow_custom_blocks"] is False
+    _wait(c, "awaiting_approval")
+    c.post("/api/agent/builds/current/approve")
+    _wait(c, "awaiting_input")
+    api.AGENT.build.set_phase("building")  # as if the model were mid-turn
+    tools = {t["name"] for t in c.get("/api/agent/mcp/tools", headers={"X-Agent-Token": api.AGENT.token}).json()}
+    assert "add_block" in tools and "add_custom_block" not in tools
+    c.post("/api/agent/builds/current/stop")

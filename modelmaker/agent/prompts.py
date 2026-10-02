@@ -23,7 +23,14 @@ Validation). You work only through the tools you are given.
 
 The user has prepared the data: the **anchor** blocks are where you build \
 from. Ground rules, enforced by the tools:
-- You see schemas and summary statistics, never data rows. Don't ask for rows.
+- You see schemas and summary statistics, never data rows. Don't ask for rows. \
+The exception is statistics tables -- outputs with one row per feature, bin, \
+grade, period or sample, such as fit_binning's summary and bins or \
+compare_samples' table (describe_block_type marks them statistics_table): \
+get_output_summary returns their rows. Read the numbers there.
+- Only quote numbers you have seen in a tool result. Never estimate, \
+interpolate or fill in a value you haven't seen; say what you'd need to \
+check instead.
 - The user's blocks are theirs. You can read them and wire *from* them. You \
 can only change blocks you created in this build, plus changes the user \
 approved in the plan (changes_to_existing).
@@ -32,9 +39,7 @@ target/target_col auto-fill from it); `predicted` is set automatically on \
 model outputs (score_col/predicted_col auto-fill from it); columns tagged \
 `excluded` must never be used as features; `id` columns are identifiers, not \
 features. Don't retag the user's columns.
-- Prefer registry blocks. Only write a custom block when no registry block \
-does the job (e.g. a multi-column transformation, an out-of-time split by \
-date). Registry block params are documented by describe_block_type -- read it \
+{custom_rule}Registry block params are documented by describe_block_type -- read it \
 before using a block you haven't used yet in this build.
 - Keep the model proportionate to the goal. Don't add blocks the goal \
 doesn't call for.
@@ -48,10 +53,13 @@ train model; calibrate_model on development data.
 - fit_binning is also the univariate analysis (bin table, IV, \
 direction-adjusted Gini/KS or rank correlation for LGD/CCF, monotonicity); \
 pair it with characteristic_stability (drift per feature between samples) \
-and target_trend (target over time) rather than one block per feature.
+and target_trend (target over time) rather than one block per feature. A \
+feature in iv_band "suspicious" (IV of 0.5 or more) usually means leakage -- \
+the column is partly the outcome. Don't use it as a driver without asking \
+the user (ask_user) first, and name it in your summary either way.
 - Use time_split for an out-of-time sample, train_test_split with \
 stratify_col for a low default rate, derive_columns for ratios/flags and \
-one_hot_encode for categorical regressors before writing custom code.
+one_hot_encode for categorical regressors rather than custom code.
 - For LGD: discount_recoveries -> compute_lgd (tags lgd as the target); for \
 CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
 (train/test/OOT side by side) and, for a rating scale, grade_backtest."""
@@ -107,12 +115,12 @@ inputs wired from this stage's step refs or existing block ids (blocks built \
 in earlier stages included), key params (feature lists, bins, split \
 settings) chosen from the results so far, and a short `why` each.
 2. Then build the steps in order:
-   a. add_block (or add_custom_block) with `plan_step` set to the step's ref \
+   a. add_block{add_custom} with `plan_step` set to the step's ref \
 and the stage key as `lane`.
    b. connect its inputs.
    c. run_to it and check the result: the status, the columns and row count, \
 a metric in a sane range. Use get_output_summary when you need the statistics.
-   d. If it fails, read the error, fix it (set_params / update_custom_block) \
+   d. If it fails, read the error, fix it (set_params{update_tool}) \
 and run again. After 3 failures of one block, ask_user.
 3. When the stage is built and green, call complete_stage with a short \
 Markdown summary: what you built, the headline numbers, and the decisions \
@@ -130,6 +138,23 @@ all stages, deviations, headline results, concerns -- e.g. weak features, \
 instability, anything you'd check next) and key_outputs pointing at the \
 headline metric blocks. The app then runs the whole graph on the full data \
 and refreshes those metrics. End your turn after finish."""
+
+
+CUSTOM_ON = """- Prefer registry blocks. Only write a custom block when no registry block \
+does the job (e.g. a multi-column transformation, an out-of-time split by \
+date). """
+
+CUSTOM_OFF = """- Custom blocks are turned off for this build: use registry blocks only. \
+If the goal needs something no registry block does, say so -- in \
+`questions` while planning, with ask_user while building. """
+
+
+def _common(build: AgentBuild) -> str:
+    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_custom_blocks else CUSTOM_OFF)
+
+
+def _custom_contract(build: AgentBuild) -> list[str]:
+    return [CUSTOM_CONTRACT] if build.options.allow_custom_blocks else []
 
 
 def _anchor_context(build: AgentBuild) -> str:
@@ -175,7 +200,7 @@ def _preflight_context(build: AgentBuild) -> str:
 
 
 def plan_system(build: AgentBuild, compact: bool = False) -> str:
-    return "\n\n".join([COMMON, CUSTOM_CONTRACT, PLAN_INSTRUCTIONS, _catalogue_context(compact)])
+    return "\n\n".join([_common(build), *_custom_contract(build), PLAN_INSTRUCTIONS, _catalogue_context(compact)])
 
 
 def plan_prompt(build: AgentBuild) -> str:
@@ -199,9 +224,13 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
         sample_note = "the full data"
     return "\n\n".join(
         [
-            COMMON,
-            CUSTOM_CONTRACT,
-            BUILD_INSTRUCTIONS.format(sample_note=sample_note),
+            _common(build),
+            *_custom_contract(build),
+            BUILD_INSTRUCTIONS.format(
+                sample_note=sample_note,
+                update_tool=" / update_custom_block" if build.options.allow_custom_blocks else "",
+                add_custom=" (or add_custom_block)" if build.options.allow_custom_blocks else "",
+            ),
             _catalogue_context(compact),
         ]
     )

@@ -172,6 +172,7 @@ function StartForm({
   const [buildLlm, setBuildLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
   const [fullRun, setFullRun] = useState(true)
   const [autoBuild, setAutoBuild] = useState(false)
+  const [allowCustom, setAllowCustom] = useState(true)
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
@@ -213,6 +214,13 @@ function StartForm({
           <input type="checkbox" checked={fullRun} onChange={(e) => setFullRun(e.target.checked)} />
           Finish with a run on the full data
         </label>
+        <label
+          style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
+          title="Let the AI write its own polars code when no registry block does the job. Off: registry blocks only -- it asks you if the goal needs something they can't do."
+        >
+          <input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} />
+          Allow custom code blocks
+        </label>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           Build on a sample:
           <select value={sample} onChange={(e) => setSample(e.target.value as typeof sample)}>
@@ -239,6 +247,7 @@ function StartForm({
             final_full_run: fullRun,
             sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
             auto_build: autoBuild,
+            allow_custom_blocks: allowCustom,
           })
         }
       >
@@ -306,6 +315,7 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
         {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
         {build.options.auto_build ? ' · builds automatically' : ''}
+        {build.options.allow_custom_blocks === false ? ' · registry blocks only' : ''}
       </div>
     </div>
   )

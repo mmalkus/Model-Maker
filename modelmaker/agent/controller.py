@@ -163,6 +163,9 @@ class BuildController:
             raise BuildError(f"the build is {b.phase}; this needs {' or '.join(phases)}")
         return b
 
+    def _tools(self, phase: str):
+        return tools_for_phase(phase, allow_custom=self.build.options.allow_custom_blocks)
+
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
@@ -294,7 +297,7 @@ class BuildController:
             # ends the build as failed with its message, via _spawn.
             self._plan_loop = self.loop_factory(b.plan_llm, "plan")
             _record_resolved_model(b.plan_llm, self._plan_loop)
-            outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), tools_for_phase(PLANNING))
+            outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), self._tools(PLANNING))
             self._after_plan_turn(outcome)
 
         self._spawn(work)
@@ -341,7 +344,7 @@ class BuildController:
                 b.log("user", text=text)
 
                 def replan() -> None:
-                    outcome = self._plan_loop.resume(b, prompts.plan_feedback_prompt(text), tools_for_phase(PLANNING))
+                    outcome = self._plan_loop.resume(b, prompts.plan_feedback_prompt(text), self._tools(PLANNING))
                     self._after_plan_turn(outcome)
 
                 self._spawn(replan)
@@ -353,7 +356,7 @@ class BuildController:
                 b.log("user", text=text)
 
                 def revise() -> None:
-                    outcome = self._build_loop.resume(b, prompts.stage_feedback_prompt(b, text), tools_for_phase(BUILDING))
+                    outcome = self._build_loop.resume(b, prompts.stage_feedback_prompt(b, text), self._tools(BUILDING))
                     self._after_build_turn(outcome)
 
                 self._spawn(revise)
@@ -363,7 +366,7 @@ class BuildController:
                 b.log("user", text=text)
 
                 def answer() -> None:
-                    outcome = self._build_loop.resume(b, prompts.answer_prompt(text), tools_for_phase(BUILDING))
+                    outcome = self._build_loop.resume(b, prompts.answer_prompt(text), self._tools(BUILDING))
                     self._after_build_turn(outcome)
 
                 self._spawn(answer)
@@ -416,7 +419,7 @@ class BuildController:
                 b.turn_over = False
                 self._build_loop = self.loop_factory(b.build_llm, "build")
                 _record_resolved_model(b.build_llm, self._build_loop)
-                outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
+                outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), self._tools(BUILDING))
                 self._after_build_turn(outcome)
 
             return work
@@ -434,7 +437,7 @@ class BuildController:
         b = self.build
         b.stage_index += 1
         self._start_stage()
-        outcome = self._build_loop.resume(b, prompts.stage_prompt(b), tools_for_phase(BUILDING))
+        outcome = self._build_loop.resume(b, prompts.stage_prompt(b), self._tools(BUILDING))
         self._after_build_turn(outcome)
 
     def _maybe_sample(self) -> None:

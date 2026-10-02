@@ -94,6 +94,10 @@ class BuildOptions:
     # waiting for the user -- see controller._after_plan_turn and
     # _after_build_turn.
     auto_build: bool = False
+    # Let the build write its own polars code (add_custom_block) when no
+    # registry block does the job. Off: registry blocks only, and the
+    # custom-code tools aren't offered at all (tools.tools_for_phase).
+    allow_custom_blocks: bool = True
     limits: BuildLimits = field(default_factory=BuildLimits)
 
 
@@ -415,7 +419,7 @@ class AgentBuild:
         the tool's result, or {"error": ...} for anything the model should
         see and react to. Never raises, except that the loop should end
         its conversation once `stop_requested` is set."""
-        from .tools import TOOLS  # local: tools imports this module
+        from .tools import CUSTOM_TOOLS, TOOLS  # local: tools imports this module
 
         args = args or {}
         tool = TOOLS.get(name)
@@ -425,6 +429,8 @@ class AgentBuild:
                 raise ToolError(f"unknown tool {name!r}")
             if self.phase not in tool.phases:
                 raise ToolError(f"{name} isn't available in the {self.phase} phase")
+            if name in CUSTOM_TOOLS and not self.options.allow_custom_blocks:
+                raise ToolError("custom blocks are turned off for this build -- use registry blocks, or ask_user")
             stage = self.current_stage
             if stage is not None and stage["status"] == STAGE_DONE and not self.finished:
                 # complete_stage ended the turn; a model that keeps going
@@ -467,6 +473,7 @@ class AgentBuild:
                 "final_full_run": self.options.final_full_run,
                 "sample_rows": self.options.sample_rows,
                 "auto_build": self.options.auto_build,
+                "allow_custom_blocks": self.options.allow_custom_blocks,
             },
             "log_path": str(self.log_path) if self.log_path else None,
             "preflight": self.preflight,

@@ -159,7 +159,10 @@ def catalogue_entry(spec: BlockSpec, detail: bool = False) -> dict[str, Any]:
         "tags": list(spec.tags),
         "summary": _summary_line(doc),
         "inputs": [{"name": p.name, "type": p.type, "required": p.required} for p in spec.inputs],
-        "outputs": [{"name": p.name, "type": p.type} for p in spec.outputs],
+        "outputs": [
+            {"name": p.name, "type": p.type, **({"statistics_table": True} if p.name in spec.aggregate_outputs else {})}
+            for p in spec.outputs
+        ],
     }
     if spec.category in AGENT_DISALLOWED:
         entry["agent_can_add"] = False

@@ -799,3 +799,103 @@ def test_waiting_on_the_user_doesnt_count_against_the_time_limit(prepared):
     b.set_phase(PLANNING)
     assert b.active_seconds() < 60
     b.check_stop()  # within the limit
+
+
+# ---- statistics tables -------------------------------------------------------------------
+
+
+def _binned(session, anchor, b):
+    fit = b.call_tool("add_block", {"category": "fit_binning", "lane": "est", "params": {"features": FEATURES + ["region"]}})["block"]
+    b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": fit, "to_port": "df"})
+    ran = b.call_tool("run_to", {"block": fit})
+    assert ran["status"] == "green", ran
+    return fit, ran
+
+
+def test_statistics_tables_show_their_rows(prepared):
+    session, anchor = prepared
+    b = building(session, anchor)
+    fit, ran = _binned(session, anchor, b)
+    assert ran["outputs"]["summary"]["type"] == "statistics_table"
+
+    summary = b.call_tool("get_output_summary", {"block": fit, "port": "summary"})
+    assert summary["type"] == "statistics_table" and summary["row_count"] == len(FEATURES) + 1
+    by_feature = {r["feature"]: r for r in summary["rows"]}
+    assert set(by_feature) == set(FEATURES) | {"region"}
+    assert by_feature["credit_score"]["iv"] > 0 and by_feature["credit_score"]["iv_band"]
+    # Category labels are shown in the bins table: fit_binning pools any
+    # category under its minimum share, so a label is never one customer's.
+    bins = b.call_tool("get_output_summary", {"block": fit, "port": "bins"})
+    assert any(r["feature"] == "region" and "West" in str(r["label"]) for r in bins["rows"])
+    # ...but the data itself still never reaches the model.
+    assert "West" not in str(b.call_tool("get_output_summary", {"block": anchor}))
+
+
+def test_statistics_tables_are_capped(prepared, monkeypatch):
+    from modelmaker.agent import tools
+
+    session, anchor = prepared
+    b = building(session, anchor)
+    fit, _ = _binned(session, anchor, b)
+    monkeypatch.setattr(tools, "TABLE_ROW_LIMIT", 3)
+    bins = b.call_tool("get_output_summary", {"block": fit, "port": "bins"})
+    assert len(bins["rows"]) == 3 and "the first 3 of" in bins["rows_shown"]
+    monkeypatch.setattr(tools, "TABLE_ROW_LIMIT", 500)
+    monkeypatch.setattr(tools, "TABLE_CHAR_LIMIT", 600)
+    bins = b.call_tool("get_output_summary", {"block": fit, "port": "bins"})
+    assert 0 < len(bins["rows"]) < bins["row_count"] and len(json.dumps(bins["rows"])) <= 600
+
+
+def test_custom_blocks_never_count_as_statistics_tables(prepared):
+    """A custom block can return anything -- df.head(10) included -- so its
+    rows stay hidden even when it only reshapes a statistics table."""
+    session, anchor = prepared
+    b = building(session, anchor)
+    fit, _ = _binned(session, anchor, b)
+    code = 'def top_iv(summary, iv_col: str = "iv"):\n    return summary.filter(pl.col(iv_col) > 0.02)\n'
+    custom = b.call_tool("add_custom_block", {"lane": "est", "name": "strong", "inputs": ["summary"], "code": code,
+                                              "metadata_transform": {"kind": "passthrough"}})["block"]
+    b.call_tool("connect", {"from_block": fit, "from_port": "summary", "to_block": custom, "to_port": "summary"})
+    assert b.call_tool("run_to", {"block": custom})["status"] == "green"
+    out = b.call_tool("get_output_summary", {"block": custom})
+    assert out["type"] == "dataframe" and "rows" not in out and "credit_score" not in json.dumps(out)
+
+
+def test_only_dataframe_outputs_can_be_statistics_tables():
+    from modelmaker.blocks.base import BlockSpec, PortSpec, register_block
+
+    spec = BlockSpec("x_bad", "standard", "x", [PortSpec("df")], [PortSpec("model", type="model")], fn=lambda df: df,
+                     metadata_transform=lambda *a: None, aggregate_outputs=("model",))
+    with pytest.raises(ValueError, match="aren't dataframe outputs"):
+        register_block(spec)
+
+
+def test_the_catalogue_marks_statistics_tables():
+    from modelmaker.agent import catalogue
+
+    outs = {p["name"]: p for p in catalogue.describe_block_type("fit_binning")["outputs"]}
+    assert outs["summary"].get("statistics_table") and "statistics_table" not in outs["binning"]
+    assert "statistics_table" not in catalogue.describe_block_type("logistic_regression")["outputs"][0]
+
+
+# ---- custom blocks turned off ------------------------------------------------------------
+
+
+def test_custom_blocks_can_be_turned_off(prepared):
+    from modelmaker.agent import prompts
+    from modelmaker.agent.tools import tools_for_phase
+
+    session, anchor = prepared
+    b = staged(session, anchor)
+    b.options.allow_custom_blocks = False
+    names = {t.name for t in tools_for_phase(BUILDING, allow_custom=False)}
+    assert "add_block" in names and not names & {"add_custom_block", "update_custom_block"}
+    code = 'def f(df):\n    return df\n'
+    r = b.call_tool("add_custom_block", {"lane": "est", "name": "n", "code": code, "metadata_transform": {"kind": "passthrough"}})
+    assert "turned off" in r["error"]
+    r = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "custom", "instruction": "x", "name": "n", "why": "",
+                                              "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
+    assert "turned off" in r["error"]
+    system = prompts.build_system(b)
+    assert "Custom blocks are turned off" in system and "add_custom_block" not in system
+    assert "add_custom_block" not in prompts.plan_system(b)
