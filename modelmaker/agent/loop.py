@@ -7,6 +7,7 @@ whichever loop makes it."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import shutil
@@ -177,13 +178,30 @@ def _post_json(
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:800]
-        raise RuntimeError(f"{what} returned HTTP {e.code}: {body}") from e
+        # A 5xx is the server's own trouble (a local one that ran out of
+        # memory, an overloaded API) -- worth a retry, not a failed build.
+        error = LLMUnavailable if e.code >= 500 else RuntimeError
+        raise error(f"{what} returned HTTP {e.code}: {body}") from e
     except TimeoutError as e:
-        raise LLMUnavailable(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
+        raise LLMUnavailable(_timeout_message(what, timeout)) from e
     except urllib.error.URLError as e:
         if isinstance(e.reason, TimeoutError):
-            raise LLMUnavailable(f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer") from e
-        raise LLMUnavailable(f"could not reach {what} -- check the base URL and network access") from e
+            raise LLMUnavailable(_timeout_message(what, timeout)) from e
+        raise LLMUnavailable(f"could not reach {what} -- check the base URL and network access, and that the server is running") from e
+    except (OSError, http.client.HTTPException) as e:
+        # The connection dropped mid-response: typically the server crashed
+        # while working on this request.
+        raise LLMUnavailable(
+            f"{what} dropped the connection mid-response ({type(e).__name__}) -- the server may have crashed, "
+            "e.g. run out of memory on a long conversation; restart it before retrying"
+        ) from e
+
+
+def _timeout_message(what: str, timeout: float) -> str:
+    return (
+        f"{what} did not respond within {timeout:.0f}s -- set MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer. "
+        "If it's a local server, check it hasn't crashed (e.g. run out of memory)."
+    )
 
 
 def _parse_args(raw: Any) -> tuple[dict[str, Any] | None, str | None]:

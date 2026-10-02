@@ -8,6 +8,7 @@ the real services accept exactly these payloads."""
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -255,6 +256,34 @@ def test_an_unreachable_endpoint_raises_llm_unavailable(planning_build):
     b, _ = planning_build
     with pytest.raises(LLMUnavailable):
         OpenAILoop("m", api_key="k", base_url="http://127.0.0.1:9/v1").start(b, "S", "P", [])
+
+
+def test_a_crashed_server_raises_llm_unavailable(planning_build):
+    """A local server that dies mid-request (e.g. out of GPU memory) either
+    answers 5xx or drops the connection -- both are retryable."""
+    b, _ = planning_build
+    fake = FakeEndpoint([{"_status": 500, "error": "out of memory"}])
+    try:
+        with pytest.raises(LLMUnavailable, match="HTTP 500"):
+            OpenAILoop("m", api_key="k", base_url=fake.url).start(b, "S", "P", [])
+    finally:
+        fake.close()
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def hang_up():
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.close()
+
+    threading.Thread(target=hang_up, daemon=True).start()
+    try:
+        with pytest.raises(LLMUnavailable, match="dropped the connection"):
+            OpenAILoop("m", api_key="k", base_url=f"http://127.0.0.1:{listener.getsockname()[1]}").start(b, "S", "P", [])
+    finally:
+        listener.close()
 
 
 # ---- LM Studio / llama.cpp (local, compact mode) --------------------------------------
