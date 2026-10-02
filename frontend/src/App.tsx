@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { BlockNode, type BlockFlowNode } from './BlockNode'
 import { BuildPanel } from './BuildPanel'
+import { ReportModal } from './BuildReport'
 import { DataWireEdge, type DataWireEdgeType } from './DataWireEdge'
 import { GHOST_IN, GHOST_OUT, GhostLane, GhostNode, type GhostFlowNode, type GhostLaneNode } from './GhostNode'
 import { Inspector } from './Inspector'
@@ -53,6 +54,7 @@ function toBlockNodes(
   graph: GraphOut,
   collapsedLanes: Set<string>,
   onViewPort: (blockId: string, port: string, portType: PortType) => void,
+  onOpenBuildReport: (buildId: string) => void,
 ): BlockFlowNode[] {
   return Object.values(graph.blocks)
     .filter((block) => !(block.lane && collapsedLanes.has(block.lane)))
@@ -60,7 +62,7 @@ function toBlockNodes(
       id: block.id,
       type: 'modelBlock' as const,
       position: block.position,
-      data: { block, onViewPort },
+      data: { block, onViewPort, onOpenBuildReport },
     }))
 }
 
@@ -96,6 +98,8 @@ function AppInner() {
   const [autosave, setAutosave] = useState<AutosaveStatus>({ state: 'idle' })
   const [buildOpen, setBuildOpen] = useState(false)
   const [build, setBuild] = useState<BuildOut | null>(null)
+  // The AI build whose full report is open (see BuildReport.ReportModal).
+  const [reportBuildId, setReportBuildId] = useState<string | null>(null)
   const { fitView, screenToFlowPosition } = useReactFlow()
   const didInitialFit = useRef(false)
 
@@ -123,7 +127,7 @@ function AppInner() {
   const reload = useCallback(() => {
     api.graph().then((g) => {
       setGraph(g)
-      const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort)
+      const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort, setReportBuildId)
       // Carry over React Flow's measured size and selection: the run poll
       // reloads every 200ms, and fresh nodes without `measured` are hidden
       // until re-measured, which blinks the whole canvas.
@@ -258,7 +262,7 @@ function AppInner() {
   }, [anyRunning, reload])
 
   useEffect(() => {
-    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort))
+    if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort, setReportBuildId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collapsedLanes])
 
@@ -735,6 +739,7 @@ function AppInner() {
               onChanged={reload}
               onBuild={setBuild}
               onClose={() => setBuildOpen(false)}
+              onOpenReport={setReportBuildId}
             />
           </div>
         )}
@@ -751,6 +756,7 @@ function AppInner() {
           <Inspector block={selectedBlock} onChanged={reload} provider={llmSettings?.active_provider ?? null} />
         )}
       </div>
+      {reportBuildId && <ReportModal key={reportBuildId} buildId={reportBuildId} onClose={() => setReportBuildId(null)} />}
     </div>
   )
 }

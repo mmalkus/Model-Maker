@@ -208,3 +208,8 @@ export const api = {
     request<Artifact>(`/artifacts/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   deleteArtifact: (id: string) => request<void>(`/artifacts/${id}`, { method: 'DELETE' }),
 }
+
+// An AI build's report is saved under an id derived from the build's id
+// (see session.upsert_artifact, called with key=build.id), so a block's
+// provenance build_id is enough to find its report without a lookup.
+export const buildReportId = (buildId: string) => `art_build_report_${buildId}`

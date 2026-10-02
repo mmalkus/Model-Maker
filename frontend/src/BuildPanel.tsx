@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { BuildReportList } from './BuildReport'
 import type { BuildEvent, BuildOut, BuildPlan, GraphOut, LLMSettingsOut } from './types'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
@@ -34,9 +35,10 @@ type Props = {
   onChanged: () => void
   onBuild: (build: BuildOut | null) => void
   onClose: () => void
+  onOpenReport: (buildId: string) => void
 }
 
-export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild, onClose }: Props) {
+export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild, onClose, onOpenReport }: Props) {
   const [build, setBuild] = useState<BuildOut | null>(null)
   const [events, setEvents] = useState<BuildEvent[]>([])
   const [busy, setBusy] = useState(false)
@@ -115,7 +117,8 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
 
       {!build || TERMINAL.has(build.phase) ? (
         <>
-          {build && <Finished build={build} graph={graph} />}
+          {build && <Finished build={build} graph={graph} onOpenReport={onOpenReport} />}
+          <BuildReportList refreshKey={`${build?.id}:${build?.phase}:${graph.can_undo}:${graph.can_redo}`} onOpen={onOpenReport} />
           <StartForm graph={graph} selectedIds={selectedIds} llmSettings={llmSettings} onStart={(body) => act(() => api.agentStart(body))} />
         </>
       ) : (
@@ -448,7 +451,10 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   )
 }
 
-function Finished({ build, graph }: { build: BuildOut; graph: GraphOut }) {
+// Only a build that ran to the end writes a report (see controller._attach_report).
+const REPORTED = new Set(['done', 'done_with_errors'])
+
+function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: GraphOut; onOpenReport: (buildId: string) => void }) {
   const good = build.phase === 'done'
   return (
     <div style={{ ...box, borderColor: good ? '#bbf7d0' : '#e5e7eb', marginBottom: 12 }}>
@@ -478,9 +484,16 @@ function Finished({ build, graph }: { build: BuildOut; graph: GraphOut }) {
           ))}
         </div>
       )}
-      {build.owned_blocks.length > 0 && build.phase !== 'discarded' && (
-        <div style={{ color: '#6b7280', marginTop: 6 }}>
-          {build.owned_blocks.length} block(s) built. The full report is saved as an artifact; Undo reverts the whole build in one step.
+      {(REPORTED.has(build.phase) || (build.owned_blocks.length > 0 && build.phase !== 'discarded')) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', color: '#6b7280', marginTop: 8 }}>
+          {REPORTED.has(build.phase) && (
+            <button onClick={() => onOpenReport(build.id)} title="Results, deviations from the plan, failures and warnings, in full">
+              Open full report
+            </button>
+          )}
+          {build.owned_blocks.length > 0 && build.phase !== 'discarded' && (
+            <span>{build.owned_blocks.length} block(s) built · Undo reverts the whole build</span>
+          )}
         </div>
       )}
     </div>

@@ -246,10 +246,12 @@ graph for you (design: [agent-builder-proposal.md](agent-builder-proposal.md)):
    statistics, fixes failures, and asks you when it's stuck. The canvas is
    read-only for you meanwhile. A large dataset is built on a sample, then
    the whole graph runs once on the full data.
-6. **Read the report**, which is saved as an artifact. AI-built blocks
-   carry an **AI** badge and a provenance record: build, LLMs, time, and
-   whether a person has edited them since. **One Undo reverts the whole
-   build.**
+6. **Read the report** with **Open full report** in the panel. Every
+   build keeps its own report, listed under **Build reports**. AI-built
+   blocks carry an **AI** badge; click it to see the provenance record
+   (build, LLMs, time, whether a person has edited the block since) and
+   open the report of each build that made or changed it. **One Undo
+   reverts the whole build**, its report included.
 
 Guardrails are enforced by the tools, not just the prompt:
 - **No rows.** The AI only ever sees column names, dtypes, roles and
