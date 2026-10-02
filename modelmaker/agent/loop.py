@@ -499,7 +499,9 @@ class ClaudeCliLoop(AgentLoop):
                 MCP_SERVER_NAME: {
                     "type": "stdio",
                     "command": sys.executable,
-                    "args": ["-m", "modelmaker.agent.mcp_server", "--url", self.api_base_url, "--token", self.token],
+                    # --token=<value>: a token_urlsafe token can start with "-",
+                    # which argparse would take for an option.
+                    "args": ["-m", "modelmaker.agent.mcp_server", f"--url={self.api_base_url}", f"--token={self.token}"],
                     "env": {"PYTHONPATH": str(Path(__file__).resolve().parents[2])},
                 }
             }

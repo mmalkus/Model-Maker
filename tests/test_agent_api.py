@@ -213,7 +213,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
 
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "modelmaker.agent.mcp_server", "--url", live_server, "--token", api.AGENT.token],
+        args=["-m", "modelmaker.agent.mcp_server", f"--url={live_server}", f"--token={api.AGENT.token}"],
         env={"PYTHONPATH": str(ROOT)},
     )
 

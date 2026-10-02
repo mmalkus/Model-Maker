@@ -632,21 +632,139 @@ def _require_active_stage(b: AgentBuild) -> dict[str, Any]:
 
 @tool(
     "plan_stage",
-    "Plan the current stage's blocks, now that you can see what the earlier stages produced. Call it "
-    "before building the stage, and again if the stage's steps change. Steps wire from earlier steps of "
-    "this stage or from existing blocks by id (including blocks built in earlier stages).",
-    {"steps": {"type": "array", "items": _STEP_SCHEMA}},
+    "Plan the current stage's blocks, now that you can see what the earlier stages produced -- and, by "
+    "default, build them: the app adds each registry step in order, wires it as planned, runs it and "
+    "reports back, stopping at the first step that fails or needs custom code. Steps wire from earlier "
+    "steps of this stage or from existing blocks by id (including blocks built in earlier stages). Call it "
+    "again if the stage's steps change: steps already built are kept (with any changed params applied), new "
+    "ones are built. build=false only plans.",
+    {"steps": {"type": "array", "items": _STEP_SCHEMA}, "build": {"type": "boolean"}},
     ["steps"],
     WRITE,
 )
-def plan_stage(b: AgentBuild, steps: list[dict[str, Any]]) -> dict[str, Any]:
+def plan_stage(b: AgentBuild, steps: list[dict[str, Any]], build: bool = True) -> dict[str, Any]:
     stage = _require_active_stage(b)
     errors = validate_steps(b, steps)
     if errors:
         raise ToolError("stage plan has problems, fix and resubmit:\n- " + "\n- ".join(errors))
     stage["plan"] = {"steps": steps, "layout": layout_steps(b, steps)}
     b.log("stage", key=stage["key"], name=stage["name"], status="planned", steps=len(steps))
-    return {"ok": True, "next": "build the steps in order: add_block with plan_step, connect, run_to, check"}
+    if not build:
+        return {"ok": True, "next": "build the steps in order (build_stage, or add_block with plan_step, connect, run_to)"}
+    return _build_stage_plan(b, stage, apply_params=True)
+
+
+@tool(
+    "build_stage",
+    "Build (the rest of) the current stage's plan: adds, wires and runs every step not built yet in plan "
+    "order, and re-runs any built step that isn't green -- e.g. after you fixed a failed step's params, or "
+    "added a custom step with add_custom_block(plan_step=...). Stops at the first step that fails or needs "
+    "custom code.",
+    {},
+    [],
+    WRITE,
+)
+def build_stage(b: AgentBuild) -> dict[str, Any]:
+    stage = _require_active_stage(b)
+    if not stage.get("plan"):
+        raise ToolError("call plan_stage for this stage first")
+    return _build_stage_plan(b, stage)
+
+
+def _sync_plan_params(b: AgentBuild, block, params: dict[str, Any]) -> None:
+    """A fix to a planned step's params (set_params) goes into the stage
+    plan too, so the plan stays what was built -- and build_stage never
+    puts the old values back."""
+    ref = (block.provenance or {}).get("plan_step")
+    plan = (b.current_stage or {}).get("plan")
+    if not ref or not plan:
+        return
+    for step in plan["steps"]:
+        if step["ref"] == ref:
+            merged = {**(step.get("params") or {}), **params}
+            step["params"] = {k: v for k, v in merged.items() if v is not None}
+
+
+def _step_blocks(b: AgentBuild) -> dict[str, str]:
+    """Plan step ref -> the block this build created for it."""
+    out = {}
+    for bid in b.owned_blocks:
+        block = b.session.graph.blocks.get(bid)
+        ref = (block.provenance or {}).get("plan_step") if block is not None else None
+        if ref:
+            out[ref] = bid
+    return out
+
+
+def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool = False) -> dict[str, Any]:
+    """Build the stage's plan in order -- the same add_block / connect /
+    run_to a model would call, in one tool call instead of three or four
+    per step. Each step's outcome is logged as a `step` event and reported
+    back briefly; the first failure (or custom step) stops the run and
+    hands back to the model. `apply_params` (a re-plan): a built step whose
+    planned params changed gets them set."""
+    built = _step_blocks(b)
+    report: list[dict[str, Any]] = []
+
+    def stop(entry: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        report.append(entry)
+        b.log("step", ref=entry["ref"], block=entry.get("block"), status=entry["status"], error=entry.get("error"))
+        return {"ok": False, "stopped_at": entry["ref"], "steps": report, **extra}
+
+    for step in stage["plan"]["steps"]:
+        b.check_stop()
+        ref = step["ref"]
+        entry: dict[str, Any] = {"ref": ref}
+        bid = built.get(ref)
+        if bid is None:
+            if step["category"] == "custom":
+                entry["status"] = "needs_code"
+                return stop(
+                    entry,
+                    next=f"write it with add_custom_block (plan_step {ref!r}, lane {step['lane']!r}) and connect its "
+                    "inputs, then call build_stage to build the rest",
+                )
+            try:
+                added = add_block(b, step["category"], step["lane"], step.get("name"), step.get("params"), ref)
+                bid = built[ref] = added["block"]
+                entry["block"] = bid
+                if added.get("warning"):
+                    entry["warning"] = added["warning"]
+                for inp in step.get("inputs") or []:
+                    connect(b, built.get(inp["from"], inp["from"]), inp["from_port"], bid, inp["port"])
+            except ToolError as e:
+                entry.update(status="error", error=str(e))
+                return stop(entry, next="fix it (set_params / connect / delete_block), then call build_stage")
+        entry["block"] = bid
+        block = b.session.graph.blocks[bid]
+        changed = {k: v for k, v in (step.get("params") or {}).items() if block.params.get(k) != v}
+        if apply_params and changed and not block.is_custom:
+            # A re-plan changed a built step's params: apply them.
+            try:
+                set_params(b, bid, changed)
+            except ToolError as e:
+                entry.update(status="error", error=str(e))
+                return stop(entry, next="fix the step's params, then call plan_stage again")
+        if b.session.runner.status(bid) != "green":
+            try:
+                ran = run_to(b, bid)
+            except ToolError as e:
+                entry.update(status="error", error=str(e))
+                return stop(entry, next="fix it, then call build_stage")
+            entry["status"] = ran["status"]
+            if ran["status"] != "green":
+                entry.update({k: ran[k] for k in ("error", "upstream_failures", "must_ask_user") if k in ran})
+                return stop(entry, next="read the error, fix the step (set_params, or plan_stage with changed steps), then call build_stage")
+            entry["outputs"] = ran.get("outputs")
+        else:
+            entry["status"] = "green"
+        report.append(entry)
+        b.log("step", ref=ref, block=bid, status=entry["status"])
+    return {
+        "ok": True,
+        "steps": report,
+        "next": "check the results (get_output_summary for statistics tables), then complete_stage -- or finish on the last stage",
+    }
 
 
 @tool(
@@ -928,6 +1046,7 @@ def set_params(b: AgentBuild, block: str, params: dict[str, Any]) -> dict[str, A
         b.session.update_block(block, actor="agent", params=merged)
     b.record_approved_change(block, f"set params {sorted(params)}")
     b.failures.pop(block, None)
+    _sync_plan_params(b, blk, params)
     out = {"ok": True, "params": merged}
     warning = flag_suspicious(b, blk.category, merged, blk.name) if not blk.is_custom else None
     if warning:

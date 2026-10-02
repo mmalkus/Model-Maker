@@ -673,6 +673,11 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
     const steps = e.status === 'planned' ? ` (${e.steps} step${e.steps === 1 ? '' : 's'})` : ''
     return { text: `— ${verb} stage ${String(e.name)}${steps}`, tone: 'info' }
   }
+  if (e.kind === 'step')
+    return {
+      text: `${String(e.ref)} ${blockName(e.block)} → ${String(e.status)}${e.error ? `: ${String(e.error).slice(0, 300)}` : ''}`,
+      tone: e.status === 'green' ? 'ok' : 'err',
+    }
   if (e.kind === 'concern') return { text: `⚠ ${String(e.what)}`, tone: 'err' }
   if (e.kind === 'auto_continued') return { text: 'Going straight on to the next stage (building automatically)', tone: 'info' }
   if (e.kind !== 'tool') return null

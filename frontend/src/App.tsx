@@ -422,6 +422,7 @@ function AppInner() {
     if (!build || !BUILD_LOCKING.has(build.phase)) return null
     for (let i = build.events.length - 1; i >= 0; i--) {
       const e = build.events[i]
+      if (e.kind === 'step' && e.block) return String(e.block) // a step plan_stage/build_stage built
       if (e.kind === 'tool' && BUILD_BLOCK_TOOLS.has(String(e.tool))) {
         const args = (e.args ?? {}) as Record<string, unknown>
         const result = (e.result ?? {}) as Record<string, unknown>

@@ -128,16 +128,11 @@ def est_steps():
 
 
 def build_est(call):
-    planned = call("plan_stage", {"steps": est_steps()})
-    assert planned.get("ok"), planned
-    split = call("add_block", {"category": "train_test_split", "lane": "est", "name": "split", "params": {"seed": 1}, "plan_step": "s1"})["block"]
-    call("connect", {"from_block": ANCHOR[0], "from_port": "out", "to_block": split, "to_port": "df"})
-    assert call("run_to", {"block": split})["status"] == "green"
-    fit = call("add_block", {"category": "logistic_regression", "lane": "est", "params": {"features": FEATURES}, "plan_step": "s2"})["block"]
-    call("connect", {"from_block": split, "from_port": "train", "to_block": fit, "to_port": "df"})
-    ran = call("run_to", {"block": fit})
-    assert ran["status"] == "green", ran
-    BUILT.update(s1=split, s2=fit)
+    # plan_stage builds the plan too: add, wire and run each step in order.
+    built = call("plan_stage", {"steps": est_steps()})
+    assert built.get("ok"), built
+    assert [(st["ref"], st["status"]) for st in built["steps"]] == [("s1", "green"), ("s2", "green")]
+    BUILT.update({st["ref"]: st["block"] for st in built["steps"]})
     done = call("complete_stage", {"summary": "Split 70/30 and fitted the PD model on 5 drivers."})
     assert done.get("ok"), done
     return "Estimation done."
@@ -145,7 +140,7 @@ def build_est(call):
 
 def build_val(call):
     split, fit = BUILT["s1"], BUILT["s2"]
-    planned = call(
+    built = call(
         "plan_stage",
         {
             "steps": [
@@ -156,14 +151,8 @@ def build_val(call):
             ]
         },
     )
-    assert planned.get("ok"), planned
-    score = call("add_block", {"category": "predict", "lane": "val", "plan_step": "s3"})["block"]
-    call("connect", {"from_block": split, "from_port": "test", "to_block": score, "to_port": "df"})
-    call("connect", {"from_block": fit, "from_port": "model", "to_block": score, "to_port": "model"})
-    gini = call("add_block", {"category": "auc_gini", "lane": "val", "name": "test gini", "plan_step": "s4"})["block"]
-    call("connect", {"from_block": score, "from_port": "predictions", "to_block": gini, "to_port": "df"})
-    ran = call("run_to", {"block": gini})
-    assert ran["status"] == "green", ran
+    assert built.get("ok"), built
+    gini = built["steps"][-1]["block"]
     call("finish", {"report": "Built a logistic PD model.", "key_outputs": [{"block": gini, "port": "metric", "label": "Test Gini"}]})
     return "Done."
 
@@ -922,3 +911,76 @@ def test_a_suspicious_feature_in_a_model_is_flagged_by_the_app(prepared):
     assert "warning" in again and len(b.concerns) == 1
     assert b.call_tool("set_params", {"block": model["block"], "params": {"features": ["dti_woe"]}}).get("warning") is None
     assert any(e["kind"] == "concern" for e in b.events_since())
+
+
+
+# ---- the app builds the stage plan ----------------------------------------------------
+
+
+def test_plan_stage_build_stops_at_a_failure_and_build_stage_resumes(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    steps = [
+        {"ref": "est1", "category": "filter", "name": "bad filter", "params": {"expr": "no_such_col > 1"}, "why": "",
+         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]},
+        {"ref": "est2", "category": "select", "name": "pick", "params": {"cols": ["dti", "default_flag"]}, "why": "",
+         "inputs": [{"port": "df", "from": "est1", "from_port": "out"}]},
+    ]
+    r = b.call_tool("plan_stage", {"steps": steps})
+    assert r["ok"] is False and r["stopped_at"] == "est1" and r["steps"][0]["status"] == "red" and r["steps"][0]["error"]
+    assert len(b.owned_blocks) == 1  # est2 wasn't started
+
+    bad = r["steps"][0]["block"]
+    b.call_tool("set_params", {"block": bad, "params": {"expr": "dti > 1"}})
+    r = b.call_tool("build_stage", {})
+    assert r["ok"] and [st["status"] for st in r["steps"]] == ["green", "green"], r
+    assert r["steps"][1]["outputs"]["out"]["columns"] == ["dti", "default_flag"]
+    assert [e["status"] for e in b.events_since() if e["kind"] == "step"] == ["red", "green", "green"]
+
+    # Re-planning keeps built steps, applying changed params.
+    steps[1]["params"] = {"cols": ["dti", "credit_score", "default_flag"]}
+    r = b.call_tool("plan_stage", {"steps": steps})
+    assert r["ok"] and len(b.owned_blocks) == 2
+    assert session.graph.blocks[r["steps"][1]["block"]].params["cols"] == ["dti", "credit_score", "default_flag"]
+    assert "credit_score" in r["steps"][1]["outputs"]["out"]["columns"]
+
+
+def test_a_custom_step_hands_back_to_the_model(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    steps = [
+        {"ref": "est1", "category": "custom", "instruction": "loan to income", "name": "ratio", "why": "",
+         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]},
+        {"ref": "est2", "category": "select", "name": "pick", "params": {"cols": ["loan_to_income"]}, "why": "",
+         "inputs": [{"port": "df", "from": "est1", "from_port": "out"}]},
+    ]
+    r = b.call_tool("plan_stage", {"steps": steps})
+    assert r["stopped_at"] == "est1" and r["steps"][0]["status"] == "needs_code" and "add_custom_block" in r["next"]
+    code = ('def ratio(df, a_col: str = "loan_amount", b_col: str = "annual_income"):\n'
+            '    return df.with_columns((pl.col(a_col) / pl.col(b_col)).alias("loan_to_income"))\n')
+    custom = b.call_tool("add_custom_block", {"lane": "est", "name": "ratio", "code": code, "plan_step": "est1",
+                                              "metadata_transform": {"kind": "declared", "base": "df", "drops": [],
+                                                                     "adds": [{"name": "loan_to_income", "dtype": "Float64", "role": "feature"}]}})
+    b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": custom["block"], "to_port": "df"})
+    r = b.call_tool("build_stage", {})
+    assert r["ok"] and [st["status"] for st in r["steps"]] == ["green", "green"], r
+
+
+def test_plan_stage_can_just_plan(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    r = b.call_tool("plan_stage", {"build": False, "steps": [
+        {"ref": "est1", "category": "train_test_split", "name": "split", "why": "",
+         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
+    assert r["ok"] and "steps" not in r and not b.owned_blocks
+    assert b.call_tool("build_stage", {})["steps"][0]["status"] == "green"
+
+
+def test_the_build_prompt_carries_only_the_block_tags(prepared):
+    from modelmaker.agent import prompts
+
+    session, anchor = prepared
+    b = staged(session, anchor)
+    system = prompts.build_system(b)
+    assert "## Registry block tags" in system and "## Registry blocks\n" not in system
+    assert "## Registry blocks\n" in prompts.plan_system(b)

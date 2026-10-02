@@ -110,24 +110,30 @@ BUILD_INSTRUCTIONS = """## Your job now: build the approved outline, one stage a
 
 For the current stage:
 1. Look at what you're building on (get_output_summary on the earlier \
-stages' outputs) and call plan_stage with this stage's steps: category, \
-inputs wired from this stage's step refs or existing block ids (blocks built \
-in earlier stages included), key params (feature lists, bins, split \
-settings) chosen from the results so far, and a short `why` each.
-2. Then build the steps in order:
-   a. add_block{add_custom} with `plan_step` set to the step's ref \
-and the stage key as `lane`.
-   b. connect its inputs.
-   c. run_to it and check the result: the status, the columns and row count, \
-a metric in a sane range. Use get_output_summary when you need the statistics.
-   d. If it fails, read the error, fix it (set_params{update_tool}) \
-and run again. After 3 failures of one block, ask_user.
-3. When the stage is built and green, call complete_stage with a short \
+stages' outputs; describe_block_type for a block's params) and call \
+plan_stage with this stage's steps: category, inputs wired from this \
+stage's step refs or existing block ids (blocks built in earlier stages \
+included), key params (feature lists, bins, split settings) chosen from the \
+results so far, and a short `why` each. Step refs are unique across the \
+build: prefix them with the stage key (e.g. est1, est2).
+2. plan_stage builds the plan for you: it adds each step, wires it and runs \
+it, in order, and returns each step's status and outputs. Check them -- the \
+columns and row counts, a metric in a sane range; get_output_summary for \
+the statistics.
+3. If a step failed, read its error, fix it (set_params{update_tool}, or \
+plan_stage again with changed steps) and call build_stage to build the rest. \
+After 3 failures of one block, ask_user.{custom_steps}
+4. When the stage is built and green, call complete_stage with a short \
 Markdown summary: what you built, the headline numbers, and the decisions \
 you made from them. Then end your turn: the user reviews the stage, and you \
 are resumed with the next one (or with their changes to this one).
 
-Small deviations from the stage plan are fine -- record each with \
+Every tool call is a round trip that re-sends this whole conversation, so \
+don't spend calls on things you already know: plan a stage in one \
+plan_stage call, and skip get_graph unless you've lost track of block ids.
+
+Small deviations from the stage plan are fine -- add_block (with \
+plan_step), connect and run_to are there for them -- record each with \
 note_deviation. Structural changes to the approved outline (dropping a stage, \
 a different model family) and any change to a user block the outline didn't \
 list need ask_user.
@@ -143,6 +149,11 @@ and refreshes those metrics. End your turn after finish."""
 CUSTOM_ON = """- Prefer registry blocks. Only write a custom block when no registry block \
 does the job (e.g. a multi-column transformation, an out-of-time split by \
 date). """
+
+CUSTOM_STEPS = """
+A custom step stops the build there: write it with add_custom_block \
+(plan_step set to its ref, lane the stage key), connect its inputs, then \
+call build_stage."""
 
 CUSTOM_OFF = """- Custom blocks are turned off for this build: use registry blocks only. \
 If the goal needs something no registry block does, say so -- in \
@@ -218,6 +229,11 @@ def plan_feedback_prompt(feedback: str) -> str:
 
 
 def build_system(build: AgentBuild, compact: bool = False) -> str:
+    """The build always gets the compact catalogue (tags only): it's
+    re-sent on every one of the build's many round trips, and the build
+    looks blocks up as it plans each stage anyway. `compact` is kept for
+    the loops' sake (see plan_system, where the full list helps the
+    outline)."""
     if build.sample_rows_used:
         sample_note = f"a {build.sample_rows_used:,}-row sample of the data"
     else:
@@ -229,9 +245,9 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
             BUILD_INSTRUCTIONS.format(
                 sample_note=sample_note,
                 update_tool=" / update_custom_block" if build.options.allow_custom_blocks else "",
-                add_custom=" (or add_custom_block)" if build.options.allow_custom_blocks else "",
+                custom_steps=CUSTOM_STEPS if build.options.allow_custom_blocks else "",
             ),
-            _catalogue_context(compact),
+            _catalogue_context(compact=True),
         ]
     )
 
@@ -262,7 +278,7 @@ def stage_prompt(build: AgentBuild) -> str:
     )
     return (
         f"Stage {build.stage_index + 1} of {n}: {stage['name']} (key {stage['key']!r}).\n"
-        f"Goal: {stage['goal']}\n\nPlan it with plan_stage, then build it. {then}"
+        f"Goal: {stage['goal']}\n\nPlan it with plan_stage, which builds it, and check the results. {then}"
     )
 
 
