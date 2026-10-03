@@ -161,3 +161,28 @@ def test_leakage_among_the_users_blocks_is_a_concern(staged_build, prepared):  #
         {"ref": "u1", "category": "train_test_split", "name": "split", "why": "", "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
     assert r.get("ok"), r
     assert any("'my binning'" in c["what"] and "'my test bins'" in c["what"] for c in b.concerns)
+
+
+def test_an_outline_must_split_before_it_learns_from_the_target(prepared):  # noqa: F811
+    from modelmaker.agent.build import PLANNING
+    from tests.test_agent_build import building
+
+    session, anchor = prepared
+    b = building(session, anchor)
+    b.phase = PLANNING
+
+    def outline(*stages):
+        return {"plan": {"summary": "x", "stages": [
+            {"key": k, "name": k, "goal": "g", "blocks": blocks} for k, blocks in stages]}}
+
+    r = b.call_tool("submit_plan", outline(("uni", ["fit_binning"]), ("split", ["train_test_split"]), ("est", ["logistic_regression"])))
+    assert "stage uni: fit_binning learn(s) from the target" in r["error"] and "later stage (split)" in r["error"]
+    # Split first -- or in the same stage, or not at all -- is fine.
+    for ok in (
+        outline(("split", ["train_test_split"]), ("uni", ["fit_binning"])),
+        outline(("est", ["train_test_split", "fit_binning", "logistic_regression"])),
+        outline(("prep", ["select"]), ("uni", ["fit_binning"])),
+    ):
+        b.plan = None
+        b.phase = PLANNING
+        assert b.call_tool("submit_plan", ok).get("ok"), ok

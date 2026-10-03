@@ -584,6 +584,7 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
         lane = stage.get("lane")
         if lane is not None and lane not in graph.lanes:
             errors.append(f"{where}: lane {lane!r} isn't an existing lane id -- leave it out to create a new lane")
+    errors += leakage.outline_order_problems(stages, BLOCK_REGISTRY)
     for change in plan.get("changes_to_existing") or []:
         if change.get("block") not in graph.blocks:
             errors.append(f"changes_to_existing: no such block {change.get('block')!r}")

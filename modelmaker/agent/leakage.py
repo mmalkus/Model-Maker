@@ -38,6 +38,38 @@ SPLIT_SIDES = {
 }
 # Fit and apply in one block, on whatever data it's given.
 SELF_FITTING = frozenset({"woe_transform"})
+# Choose features from the target's statistics, without a fitted artifact.
+TARGET_SCREENS = frozenset({"iv_table", "stepwise_selection"})
+
+
+def learns_from_target(spec) -> bool:
+    """Whether a registry block learns from the target: it fits an artifact
+    from a dataframe (fit_binning, logistic_regression, calibrate_model...),
+    or screens features on it."""
+    if spec.category in SELF_FITTING or spec.category in TARGET_SCREENS:
+        return True
+    return any(p.type == "dataframe" for p in spec.inputs) and any(p.type in ARTIFACT_TYPES for p in spec.outputs)
+
+
+def outline_order_problems(stages: list[dict], registry) -> list[str]:
+    """An outline that learns from the target in a stage before the one
+    that splits the sample: its fits (and the features they pick) would
+    see the holdout rows. Stages read by their `blocks`."""
+    split_at = next(
+        (i for i, st in enumerate(stages) if any(c in SPLIT_SIDES for c in st.get("blocks") or [])), None
+    )
+    if split_at is None:
+        return []
+    out = []
+    for st in stages[:split_at]:
+        learners = [c for c in st.get("blocks") or [] if c in registry and learns_from_target(registry[c])]
+        if learners:
+            out.append(
+                f"stage {st.get('key')}: {', '.join(learners)} learn(s) from the target, but the sample is only split "
+                f"in a later stage ({stages[split_at].get('key')}) -- move the split before it, so the fits and the "
+                "features they pick see the development sample only"
+            )
+    return out
 
 Atom = frozenset  # of (key, value): ("src", block id) and (split id, side)
 

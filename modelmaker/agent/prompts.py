@@ -106,8 +106,8 @@ their docs when the stage starts.
 - Splits the sample (train/test, out-of-time) BEFORE any stage that learns \
 from the target -- univariate analysis and binning, feature selection, \
 estimation, calibration -- so each is fitted on the development sample only \
-and the holdout samples stay unseen. The app rejects applying a fit to a \
-holdout sample it was fitted on.
+and the holdout samples stay unseen. The app rejects an outline that doesn't, \
+and applying a fit to a holdout sample it was fitted on.
 - Does NOT list individual blocks, feature lists or bin settings: those \
 depend on results nobody has seen yet (e.g. which features survive the \
 univariate analysis), so the build plans each stage's blocks once the \
