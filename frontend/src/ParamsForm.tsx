@@ -113,6 +113,15 @@ export const PARAM_SPECS: Record<string, FieldSpec[]> = {
     { key: 'floor', label: 'Floor', kind: 'number', step: 0.05 },
     { key: 'cap', label: 'Cap', kind: 'number', step: 0.05 },
   ],
+  // performing_only (boolean) stays in the JSON textarea, see the note above fit_distribution.
+  forward_default_flag: [
+    { key: 'id_col', label: 'Account id column', kind: 'column' },
+    { key: 'date_col', label: 'Month column (date or YYYYMM)', kind: 'column' },
+    { key: 'default_col', label: 'Current default status column', kind: 'column' },
+    { key: 'horizon', label: 'Horizon (months)', kind: 'number' },
+    { key: 'flag_col', label: 'Flag column name (optional)', kind: 'text', placeholder: 'default_12m' },
+    { key: 'incomplete', label: 'Incomplete outcome windows', kind: 'select', options: ['drop', 'null'] },
+  ],
   compute_ccf: [
     { key: 'limit_col', label: 'Limit column', kind: 'column' },
     { key: 'balance_ref_col', label: 'Balance at reference date column', kind: 'column' },

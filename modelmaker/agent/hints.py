@@ -196,6 +196,29 @@ def _split(outputs: dict[str, Any]) -> list[str]:
     return hints
 
 
+def _forward_default_flag(outputs: dict[str, Any]) -> list[str]:
+    packet = outputs.get("out")
+    target = _target(packet)
+    if target is None:
+        return []
+    flag = packet.data[target]
+    if flag.len() == 0:
+        return ["No rows left -- check id_col/date_col/default_col and the horizon against the data's span."]
+    hints = []
+    nulls = flag.null_count()
+    if nulls:
+        hints.append(
+            f"{nulls} rows have an incomplete outcome window (null {target}) -- filter them out "
+            f"({target} IS NOT NULL) before fitting."
+        )
+    events = int(flag.sum() or 0)
+    if events < MIN_EVENTS:
+        hints.append(f"Only {events} defaults (< {MIN_EVENTS}) -- a PD model on this will be unstable.")
+    else:
+        hints.append(f"{target}: {events} defaults in {flag.len() - nulls} rows ({events / (flag.len() - nulls):.2%}).")
+    return hints
+
+
 def _computed_target(column: str) -> Callable[[dict[str, Any]], list[str]]:
     def hints(outputs: dict[str, Any]) -> list[str]:
         packet = outputs.get("out")
@@ -609,6 +632,7 @@ HINTS: dict[str, Callable[[dict[str, Any]], list[str]]] = {
     "data_quality_rules": _quality_rules,
     "train_test_split": _split,
     "time_split": _split,
+    "forward_default_flag": _forward_default_flag,
     "compute_lgd": _computed_target("lgd"),
     "compute_ccf": _computed_target("ccf"),
     # feature screens

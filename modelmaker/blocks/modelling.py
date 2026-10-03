@@ -9,6 +9,8 @@ never needs a special deserializer downstream.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import polars as pl
 
 from ..packet import ColumnMeta, ColumnRole
@@ -627,6 +629,113 @@ register_block(
         outputs=[PortSpec("out")],
         fn=woe_transform,
         metadata_transform=_woe_meta,
+    )
+)
+
+
+def forward_default_flag(
+    df: pl.DataFrame,
+    id_col: str,
+    date_col: str,
+    default_col: str,
+    horizon: int = 12,
+    flag_col: str | None = None,
+    performing_only: bool = True,
+    incomplete: str = "drop",
+) -> pl.DataFrame:
+    """Builds the PD target from a monthly account panel (one row per
+    account per month): `flag_col` (default "default_<horizon>m") is 1 when
+    the account is in default (`default_col` truthy) in any month after the
+    row's own, up to `horizon` calendar months ahead, else 0. Months are
+    calendar months, not rows, so a gap in an account's history doesn't
+    stretch the window.
+
+    `date_col` may be a Date/Datetime column, ISO date strings, or integer
+    YYYYMM periods. `id_col` + `date_col` must be unique.
+
+    `performing_only` (default on) keeps only rows not already in default
+    at observation -- the usual PD population. A window is incomplete when
+    the account's history ends before `horizon` months out with no default
+    seen (the most recent periods, or accounts that closed or were sold):
+    `incomplete` "drop" (default) removes those rows, "null" keeps them
+    with a null flag. A default found inside the window always counts, even
+    if the history ends right after it."""
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1 month")
+    if incomplete not in ("drop", "null"):
+        raise ValueError("incomplete must be 'drop' or 'null'")
+    flag_col = flag_col or f"default_{horizon}m"
+
+    dtype = df.schema[date_col]
+    if dtype.is_integer():
+        month = (pl.col(date_col) // 100) * 12 + pl.col(date_col) % 100
+    else:
+        if dtype == pl.Utf8:
+            d = pl.col(date_col).str.slice(0, 10).str.to_date("%Y-%m-%d", strict=False)
+        elif isinstance(dtype, pl.Datetime):
+            d = pl.col(date_col).dt.date()
+        else:
+            d = pl.col(date_col).cast(pl.Date)
+        month = d.dt.year().cast(pl.Int64) * 12 + d.dt.month().cast(pl.Int64)
+
+    work = df.with_row_index("__row").with_columns(
+        month.cast(pl.Int64).alias("__m"),
+        (pl.col(default_col).cast(pl.Float64).fill_null(0) > 0).alias("__d"),
+    )
+    if work.select(pl.struct(id_col, "__m").is_duplicated().any()).item():
+        raise ValueError(f"{id_col} + {date_col} is not unique: expected one row per account per month")
+
+    work = (
+        work.sort(id_col, "__m")
+        .with_columns(
+            # First default month strictly after this row's, per account.
+            pl.when(pl.col("__d")).then(pl.col("__m")).shift(-1).fill_null(strategy="backward").over(id_col).alias("__next"),
+            pl.col("__m").max().over(id_col).alias("__last"),
+        )
+        .with_columns((pl.col("__next") <= pl.col("__m") + horizon).fill_null(False).alias("__hit"))
+        .with_columns((pl.col("__hit") | (pl.col("__last") >= pl.col("__m") + horizon)).alias("__complete"))
+        .sort("__row")
+    )
+    if performing_only:
+        work = work.filter(~pl.col("__d"))
+    if incomplete == "drop":
+        work = work.filter(pl.col("__complete"))
+    flag = pl.when(pl.col("__complete")).then(pl.col("__hit").cast(pl.Int64)).otherwise(None)
+    return work.with_columns(flag.alias(flag_col)).drop("__row", "__m", "__d", "__next", "__last", "__hit", "__complete")
+
+
+def _forward_default_flag_meta(input_metas, outputs, params):
+    """The new flag is the modelling target. Target is a unique role, so an
+    input column already tagged target gives it up (to excluded), and so does
+    `default_col` itself -- the current-month default status is the outcome
+    the flag is built from, never a feature."""
+    (in_meta,) = input_metas.values()
+    (df,) = outputs.values()
+    flag_col = params.get("flag_col") or f"default_{params.get('horizon', 12)}m"
+    default_col = params.get("default_col")
+    result = {}
+    for name in df.columns:
+        if name == flag_col:
+            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=ColumnRole.TARGET)
+        elif name in in_meta:
+            meta = in_meta[name]
+            if name == default_col or meta.role == ColumnRole.TARGET:
+                meta = replace(meta, role=ColumnRole.EXCLUDED)
+            result[name] = meta
+    return {"out": result}
+
+
+register_block(
+    BlockSpec(
+        category="forward_default_flag",
+        block_type="standard",
+        group="modelling",
+        display_name="Forward default flag (PD target)",
+        tags=("data_prep", "pd"),
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=forward_default_flag,
+        metadata_transform=_forward_default_flag_meta,
     )
 )
 

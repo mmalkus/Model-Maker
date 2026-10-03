@@ -111,6 +111,14 @@ PARAM_SPECS: dict[str, list[FieldSpec]] = {
         FieldSpec("floor", "Floor", "number", step=0.05),
         FieldSpec("cap", "Cap", "number", step=0.05),
     ],
+    "forward_default_flag": [
+        FieldSpec("id_col", "Account id column", "column"),
+        FieldSpec("date_col", "Month column (date or YYYYMM)", "column"),
+        FieldSpec("default_col", "Current default status column", "column"),
+        FieldSpec("horizon", "Horizon (months)", "number"),
+        FieldSpec("flag_col", "Flag column name (optional)", "text", placeholder="default_12m"),
+        FieldSpec("incomplete", "Incomplete outcome windows", "select", options=("drop", "null",)),
+    ],
     "compute_ccf": [
         FieldSpec("limit_col", "Limit column", "column"),
         FieldSpec("balance_ref_col", "Balance at reference date column", "column"),

@@ -1,8 +1,9 @@
 """LGD/CCF/EAD and calibration additions: discounted recoveries, EAD from
 CCF, long-run averages, margin of conservatism, calibration to a central
 tendency, stepwise selection, coefficient statistics, master-scale grade
-statistics, and the realised LGD/CCF being tagged as the target -- plus an
-end-to-end LGD and CCF pipeline run through the engine and the compiler."""
+statistics, the realised LGD/CCF and the forward default flag being tagged
+as the target -- plus end-to-end LGD, CCF and default-flag pipelines run
+through the engine and the compiler."""
 
 from __future__ import annotations
 
@@ -16,12 +17,14 @@ import pytest
 
 from modelmaker.blocks.modelling import (
     _compute_lgd_meta,
+    _forward_default_flag_meta,
     _moc_meta,
     assign_rating_grade,
     calibrate_model,
     compute_ead,
     discount_recoveries,
     fit_master_scale,
+    forward_default_flag,
     lgd_regression,
     logistic_regression,
     long_run_average,
@@ -63,6 +66,96 @@ def test_discount_recoveries_discounts_and_totals_per_facility():
     # A per-facility rate column overrides the flat rate.
     by_rate = discount_recoveries(facilities, cashflows, "id", "default_date", "cf_date", "rec", rate_col="rate").sort("id")
     assert by_rate["pv_recovery"][0] == pytest.approx(200.0)
+
+
+def _panel():
+    # A: performing, defaults in month 5 (2024-05) and stays in default;
+    # B: performing throughout but its history stops at month 10, with a
+    # gap at month 4; C: one month only.
+    rows = [("A", m, int(m >= 5)) for m in range(1, 8)]
+    rows += [("B", m, 0) for m in range(1, 11) if m != 4]
+    rows += [("C", 1, 0)]
+    return pl.DataFrame(
+        {
+            "acct": [r[0] for r in rows],
+            "month": [date(2024, r[1], 1) for r in rows],
+            "in_default": [r[2] for r in rows],
+        }
+    )
+
+
+def test_forward_default_flag_looks_ahead_by_calendar_month():
+    out = forward_default_flag(_panel(), "acct", "month", "in_default", horizon=3, incomplete="null")
+    got = {(r["acct"], r["month"].month): r["default_3m"] for r in out.iter_rows(named=True)}
+    # A defaults in May: Feb-Apr flag (a default within 3 months), Jan is
+    # 4 months out; May onwards is already in default and dropped.
+    assert {k: v for k, v in got.items() if k[0] == "A"} == {("A", 1): 0, ("A", 2): 1, ("A", 3): 1, ("A", 4): 1}
+    # B's history ends in October: months up to July see a full window
+    # (the April gap doesn't stretch it), August onwards can't.
+    assert [got[("B", m)] for m in (1, 2, 3, 5, 6, 7)] == [0] * 6
+    assert [got[("B", m)] for m in (8, 9, 10)] == [None] * 3
+    assert got[("C", 1)] is None
+    # Original row order and columns are kept.
+    assert out.columns == ["acct", "month", "in_default", "default_3m"]
+    assert out["acct"].to_list() == ["A"] * 4 + ["B"] * 9 + ["C"]
+
+
+def test_forward_default_flag_drops_incomplete_and_keeps_defaulted_on_request():
+    panel = _panel()
+    dropped = forward_default_flag(panel, "acct", "month", "in_default", horizon=3)
+    assert dropped["default_3m"].null_count() == 0
+    assert dropped.height == 4 + 6  # A's performing months, B's complete ones
+
+    every = forward_default_flag(panel, "acct", "month", "in_default", horizon=3, performing_only=False, flag_col="y")
+    # A's own default months: May/Jun see the following months' default,
+    # July is dropped: nothing is observed after it.
+    a = every.filter(pl.col("acct") == "A")
+    assert a["y"].to_list() == [0, 1, 1, 1, 1, 1]
+
+
+def test_forward_default_flag_date_formats_and_duplicates():
+    panel = _panel()
+    as_text = panel.with_columns(pl.col("month").cast(pl.Utf8))
+    as_yyyymm = panel.with_columns((pl.col("month").dt.year() * 100 + pl.col("month").dt.month()).alias("month"))
+    expected = forward_default_flag(panel, "acct", "month", "in_default", horizon=3)["default_3m"].to_list()
+    for variant in (as_text, as_yyyymm):
+        assert forward_default_flag(variant, "acct", "month", "in_default", horizon=3)["default_3m"].to_list() == expected
+    # Across a year end: Dec 2023 -> Feb 2024 is 2 months.
+    yearend = pl.DataFrame({"acct": ["X"] * 3, "month": [202312, 202401, 202402], "in_default": [0, 0, 1]})
+    assert forward_default_flag(yearend, "acct", "month", "in_default", horizon=2)["default_2m"].to_list() == [1, 1]
+    with pytest.raises(ValueError, match="not unique"):
+        forward_default_flag(pl.concat([panel, panel.head(1)]), "acct", "month", "in_default")
+
+
+def test_forward_default_flag_is_the_target():
+    out = forward_default_flag(_panel(), "acct", "month", "in_default", horizon=3)
+    in_meta = {
+        "acct": ColumnMeta("String", role=ColumnRole.ID),
+        "month": ColumnMeta("Date", role=ColumnRole.DATE),
+        "in_default": ColumnMeta("Int64", role=ColumnRole.TARGET),
+    }
+    params = {"default_col": "in_default", "horizon": 3}
+    meta = _forward_default_flag_meta({"df": in_meta}, {"out": out}, params)["out"]
+    assert meta["default_3m"].role == ColumnRole.TARGET
+    assert meta["in_default"].role == ColumnRole.EXCLUDED
+    assert meta["acct"].role == ColumnRole.ID and meta["month"].role == ColumnRole.DATE
+
+
+def test_forward_default_flag_pipeline_compiled(tmp_path):
+    csv = tmp_path / "panel.csv"
+    _panel().write_csv(csv)
+    B = make_block
+    blocks = {
+        "raw": B("raw", "read_csv", params={"path": str(csv)}),
+        "flag": B("flag", "forward_default_flag", params={"id_col": "acct", "date_col": "month", "default_col": "in_default", "horizon": 3}),
+    }
+    graph, runner = _run(blocks, [("raw", "out", "flag", "df")])
+    out = _output(runner, "flag", "out")
+    assert out["default_3m"].to_list() == [0, 1, 1, 1] + [0] * 6
+    ns: dict = {}
+    exec(compile(compile_graph(graph, runner=runner), "<compiled>", "exec"), ns)
+    compiled = next(v for k, v in ns.items() if k.startswith("flag") and isinstance(v, pl.DataFrame))
+    assert compiled.to_dicts() == out.to_dicts()
 
 
 def test_compute_ead_and_lgd_target_role():
