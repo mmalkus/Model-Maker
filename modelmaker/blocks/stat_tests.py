@@ -513,6 +513,7 @@ register_block(
         tags=("performance", "stability"),
         inputs=[PortSpec("sample_1"), PortSpec("sample_2", required=False), PortSpec("sample_3", required=False)],
         outputs=[PortSpec("table")],
+        aggregate_outputs=("table",),
         fn=compare_samples,
         metadata_transform=infer_dtypes,
     )

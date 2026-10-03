@@ -213,6 +213,7 @@ register_block(
         tags=("feature_selection", "stability"),
         inputs=[PortSpec("expected"), PortSpec("actual")],
         outputs=[PortSpec("table")],
+        aggregate_outputs=("table",),
         fn=characteristic_stability,
         metadata_transform=infer_dtypes,
     )
@@ -263,6 +264,7 @@ register_block(
         tags=("data_quality", "stability", "pd"),
         inputs=[PortSpec("df")],
         outputs=[PortSpec("table")],
+        aggregate_outputs=("table",),
         fn=target_trend,
         metadata_transform=infer_dtypes,
     )

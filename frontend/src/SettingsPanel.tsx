@@ -268,6 +268,21 @@ export function SettingsPanel({
                 disabled={busy}
                 onSave={(v) => update({ agent_build: v })}
               />
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={settings.agent.small_context ?? false}
+                  disabled={busy}
+                  onChange={(e) => update({ agent_small_context: e.target.checked })}
+                />
+                <span>
+                  Small context
+                  <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+                    Start each build stage in a fresh conversation, carrying only the outline, what's built and the
+                    decisions so far. For models with a small context window (e.g. local models).
+                  </div>
+                </span>
+              </label>
             </div>
           )}
         </>

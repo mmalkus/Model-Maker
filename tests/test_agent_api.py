@@ -34,11 +34,7 @@ def _plan(anchor):
             {
                 "plan": {
                     "summary": "split",
-                    "lanes": [{"key": "est", "name": "Estimation"}],
-                    "steps": [
-                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                         "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
-                    ],
+                    "stages": [{"key": "est", "name": "Estimation", "goal": "70/30 holdout split of the anchor", "blocks": ["train_test_split"]}],
                 }
             },
         )
@@ -93,7 +89,7 @@ def test_build_endpoints_and_canvas_lock(client):
     started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
     assert started.status_code == 200, started.text
     b = _wait(c, "awaiting_approval")
-    assert b["plan"]["layout"]["s1"]["y"] >= 0
+    assert b["plan"]["lane_layout"]["est"]["name"] == "Estimation"
     # Nothing's locked while planning/reviewing.
     assert c.post("/api/blocks", json={"category": "filter", "params": {"expr": "dti > 0"}}).status_code == 200
 
@@ -217,7 +213,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
 
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "modelmaker.agent.mcp_server", "--url", live_server, "--token", api.AGENT.token],
+        args=["-m", "modelmaker.agent.mcp_server", f"--url={live_server}", f"--token={api.AGENT.token}"],
         env={"PYTHONPATH": str(ROOT)},
     )
 
@@ -231,9 +227,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
                 bad = await session.call_tool("add_block", {"category": "filter", "lane": "x"})
                 plan = await session.call_tool(
                     "submit_plan",
-                    {"plan": {"summary": "s", "lanes": [{"key": "est", "name": "Estimation"}], "steps": [
-                        {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-                         "inputs": [{"port": "df", "from": c.anchor, "from_port": "out"}], "why": "x"}]}},
+                    {"plan": {"summary": "s", "stages": [{"key": "est", "name": "Estimation", "goal": "split", "blocks": ["train_test_split"]}]}},
                 )
                 return tools, graph, summary, bad, plan
 
@@ -265,3 +259,28 @@ def test_auto_build_and_build_log_endpoints(client):
     assert any(e["kind"] == "auto_approved" for e in log["events"])
     assert c.get("/api/agent/builds/build_00000000/log").status_code == 404
     assert c.get("/api/agent/builds/..%2Fsecrets/log").status_code in (400, 404)
+
+
+def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
+    c = client
+    c.scripts.update({"plan": [_plan(c.anchor)], "build": [_ask]})
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "allow_custom_blocks": False})
+    assert started.json()["options"]["allow_custom_blocks"] is False
+    _wait(c, "awaiting_approval")
+    c.post("/api/agent/builds/current/approve")
+    _wait(c, "awaiting_input")
+    api.AGENT.build.set_phase("building")  # as if the model were mid-turn
+    tools = {t["name"] for t in c.get("/api/agent/mcp/tools", headers={"X-Agent-Token": api.AGENT.token}).json()}
+    assert "add_block" in tools and "add_custom_block" not in tools
+    c.post("/api/agent/builds/current/stop")
+
+
+def test_small_context_is_a_setting_builds_pick_up(client):
+    c = client
+    assert c.get("/api/llm/settings").json()["agent"]["small_context"] is False
+    assert c.put("/api/llm/settings", json={"agent_small_context": True}).json()["agent"]["small_context"] is True
+    # Untouched by other updates.
+    assert c.put("/api/llm/settings", json={"agent_plan": {"model": "m"}}).json()["agent"]["small_context"] is True
+    b = c.post("/api/agent/builds", json={"goal": "x", "anchors": [c.anchor]}).json()
+    assert b["options"]["small_context"] is True
+    c.post("/api/agent/stop")

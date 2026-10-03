@@ -89,11 +89,22 @@ class BlockSpec:
     # as an ordinary checkpoint reading a materialized DataFrame from cache,
     # exactly as before.
     lazy_sink_fn: BlockFn | None = None
+    # Output ports that are statistics tables: one row per feature, bin,
+    # grade, period, sample or quantile -- never one per record. An AI
+    # build may read these tables' rows (agent/tools.summarize_value);
+    # every other dataframe reaches it as schema + summary statistics only.
+    # Declared here, on the registry spec, so a block instance (or custom
+    # code) can never claim it for itself.
+    aggregate_outputs: tuple[str, ...] = ()
 
 
 BLOCK_REGISTRY: dict[str, BlockSpec] = {}
 
 
 def register_block(spec: BlockSpec) -> BlockSpec:
+    frames = {p.name for p in spec.outputs if p.type == "dataframe"}
+    unknown = set(spec.aggregate_outputs) - frames
+    if unknown:
+        raise ValueError(f"{spec.category}: aggregate_outputs {sorted(unknown)} aren't dataframe outputs")
     BLOCK_REGISTRY[spec.category] = spec
     return spec

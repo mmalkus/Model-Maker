@@ -102,6 +102,7 @@ register_block(
         tags=("distributions",),
         inputs=[PortSpec("df")],
         outputs=[PortSpec("distribution", type="distribution"), PortSpec("fit_table")],
+        aggregate_outputs=("fit_table",),
         fn=fit_distribution,
         metadata_transform=infer_dtypes,
     )
@@ -285,6 +286,7 @@ register_block(
             PortSpec("quantile_table"),
             PortSpec("paths", required=False),
         ],
+        aggregate_outputs=("quantile_table",),
         fn=simulate_op_risk_lda,
         metadata_transform=infer_dtypes,
     )
@@ -330,6 +332,7 @@ register_block(
         tags=("capital_simulation", "distributions"),
         inputs=[PortSpec("df")],
         outputs=[PortSpec("simulation_result", type="simulation_result"), PortSpec("quantile_table")],
+        aggregate_outputs=("quantile_table",),
         fn=risk_measures,
         metadata_transform=infer_dtypes,
     )
@@ -420,6 +423,7 @@ register_block(
             PortSpec("quantile_table"),
             PortSpec("contributions"),
         ],
+        aggregate_outputs=("quantile_table", "contributions"),
         fn=aggregate_simulation,
         metadata_transform=infer_dtypes,
     )
@@ -608,6 +612,7 @@ register_block(
             PortSpec("quantile_table"),
             PortSpec("contributions"),
         ],
+        aggregate_outputs=("quantile_table",),
         fn=simulate_credit_portfolio,
         metadata_transform=infer_dtypes,
     )

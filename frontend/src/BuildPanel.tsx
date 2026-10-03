@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
-import type { BuildEvent, BuildOut, BuildPlan, GraphOut, LLMSettingsOut } from './types'
+import type { BuildEvent, BuildOut, BuildPlan, BuildStage, GraphOut, LLMSettingsOut } from './types'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
-// steer the plan (shown as ghost blocks on the canvas by App), watch the
-// build, answer its questions, read its report.
+// steer the outline plan (its new lanes shown as ghost bands on the canvas
+// by App), watch each stage being planned (as ghost blocks) and built,
+// review each stage, answer the build's questions, read its report.
 
 const TERMINAL = new Set(['done', 'done_with_errors', 'stopped', 'failed', 'discarded'])
 const WORKING = new Set(['planning', 'building', 'final_run'])
@@ -17,6 +18,7 @@ const PHASE_LABEL: Record<string, string> = {
   awaiting_approval: 'Plan ready for review',
   building: 'Building…',
   awaiting_input: 'Waiting for your answer',
+  awaiting_stage_review: 'Stage ready for review',
   final_run: 'Running on the full data…',
   done: 'Done',
   done_with_errors: 'Done, with errors',
@@ -126,6 +128,8 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
           <Header build={build} busy={busy} />
           {build.phase === 'preflight' && <Preflight build={build} graph={graph} act={act} />}
           {build.phase === 'awaiting_approval' && <PlanReview build={build} graph={graph} act={act} busy={busy} />}
+          {build.stages?.length > 0 && <Stages build={build} graph={graph} />}
+          {build.phase === 'awaiting_stage_review' && <StageReview build={build} act={act} busy={busy} />}
           {build.phase === 'awaiting_input' && <Question build={build} act={act} busy={busy} />}
           <div style={{ display: 'flex', gap: 6, margin: '4px 0 8px' }}>
             {build.phase !== 'preflight' && build.phase !== 'awaiting_approval' && (
@@ -168,6 +172,7 @@ function StartForm({
   const [buildLlm, setBuildLlm] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
   const [fullRun, setFullRun] = useState(true)
   const [autoBuild, setAutoBuild] = useState(false)
+  const [allowCustom, setAllowCustom] = useState(true)
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
@@ -195,10 +200,10 @@ function StartForm({
 
       <label
         style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}
-        title="Skip the plan review: the AI starts building as soon as its plan is ready (it still stops to ask if the plan has open questions)"
+        title="Skip the reviews: the AI starts building as soon as its plan is ready, and goes straight on from one stage to the next (it still stops to ask if the plan has open questions)"
       >
         <input type="checkbox" checked={autoBuild} onChange={(e) => setAutoBuild(e.target.checked)} />
-        Build automatically once the plan is ready
+        Build automatically, without stopping for reviews
       </label>
 
       <details style={{ marginTop: 8 }}>
@@ -208,6 +213,13 @@ function StartForm({
         <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           <input type="checkbox" checked={fullRun} onChange={(e) => setFullRun(e.target.checked)} />
           Finish with a run on the full data
+        </label>
+        <label
+          style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
+          title="Let the AI write its own polars code when no registry block does the job. Off: registry blocks only -- it asks you if the goal needs something they can't do."
+        >
+          <input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} />
+          Allow custom code blocks
         </label>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           Build on a sample:
@@ -235,6 +247,7 @@ function StartForm({
             final_full_run: fullRun,
             sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
             auto_build: autoBuild,
+            allow_custom_blocks: allowCustom,
           })
         }
       >
@@ -242,8 +255,8 @@ function StartForm({
       </button>
       <div style={{ color: '#6b7280', marginTop: 6 }}>
         {autoBuild
-          ? 'The AI plans, then builds straight away -- Stop or Discard at any time, and one Undo reverts the build.'
-          : 'The AI plans first and changes nothing until you approve.'}{' '}
+          ? 'The AI outlines the stages, then builds them all straight away -- Stop or Discard at any time, and one Undo reverts the build.'
+          : 'The AI outlines the stages first and changes nothing until you approve. It then plans and builds one stage at a time, and stops for you to review each.'}{' '}
         It only sees column names, roles and summary statistics -- never rows.
       </div>
     </div>
@@ -302,6 +315,8 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
         {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
         {build.options.auto_build ? ' · builds automatically' : ''}
+        {build.options.allow_custom_blocks === false ? ' · registry blocks only' : ''}
+        {build.options.small_context ? ' · small context' : ''}
       </div>
     </div>
   )
@@ -366,7 +381,7 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
         onChange={(e) => setFeedback(e.target.value)}
         rows={3}
         style={{ width: '100%', boxSizing: 'border-box' }}
-        placeholder="e.g. use a 70/30 split instead of out-of-time; drop the correlation step"
+        placeholder="e.g. use a 70/30 split instead of out-of-time; add a calibration stage"
       />
       <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
         <button
@@ -382,7 +397,7 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
           className="brand-primary"
           disabled={busy || !plan || (plan.questions?.length ?? 0) > 0}
           onClick={() => act(() => api.agentAction('approve'))}
-          title="Let the AI build this plan"
+          title="Let the AI build this outline, one stage at a time"
         >
           Approve and build
         </button>
@@ -392,10 +407,6 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
 }
 
 function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
-  const laneName = (key: string) => plan.lanes?.find((l) => l.key === key)?.name ?? graph.lanes[key]?.name ?? key
-  const byLane = new Map<string, typeof plan.steps>()
-  for (const s of plan.steps) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s])
-  const refName = (ref: string) => plan.steps.find((s) => s.ref === ref)?.name ?? graph.blocks[ref]?.name ?? ref
   return (
     <div>
       <div style={box}>{plan.summary}</div>
@@ -411,30 +422,21 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
           <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.assumptions.map((a, i) => <li key={i}>{a}</li>)}</ul>
         </div>
       )}
-      {[...byLane.entries()].map(([lane, steps]) => (
-        <div key={lane} style={box}>
-          <div style={label}>{laneName(lane)}</div>
-          {steps.map((s) => (
-            <div key={s.ref} style={{ marginBottom: 6 }}>
-              <div>
-                <span style={{ color: '#7c3aed' }}>{s.ref}</span> <strong>{s.name}</strong>{' '}
-                <span style={{ color: '#6b7280' }}>({s.category})</span>
-              </div>
-              {s.inputs.length > 0 && (
-                <div style={{ color: '#6b7280' }}>from {s.inputs.map((i) => `${refName(i.from)}.${i.from_port}`).join(', ')}</div>
-              )}
-              {s.params && Object.keys(s.params).length > 0 && (
-                <div style={{ color: '#4b5563', fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-word' }}>
-                  {Object.entries(s.params)
-                    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-                    .join(' ')}
-                </div>
-              )}
-              <div style={{ color: '#6b7280', fontStyle: 'italic' }}>{s.instruction ?? s.why}</div>
-            </div>
+      <div style={box}>
+        <div style={label}>Stages</div>
+        <ol style={{ margin: 0, paddingLeft: 18 }}>
+          {plan.stages.map((st) => (
+            <li key={st.key} style={{ marginBottom: 6 }}>
+              <strong>{st.name}</strong>
+              {st.lane && <span style={{ color: '#6b7280' }}> (into lane {graph.lanes[st.lane]?.name ?? st.lane})</span>}
+              <div style={{ color: '#4b5563', whiteSpace: 'pre-wrap' }}>{st.goal}</div>
+            </li>
           ))}
+        </ol>
+        <div style={{ color: '#6b7280', marginTop: 4 }}>
+          The AI picks each stage's blocks once the stages before it have run, so it can use what they found.
         </div>
-      ))}
+      </div>
       {!!plan.changes_to_existing?.length && (
         <div style={{ ...box, borderColor: '#c4b5fd' }}>
           <div style={label}>Changes to your existing blocks</div>
@@ -445,6 +447,107 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+const STAGE_MARK: Record<BuildStage['status'], { mark: string; color: string }> = {
+  done: { mark: '✓', color: '#15803d' },
+  active: { mark: '▶', color: '#7c3aed' },
+  pending: { mark: '○', color: '#9ca3af' },
+  skipped: { mark: '–', color: '#9ca3af' },
+}
+
+// Progress through the outline: each stage's status, the current stage's
+// planned steps (ticked off as they're built), and earlier stages' summaries.
+function Stages({ build, graph }: { build: BuildOut; graph: GraphOut }) {
+  const built = new Set(
+    Object.values(graph.blocks)
+      .filter((b) => b.provenance?.build_id === build.id && b.provenance.plan_step)
+      .map((b) => b.provenance!.plan_step!),
+  )
+  return (
+    <div style={box}>
+      <div style={label}>
+        Stage {Math.min(build.stage_index + 1, build.stages.length)} of {build.stages.length}
+      </div>
+      {build.stages.map((st, i) => {
+        const { mark, color } = STAGE_MARK[st.status]
+        const current = i === build.stage_index
+        return (
+          <div key={st.key} style={{ marginBottom: 4 }}>
+            <div style={{ color: st.status === 'pending' || st.status === 'skipped' ? '#6b7280' : '#1f2937' }}>
+              <span style={{ color, display: 'inline-block', width: 14 }}>{mark}</span>
+              <strong>{st.name}</strong>
+              {st.status === 'skipped' && <span style={{ color: '#6b7280' }}> (dropped)</span>}
+            </div>
+            {current && st.status === 'active' && (
+              <div style={{ marginLeft: 14 }}>
+                <div style={{ color: '#4b5563' }}>{st.goal}</div>
+                {st.plan ? (
+                  st.plan.steps.map((s) => (
+                    <div key={s.ref} style={{ color: built.has(s.ref) ? '#15803d' : '#6b7280' }}>
+                      {built.has(s.ref) ? '✓' : '·'} <span style={{ color: '#7c3aed' }}>{s.ref}</span> {s.name}{' '}
+                      <span style={{ color: '#9ca3af' }}>({s.category})</span>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ color: '#6b7280', fontStyle: 'italic' }}>Planning this stage's blocks…</div>
+                )}
+              </div>
+            )}
+            {st.summary && !(current && build.phase === 'awaiting_stage_review') && (
+              <details style={{ marginLeft: 14, color: '#4b5563' }}>
+                <summary style={{ cursor: 'pointer' }}>Summary</summary>
+                <div style={{ whiteSpace: 'pre-wrap' }}>{st.summary}</div>
+              </details>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// After each stage but the last: what it built and found, then go on to
+// the next stage -- or send changes to this one.
+function StageReview({ build, act, busy }: { build: BuildOut; act: Act; busy: boolean }) {
+  const [feedback, setFeedback] = useState('')
+  const stage = build.stages[build.stage_index]
+  const next = build.stages[build.stage_index + 1]
+  return (
+    <div>
+      <div style={{ ...box, borderColor: '#bbf7d0', background: '#f0fdf4' }}>
+        <div style={label}>{stage.name} is built</div>
+        <div style={{ whiteSpace: 'pre-wrap' }}>{stage.summary}</div>
+      </div>
+      <Concerns concerns={(build.concerns ?? []).filter((c) => c.stage === stage.key)} />
+      {next && (
+        <div style={{ color: '#4b5563', marginBottom: 6 }}>
+          Next: <strong>{next.name}</strong> -- {next.goal}
+        </div>
+      )}
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        rows={3}
+        style={{ width: '100%', boxSizing: 'border-box' }}
+        placeholder={`Changes to ${stage.name} (optional), e.g. drop features with IV below 0.05`}
+      />
+      <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
+        <button
+          disabled={busy || !feedback.trim()}
+          onClick={() => {
+            act(() => api.agentFeedback(feedback))
+            setFeedback('')
+          }}
+        >
+          Send changes
+        </button>
+        <button className="brand-primary" disabled={busy} onClick={() => act(() => api.agentAction('approve'))}>
+          Continue{next ? ` to ${next.name}` : ''}
+        </button>
+      </div>
     </div>
   )
 }
@@ -470,6 +573,20 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   )
 }
 
+// What the app itself flagged (see AgentBuild.concerns) -- not the model's
+// account, so it shows whether or not the model mentions it.
+function Concerns({ concerns }: { concerns: BuildOut['concerns'] }) {
+  if (!concerns.length) return null
+  return (
+    <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', color: '#92400e' }}>
+      <div style={{ ...label, color: '#92400e' }}>Flagged by the app</div>
+      {concerns.map((c, i) => (
+        <div key={i}>⚠ {c.what}</div>
+      ))}
+    </div>
+  )
+}
+
 // Only a build that ran to the end writes a report (see controller._attach_report).
 const REPORTED = new Set(['done', 'done_with_errors'])
 
@@ -489,6 +606,11 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
               <code style={{ wordBreak: 'break-word' }}>{JSON.stringify(r.value ?? r.error ?? r.row_count)}</code>
             </div>
           ))}
+        </div>
+      )}
+      {(build.concerns ?? []).length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <Concerns concerns={build.concerns} />
         </div>
       )}
       {build.report && <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto' }}>{build.report}</div>}
@@ -547,18 +669,32 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
   if (e.kind === 'error') return { text: String(e.message), tone: 'err' }
   if (e.kind === 'sample_mode') return { text: e.rows ? `Sample mode: ${Number(e.rows).toLocaleString()} rows` : 'Back to full data', tone: 'info' }
   if (e.kind === 'approved_change') return { text: `Changed your block ${blockName(e.block)}: ${e.change}`, tone: 'info' }
+  if (e.kind === 'stage') {
+    const verb = { started: 'Started', planned: 'Planned', done: 'Finished', skipped: 'Dropped' }[String(e.status)] ?? String(e.status)
+    const steps = e.status === 'planned' ? ` (${e.steps} step${e.steps === 1 ? '' : 's'})` : ''
+    return { text: `— ${verb} stage ${String(e.name)}${steps}`, tone: 'info' }
+  }
+  if (e.kind === 'step')
+    return {
+      text: `${String(e.ref)} ${blockName(e.block)} → ${String(e.status)}${e.error ? `: ${String(e.error).slice(0, 300)}` : ''}`,
+      tone: e.status === 'green' ? 'ok' : 'err',
+    }
+  if (e.kind === 'concern') return { text: `⚠ ${String(e.what)}`, tone: 'err' }
+  if (e.kind === 'auto_continued') return { text: 'Going straight on to the next stage (building automatically)', tone: 'info' }
   if (e.kind !== 'tool') return null
   const args = (e.args ?? {}) as Record<string, unknown>
   const result = (e.result ?? {}) as Record<string, unknown>
   const tool = String(e.tool)
   const target =
-    tool === 'add_block'
-      ? String(args.category)
-      : tool === 'add_custom_block'
-        ? `custom: ${args.name}`
-        : tool === 'connect'
-          ? `${blockName(args.from_block)}.${args.from_port} → ${blockName(args.to_block)}.${args.to_port}`
-          : blockName(args.block ?? args.category ?? '')
+    tool === 'plan_stage' || tool === 'complete_stage'
+      ? ''
+      : tool === 'add_block'
+        ? String(args.category)
+        : tool === 'add_custom_block'
+          ? `custom: ${args.name}`
+          : tool === 'connect'
+            ? `${blockName(args.from_block)}.${args.from_port} → ${blockName(args.to_block)}.${args.to_port}`
+            : blockName(args.block ?? args.category ?? '')
   let text = `${tool}${target ? ` ${target}` : ''}`
   if (tool === 'run_to' && result.status) text += ` → ${result.status}`
   if (!e.ok) text += `: ${String(result.error ?? '').slice(0, 300)}`

@@ -1,5 +1,6 @@
 """Drives one AI build through its lifecycle (see /agent-builder-proposal.md
-§2-§4, §7): preflight -> planning -> approval -> building (-> questions)
+§2-§4, §7): preflight -> planning an outline of stages -> approval ->
+for each stage: plan its blocks, build, check (-> questions), stage review
 -> final full-data run -> report. The model's turns run on a worker
 thread; everything the API calls here returns promptly, and the frontend
 polls the build's state."""
@@ -17,6 +18,7 @@ from . import prompts
 from .build import (
     AWAITING_APPROVAL,
     AWAITING_INPUT,
+    AWAITING_STAGE_REVIEW,
     BUILDING,
     DISCARDED,
     DONE,
@@ -26,6 +28,9 @@ from .build import (
     LOCKING_PHASES,
     PLANNING,
     PREFLIGHT,
+    STAGE_ACTIVE,
+    STAGE_DONE,
+    STAGE_PENDING,
     STOPPED,
     TERMINAL_PHASES,
     AgentBuild,
@@ -158,6 +163,9 @@ class BuildController:
             raise BuildError(f"the build is {b.phase}; this needs {' or '.join(phases)}")
         return b
 
+    def _tools(self, phase: str):
+        return tools_for_phase(phase, allow_custom=self.build.options.allow_custom_blocks)
+
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
@@ -289,7 +297,7 @@ class BuildController:
             # ends the build as failed with its message, via _spawn.
             self._plan_loop = self.loop_factory(b.plan_llm, "plan")
             _record_resolved_model(b.plan_llm, self._plan_loop)
-            outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), tools_for_phase(PLANNING))
+            outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), self._tools(PLANNING))
             self._after_plan_turn(outcome)
 
         self._spawn(work)
@@ -321,9 +329,10 @@ class BuildController:
             self._begin_build()()
 
     def feedback(self, text: str) -> AgentBuild:
-        """Plan feedback (re-plan), or the answer to an ask_user question."""
+        """Plan feedback (re-plan), changes to the stage under review, or the
+        answer to an ask_user question."""
         with self._lock:
-            b = self._require(AWAITING_APPROVAL, AWAITING_INPUT)
+            b = self._require(AWAITING_APPROVAL, AWAITING_INPUT, AWAITING_STAGE_REVIEW)
             self._require_idle()
             if not text.strip():
                 raise BuildError("write some feedback")
@@ -335,26 +344,52 @@ class BuildController:
                 b.log("user", text=text)
 
                 def replan() -> None:
-                    outcome = self._plan_loop.resume(b, prompts.plan_feedback_prompt(text), tools_for_phase(PLANNING))
+                    outcome = self._plan_loop.resume(b, prompts.plan_feedback_prompt(text), self._tools(PLANNING))
                     self._after_plan_turn(outcome)
 
                 self._spawn(replan)
+            elif b.phase == AWAITING_STAGE_REVIEW:
+                # Back into the stage the user just reviewed.
+                stage = b.current_stage
+                stage["status"] = STAGE_ACTIVE
+                b.user_inputs.append({"stage": stage["key"], "text": text})
+                b.set_phase(BUILDING)
+                b.log("user", text=text)
+
+                def revise() -> None:
+                    outcome = self._build_loop.resume(b, prompts.stage_feedback_prompt(b, text), self._tools(BUILDING))
+                    self._after_build_turn(outcome)
+
+                self._spawn(revise)
             else:
+                stage = b.current_stage
+                b.user_inputs.append(
+                    {"stage": stage["key"] if stage else None, "question": b.last_question, "text": text}
+                    if b.last_question
+                    else {"stage": stage["key"] if stage else None, "text": text}
+                )
+                b.last_question = None
                 b.pending_question = None
                 b.set_phase(BUILDING)
                 b.log("user", text=text)
 
                 def answer() -> None:
-                    outcome = self._build_loop.resume(b, prompts.answer_prompt(text), tools_for_phase(BUILDING))
+                    outcome = self._build_loop.resume(b, prompts.answer_prompt(text), self._tools(BUILDING))
                     self._after_build_turn(outcome)
 
                 self._spawn(answer)
             return b
 
     def approve(self) -> AgentBuild:
+        """Approve the outline and start building -- or, after a stage
+        review, go on to the next stage."""
         with self._lock:
-            b = self._require(AWAITING_APPROVAL)
+            b = self._require(AWAITING_APPROVAL, AWAITING_STAGE_REVIEW)
             self._require_idle()
+            if b.phase == AWAITING_STAGE_REVIEW:
+                b.set_phase(BUILDING)
+                self._spawn(self._next_stage)
+                return b
             if b.plan is None:
                 raise BuildError("there's no plan to approve -- send feedback to have the AI plan again")
             if b.plan.get("questions"):
@@ -372,19 +407,57 @@ class BuildController:
             self._snapshot_before = self._transaction.enter_context(session.transaction())
             for change in b.plan.get("changes_to_existing") or []:
                 b.approved_changes.setdefault(change["block"], []).append(change)
+            b.stages = [
+                {**{k: v for k, v in st.items() if k in ("key", "name", "goal", "lane", "blocks")}, "status": STAGE_PENDING, "plan": None, "summary": None}
+                for st in b.plan["stages"]
+            ]
+            b.stage_index = 0
             b.set_phase(BUILDING)
             self._maybe_sample()
-            for lane in b.plan.get("lanes") or []:
-                resolve_lane(b, lane["key"])
+            # Every stage's lane up front, so the outline shows on the
+            # canvas; any left empty are removed when the build ends.
+            for st in b.stages:
+                if st.get("lane"):
+                    b.lane_map[st["key"]] = st["lane"]
+                else:
+                    resolve_lane(b, st["key"])
+            self._start_stage()
 
             def work() -> None:
                 b.turn_over = False
                 self._build_loop = self.loop_factory(b.build_llm, "build")
                 _record_resolved_model(b.build_llm, self._build_loop)
-                outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), tools_for_phase(BUILDING))
+                outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), self._tools(BUILDING))
                 self._after_build_turn(outcome)
 
             return work
+
+    def _start_stage(self) -> None:
+        b = self.build
+        stage = b.current_stage
+        stage["status"] = STAGE_ACTIVE
+        b.log("stage", key=stage["key"], name=stage["name"], status="started", index=b.stage_index)
+
+    def _next_stage(self) -> None:
+        """Move on to the next stage, in the same build conversation (so the
+        model keeps what it learned building the earlier ones) -- or, with
+        small_context, in a fresh one whose opening prompt carries the
+        outline, what's built and the decisions so far. Runs on the
+        worker."""
+        b = self.build
+        b.stage_index += 1
+        self._start_stage()
+        if b.options.small_context:
+            b.log("fresh_conversation", stage=b.current_stage["key"])
+            outcome = self._build_loop.start(
+                b,
+                prompts.build_system(b, getattr(self._build_loop, "compact", False)),
+                prompts.build_prompt(b),
+                self._tools(BUILDING),
+            )
+        else:
+            outcome = self._build_loop.resume(b, prompts.stage_prompt(b), self._tools(BUILDING))
+        self._after_build_turn(outcome)
 
     def _maybe_sample(self) -> None:
         """§7: build on a sample when the data is large. Switching sample
@@ -447,6 +520,16 @@ class BuildController:
             return
         if b.phase == AWAITING_INPUT:
             return  # ask_user: wait for feedback()
+        stage = b.current_stage
+        if stage is not None and stage["status"] == STAGE_DONE:
+            # complete_stage: the user reviews it, unless building
+            # automatically -- then straight on, on this worker turn.
+            if b.options.auto_build:
+                b.log("auto_continued", stage=stage["key"])
+                self._next_stage()
+            else:
+                b.set_phase(AWAITING_STAGE_REVIEW)
+            return
         b.pending_question = (
             "The AI ended its turn without finishing the build"
             + (f":\n\n{outcome.final_text}" if outcome.final_text else ".")
@@ -490,8 +573,16 @@ class BuildController:
                 label = r.get("label") or f"{session.graph.blocks[r['block']].name}.{r.get('port')}"
                 value = r.get("value", r.get("error", r.get("row_count")))
                 doc.append(f"- **{label}:** `{value}`")
+        if b.concerns:
+            doc.append("\n## Concerns the app flagged\n")
+            doc += [f"- {c['what']}" for c in b.concerns]
+        stages = [st for st in b.stages if st.get("summary")]
+        if stages:
+            doc.append("\n## Stages\n")
+            for st in stages:
+                doc.append(f"### {st['name']}\n\n{st['summary']}\n")
         if b.deviations:
-            doc.append("\n## Deviations from the approved plan\n")
+            doc.append("\n## Deviations from the plan\n")
             doc += [f"- {d.get('plan_step', '')} {d['what']} -- {d['why']}".strip() for d in b.deviations]
         if failed:
             doc.append("\n## Failed on the full data\n")

@@ -8,6 +8,7 @@ the real services accept exactly these payloads."""
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -79,11 +80,7 @@ def planning_build(tmp_path):
 def _plan(anchor):
     return {
         "summary": "split",
-        "lanes": [{"key": "est", "name": "Estimation"}],
-        "steps": [
-            {"ref": "s1", "category": "train_test_split", "lane": "est", "name": "split",
-             "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": "holdout"}
-        ],
+        "stages": [{"key": "est", "name": "Estimation", "goal": f"70/30 holdout split of {anchor}", "blocks": ["train_test_split"]}],
     }
 
 
@@ -117,7 +114,7 @@ def test_openai_loop_plans_through_the_tools(planning_build):
 
     # A successful submit_plan ends the turn -- no extra request for a closing remark.
     assert len(fake.requests) == 3 and outcome.final_text == "Looking around."
-    assert b.phase == AWAITING_APPROVAL and b.plan["steps"][0]["ref"] == "s1"
+    assert b.phase == AWAITING_APPROVAL and b.plan["stages"][0]["key"] == "est"
     assert b.usage["input_tokens"] == 30 and b.usage["output_tokens"] == 15
 
     path, headers, first = fake.requests[0]
@@ -323,13 +320,15 @@ def test_lmstudio_unreachable_server_is_a_clear_error():
         make_loop("lmstudio", None, api_base_url="", token="", base_url="http://127.0.0.1:9/v1")
 
 
-def test_compact_catalogue_lists_tags_only():
+def test_compact_catalogue_lists_tags_and_block_names_only():
     from modelmaker.agent import prompts
 
     compact, full = prompts._catalogue_context(True), prompts._catalogue_context(False)
-    assert len(compact) * 8 < len(full)
-    assert "- pd (" in compact and "- regression (" in compact and "list_block_types" in compact
-    assert "logistic_regression" not in compact  # block names come from list_block_types(tag=...)
+    assert len(compact) * 4 < len(full)
+    assert "- pd: " in compact and "- regression: " in compact and "list_block_types" in compact
+    # Names (so a category is never a guess), not ports or summaries.
+    assert "train_test_split, time_split" in compact and "logistic_regression" in compact
+    assert "logistic_regression [" not in compact
     assert "- logistic_regression [regression, scorecard, pd]" in full
     assert "read_csv" not in compact  # disallowed blocks stay out either way
 
@@ -407,3 +406,48 @@ def test_provenance_names_the_auto_detected_model(planning_build):
     explicit = LLMChoice("lmstudio", "chosen")
     _record_resolved_model(explicit, type("L", (), {"model": "other"})())
     assert explicit.model == "chosen"
+
+
+def test_anthropic_usage_counts_cache_reads_and_writes(planning_build):
+    from modelmaker.agent.loop import add_anthropic_usage
+
+    b, _ = planning_build
+    add_anthropic_usage(b, 100, 4000, 1500, 50)
+    add_anthropic_usage(b, 10, None, 200, None)
+    assert b.usage["input_tokens"] == 100 + 4000 + 1500 + 10 + 200
+    assert b.usage["cache_read_tokens"] == 4000 and b.usage["cache_write_tokens"] == 1700
+    assert b.usage["output_tokens"] == 50
+
+
+def test_claude_cli_cost_is_the_session_total_not_a_sum(planning_build, tmp_path, monkeypatch):
+    """The CLI reports total_cost_usd for the whole session, and a resume
+    continues the session -- so a build adds the increase, not each total."""
+    from modelmaker.agent.loop import ClaudeCliLoop
+
+    b, _ = planning_build
+    costs = tmp_path / "costs"
+    costs.write_text("0.05\n0.08\n0.02\n")
+    fake = tmp_path / "claude"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, pathlib\n"
+        "sys.stdin.read()\n"
+        f"p = pathlib.Path({str(costs)!r}); lines = p.read_text().split(); p.write_text(' '.join(lines[1:]))\n"
+        "session = 'other' if lines[0] == '0.02' else 's1'\n"
+        "print(json.dumps({'type': 'system', 'session_id': session}))\n"
+        "print(json.dumps({'type': 'result', 'session_id': session, 'total_cost_usd': float(lines[0]), 'num_turns': 1,\n"
+        "  'usage': {'input_tokens': 5, 'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 20, 'output_tokens': 7},\n"
+        "  'result': 'ok'}))\n"
+    )
+    fake.chmod(0o755)
+    # The fake is the only claude on PATH (CI has no real one).
+    monkeypatch.setenv("PATH", str(tmp_path))
+    loop = ClaudeCliLoop("haiku", "http://127.0.0.1:1", "tok")
+    assert loop.binary == str(fake)
+    loop.start(b, "S", "P", [])
+    loop.resume(b, "P2", [])
+    assert b.usage["cost_usd"] == pytest.approx(0.08)  # 0.05, then +0.03
+    loop.resume(b, "P3", [])  # the resume came back as a new session: its whole total counts
+    assert b.usage["cost_usd"] == pytest.approx(0.10)
+    assert b.usage["input_tokens"] == 3 * 125 and b.usage["cache_write_tokens"] == 60
+    assert [e["cost_usd"] for e in b.events_since() if e["kind"] == "usage"] == [0.05, 0.03, 0.02]
