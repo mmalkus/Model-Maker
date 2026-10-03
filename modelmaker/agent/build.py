@@ -106,8 +106,8 @@ class BuildOptions:
     small_context: bool = False
     # Decision hints: run_to adds a short rule-based "what this result
     # means / what to do next" (`next`) for blocks the build has to judge
-    # -- binning, fits, Gini, PSI... For small models that call tools well
-    # but read statistics poorly; see hints.py.
+    # -- data checks, feature screens, fits, validation tests. For small
+    # models that call tools well but read statistics poorly; see hints.py.
     decision_hints: bool = False
     limits: BuildLimits = field(default_factory=BuildLimits)
 
