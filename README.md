@@ -283,6 +283,29 @@ reports it) or set with `MODELMAKER_LLM_CONTEXT_TOKENS`. Expect a local
 build to take a while; `MODELMAKER_LLM_TIMEOUT_SECONDS` (default 900 for
 local models) caps a single request.
 
+Two **Settings → AI builder** switches help small models:
+- **Small context** starts each build stage in a fresh conversation,
+  carrying only the outline, what's built and the decisions so far.
+- **Decision hints** adds a short, rule-based recommendation (`next`) to the
+  results the build has to judge, so the model reads a recommendation
+  rather than a statistics table. For example:
+  - **Data:** empty, constant or id-like columns; exclusion rules that drop
+    a lot or nothing; failed data-quality rules; samples with too few
+    events or a different event rate.
+  - **Features:** candidates, no-signal and likely-leakage features by IV;
+    correlated pairs and high VIFs; unstable features; an immature last
+    period.
+  - **Fits:** wrong-sign (WoE) or insignificant coefficients; a fit that
+    didn't converge; the stepwise selection to use; a large calibration
+    shift; non-monotonic or thin rating grades; a short long-run history.
+  - **Validation:** Gini, KS, Hosmer-Lemeshow, LGD/CCF accuracy and bucket
+    calibration, PSI, train/test drops and the grade back-test each get a
+    verdict.
+  - **Stochastic:** a poor distribution fit; an inaccurate proxy. Departing
+  from a hint is allowed, but the model must say why with a recorded
+  deviation. The thresholds are the usual credit-risk rules of thumb, in
+  [`modelmaker/agent/hints.py`](modelmaker/agent/hints.py).
+
 ## Project structure
 
 ```

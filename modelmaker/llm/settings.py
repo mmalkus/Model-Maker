@@ -33,6 +33,8 @@ class LLMSettingsStore:
     # The AI builder's small-context mode (BuildOptions.small_context): a
     # fresh conversation per stage, for models with a small context window.
     agent_small_context: bool = False
+    # The AI builder's decision hints (BuildOptions.decision_hints).
+    agent_decision_hints: bool = False
 
     def for_provider(self, name: str) -> dict[str, Any]:
         return self.per_provider.get(name, {})
@@ -45,9 +47,12 @@ class LLMSettingsStore:
         agent_plan: dict[str, Any] | None = None,
         agent_build: dict[str, Any] | None = None,
         agent_small_context: bool | None = None,
+        agent_decision_hints: bool | None = None,
     ) -> None:
         if agent_small_context is not None:
             self.agent_small_context = agent_small_context
+        if agent_decision_hints is not None:
+            self.agent_decision_hints = agent_decision_hints
         if active_provider is not None:
             self.active_provider = active_provider
         if include_reference is not None:

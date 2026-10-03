@@ -269,10 +269,30 @@ def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
     _wait(c, "awaiting_approval")
     c.post("/api/agent/builds/current/approve")
     _wait(c, "awaiting_input")
+    # ask_user sets awaiting_input mid-turn; let the turn end first, or its
+    # wrap-up resets the phase this forces.
+    api.AGENT.join(10)
     api.AGENT.build.set_phase("building")  # as if the model were mid-turn
     tools = {t["name"] for t in c.get("/api/agent/mcp/tools", headers={"X-Agent-Token": api.AGENT.token}).json()}
     assert "add_block" in tools and "add_custom_block" not in tools
     c.post("/api/agent/builds/current/stop")
+
+
+def test_decision_hints_come_from_settings_unless_the_build_says(client):
+    c = client
+    c.scripts.update({"plan": [_plan(c.anchor)]})
+    assert c.get("/api/llm/settings").json()["agent"]["decision_hints"] is False
+    assert c.put("/api/llm/settings", json={"agent_decision_hints": True}).json()["agent"]["decision_hints"] is True
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
+    assert started.json()["options"]["decision_hints"] is True
+    _wait(c, "awaiting_approval")
+    api.AGENT.join(10)
+    assert c.post("/api/agent/builds/current/discard").status_code == 200
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "decision_hints": False})
+    assert started.status_code == 200, started.text
+    assert started.json()["options"]["decision_hints"] is False
+    c.post("/api/agent/builds/current/stop")
+    c.put("/api/llm/settings", json={"agent_decision_hints": False})
 
 
 def test_small_context_is_a_setting_builds_pick_up(client):
