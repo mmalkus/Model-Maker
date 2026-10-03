@@ -16,6 +16,10 @@ import httpx
 # method here, returning the parsed JSON body (or bytes, for /image).
 
 
+# Below uvicorn's default keep-alive timeout (5s) -- see ModelMakerClient.
+KEEPALIVE_EXPIRY_SECONDS = 2.0
+
+
 class APIError(RuntimeError):
     """A non-2xx response from the API, with the server's own detail
     message (FastAPI's {"detail": "..."} body) surfaced as str(err)."""
@@ -51,7 +55,11 @@ class ModelMakerClient:
             transport = httpx.ASGITransport(app=_app)
             self._client = httpx.AsyncClient(transport=transport, base_url="http://tui.local", timeout=timeout)
         else:
-            self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+            # Drop idle connections before the server does (uvicorn closes
+            # them after 5s): reusing one the server is closing at that
+            # moment loses the request ("Server disconnected").
+            limits = httpx.Limits(keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS)
+            self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, limits=limits)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -63,7 +71,14 @@ class ModelMakerClient:
         await self.aclose()
 
     async def _req(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        resp = await self._client.request(method, path, **kwargs)
+        try:
+            resp = await self._client.request(method, path, **kwargs)
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            # A connection dropped under the request (e.g. a proxy with a
+            # shorter keep-alive): a GET is safe to send again, once.
+            if method != "GET":
+                raise
+            resp = await self._client.request(method, path, **kwargs)
         if resp.status_code >= 400:
             raise APIError(resp.status_code, _detail(resp))
         return resp

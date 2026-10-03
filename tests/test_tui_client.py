@@ -124,3 +124,44 @@ def test_compile_produces_python_source(isolated_session, tmp_path):
             assert "import polars" in result["source"]
 
     run(go())
+
+
+def _dropping_client(drops: int) -> tuple[ModelMakerClient, list[str]]:
+    """A client whose first `drops` requests lose their connection, as when
+    a reused keep-alive connection is closed under them."""
+    import httpx
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.method)
+        if len(seen) <= drops:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    c = ModelMakerClient(base_url="http://tui.test")
+    c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://tui.test")
+    return c, seen
+
+
+def test_a_get_survives_one_dropped_connection():
+    async def go():
+        c, seen = _dropping_client(drops=1)
+        async with c:
+            assert await c.health() == {"status": "ok"}
+        assert seen == ["GET", "GET"]
+
+    run(go())
+
+
+def test_a_dropped_post_is_not_resent():
+    import httpx
+
+    async def go():
+        c, seen = _dropping_client(drops=1)
+        async with c:
+            with pytest.raises(httpx.RemoteProtocolError):
+                await c._post("/api/run_all")
+        assert seen == ["POST"]
+
+    run(go())
