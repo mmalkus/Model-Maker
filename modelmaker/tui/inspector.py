@@ -4,9 +4,9 @@ import json
 from typing import Any
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Input, Label, Select, Static, TextArea
+from textual.widgets import Checkbox, Input, Label, Select, Static, TextArea
 
-from .paramspecs import FieldSpec, field_specs_for
+from .paramspecs import FieldSpec, field_specs_for, json_param_keys
 
 _NO_BLANK = object()
 
@@ -43,7 +43,7 @@ class ParamField(Horizontal):
     DEFAULT_CSS = """
     ParamField { height: 3; }
     ParamField > Label { width: 22; padding: 1 1 0 0; }
-    ParamField > Input, ParamField > Select { width: 1fr; }
+    ParamField > Input, ParamField > Select, ParamField > Checkbox { width: 1fr; }
     """
 
     AUTO = "__auto__"
@@ -52,16 +52,19 @@ class ParamField(Horizontal):
         super().__init__()
         self.spec = spec
         self._columns = columns
-        self._widget: Input | Select
+        self._widget: Input | Select | Checkbox
         if spec.kind in ("text", "number"):
             self._widget = Input(
                 value="" if value is None else str(value),
                 type="number" if spec.kind == "number" else "text",
-                placeholder=spec.placeholder,
+                placeholder=spec.placeholder or ("" if spec.default is None else str(spec.default)),
             )
+        elif spec.kind == "checkbox":
+            self._widget = Checkbox(value=value if isinstance(value, bool) else bool(spec.default))
         elif spec.kind == "select":
             opts = [(o, o) for o in spec.options]
-            self._widget = Select(opts, value=value if value in spec.options else Select.NULL, allow_blank=True)
+            current = value if value in spec.options else spec.default if spec.default in spec.options else Select.NULL
+            self._widget = Select(opts, value=current, allow_blank=True)
         elif spec.kind == "columns":
             text = ",".join(value) if isinstance(value, list) else ""
             self._widget = Input(value=text, placeholder="col_a, col_b")
@@ -98,6 +101,8 @@ class ParamField(Horizontal):
         if self.spec.kind == "columns":
             text = self._widget.value.strip()  # type: ignore[union-attr]
             return [c.strip() for c in text.split(",") if c.strip()]
+        if self.spec.kind == "checkbox":
+            return bool(self._widget.value)
         if self.spec.kind == "select":
             v = self._widget.value  # type: ignore[union-attr]
             return None if v is Select.NULL else v
@@ -111,9 +116,9 @@ class ParamField(Horizontal):
 
 
 class ParamsPanel(VerticalScroll):
-    """Either a declarative field form (known categories, or _col-derived
-    fields for custom blocks) or a raw JSON TextArea fallback -- matches
-    ParamsForm.tsx's behavior in the web UI."""
+    """The block's field form (served with registry blocks, or _col-derived
+    fields for custom blocks), plus a raw JSON TextArea for whatever params
+    no field covers -- matches the web UI's Inspector."""
 
     DEFAULT_CSS = "ParamsPanel { height: auto; max-height: 16; border-bottom: solid $panel-lighten-2; }"
 
@@ -143,12 +148,19 @@ class ParamsPanel(VerticalScroll):
         self._json_area = None
         if block is None:
             return
-        specs = field_specs_for(block["category"], block.get("params") or {}, block.get("is_custom", False))
+        params = block.get("params") or {}
+        specs = field_specs_for(block)
         if specs:
-            self._fields = [ParamField(s, (block.get("params") or {}).get(s.key), columns) for s in specs]
+            self._fields = [ParamField(s, params.get(s.key), columns) for s in specs]
             await self.mount_all(self._fields)
-        else:
-            self._json_area = TextArea(json.dumps(block.get("params") or {}, indent=2), language="json")
+        json_keys = json_param_keys(block)
+        if not specs or json_keys:
+            # Only the uncovered keys when there are fields, so a field and
+            # the JSON can't disagree about the same param.
+            shown = params if json_keys is None or not specs else {k: v for k, v in params.items() if k in json_keys}
+            if specs:
+                await self.mount(Label(f"Other params (JSON): {', '.join(json_keys or [])}"))
+            self._json_area = TextArea(json.dumps(shown, indent=2), language="json")
             await self.mount(self._json_area)
 
     def collect(self) -> dict[str, Any] | None:
@@ -156,13 +168,19 @@ class ParamsPanel(VerticalScroll):
         should refuse to save rather than wipe params)."""
         if self._block is None:
             return None
+        params = dict(self._block.get("params") or {})
         if self._json_area is not None:
             try:
                 parsed = json.loads(self._json_area.text)
-                return parsed if isinstance(parsed, dict) else None
             except (json.JSONDecodeError, ValueError):
                 return None
-        params = dict(self._block.get("params") or {})
+            if not isinstance(parsed, dict):
+                return None
+            if not self._fields:
+                return parsed
+            for key in json_param_keys(self._block) or []:
+                params.pop(key, None)
+            params.update(parsed)
         for f in self._fields:
             v = f.get_value()
             if v is _NO_BLANK:

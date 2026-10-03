@@ -4,7 +4,7 @@ import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
 import { EnvVarField } from './EnvVarField'
 import { FileBrowser } from './FileBrowser'
-import { PARAM_SPECS, ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
+import { ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
 
 // File-based input blocks that read a single `path` param off disk (see
@@ -202,7 +202,10 @@ export function Inspector({
   } catch {
     currentParams = {}
   }
-  const columnFieldSpecs = block.is_custom ? deriveColumnFieldSpecs(currentParams) : []
+  // A registry block's form comes with it; a custom block gets a picker per
+  // `_col` param. The JSON box stays for whatever no field covers.
+  const formFields = block.form ? block.form.fields : block.is_custom ? deriveColumnFieldSpecs(currentParams) : []
+  const showParamsJson = !block.form || block.form.fields.length === 0 || block.form.other_params.length > 0
 
   const viewData = () =>
     run(async () => {
@@ -462,27 +465,21 @@ export function Inspector({
       {block.category !== 'display_table' && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Params</div>
-          {PARAM_SPECS[block.category] ? (
+          {formFields.length > 0 && (
             <ParamsForm
-              spec={PARAM_SPECS[block.category]}
+              spec={formFields}
               paramsText={paramsText}
               setParamsText={setParamsText}
               columns={inputColumns}
               disabled={busy}
             />
-          ) : (
+          )}
+          {showParamsJson && (
             <>
-              {columnFieldSpecs.length > 0 && (
-                <ParamsForm
-                  spec={columnFieldSpecs}
-                  paramsText={paramsText}
-                  setParamsText={setParamsText}
-                  columns={inputColumns}
-                  disabled={busy}
-                />
-              )}
-              {columnFieldSpecs.length > 0 && (
-                <div style={{ color: '#9ca3af', margin: '8px 0 2px' }}>Other params (JSON)</div>
+              {formFields.length > 0 && (
+                <div style={{ color: '#9ca3af', margin: '8px 0 2px' }}>
+                  {block.form ? `Other params (JSON): ${block.form.other_params.join(', ')}` : 'Other params (JSON)'}
+                </div>
               )}
               <textarea
                 value={paramsText}

@@ -10,10 +10,13 @@ sibling module-level helpers, so a block's fn must be fully self-contained.
 
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
+from ..agent import hints as h
 from ..metadata_transforms import infer_dtypes
-from .base import BlockSpec, PortSpec, register_block
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 
 def iv_table(df: pl.DataFrame, target: str, features: list[str] | None = None, bins: int = 10) -> dict:
@@ -75,6 +78,10 @@ def iv_table(df: pl.DataFrame, target: str, features: list[str] | None = None, b
     return {"kind": "iv_table", "target": target, "rows": rows}
 
 
+def _iv_table_hints(outputs: dict[str, Any]) -> list[str]:
+    return h.iv_rows(h.metric(outputs).get("rows") or [], keep_monotonic=False)
+
+
 register_block(
     BlockSpec(
         category="iv_table",
@@ -86,6 +93,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=iv_table,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_iv_table_hints,
     )
 )
 
@@ -131,6 +139,26 @@ def correlation_matrix(df: pl.DataFrame, features: list[str] | None = None) -> d
     }
 
 
+def _correlation_matrix_hints(outputs: dict[str, Any]) -> list[str]:
+    metric = h.metric(outputs)
+    features, matrix = metric.get("features") or [], metric.get("correlation") or []
+    pairs = [
+        f"{features[i]}/{features[j]} ({matrix[i][j]:+.2f})"
+        for i in range(len(features))
+        for j in range(i + 1, len(features))
+        if i < len(matrix) and j < len(matrix[i]) and h.num(matrix[i][j]) and abs(matrix[i][j]) >= h.HIGH_CORRELATION
+    ]
+    vif = [v["feature"] for v in metric.get("vif") or [] if h.num(v.get("vif")) and v["vif"] >= h.HIGH_VIF]
+    hints = []
+    if pairs:
+        hints.append(f"Highly correlated (|r| >= {h.HIGH_CORRELATION}): {h.names(pairs)} -- keep the stronger of each pair.")
+    if vif:
+        hints.append(f"VIF >= {h.HIGH_VIF:g}: {h.names(vif)} -- largely redundant given the others; drop or merge.")
+    if features and not hints:
+        hints.append("No redundant features (no high correlations or VIFs).")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="correlation_matrix",
@@ -142,6 +170,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=correlation_matrix,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_correlation_matrix_hints,
     )
 )
 
@@ -204,6 +233,20 @@ def characteristic_stability(
     return pl.DataFrame(rows)
 
 
+def _characteristic_stability_hints(outputs: dict[str, Any]) -> list[str]:
+    rows = h.rows(outputs.get("table"))
+    unstable = [r["feature"] for r in rows if h.num(r.get("psi")) and r["psi"] >= h.PSI_SHIFTED]
+    monitor = [r["feature"] for r in rows if h.num(r.get("psi")) and h.PSI_STABLE <= r["psi"] < h.PSI_SHIFTED]
+    hints = []
+    if unstable:
+        hints.append(f"Unstable (PSI >= {h.PSI_SHIFTED}): {h.names(unstable)} -- leave out, or ask_user before keeping.")
+    if monitor:
+        hints.append(f"Shifting (PSI {h.PSI_STABLE}-{h.PSI_SHIFTED}): {h.names(monitor)} -- note them in the stage summary.")
+    if rows and not hints:
+        hints.append(f"Every feature is stable (PSI < {h.PSI_STABLE}).")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="characteristic_stability",
@@ -216,6 +259,11 @@ register_block(
         aggregate_outputs=("table",),
         fn=characteristic_stability,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("features", "Features (optional -- defaults to all shared columns)", "columns"),
+            FieldSpec("bins", "Bins (numeric features)", "number"),
+        ),
+        hints=_characteristic_stability_hints,
     )
 )
 
@@ -255,6 +303,24 @@ def target_trend(
     return df.with_columns(label.alias("period")).filter(pl.col("period").is_not_null()).group_by("period").agg(aggs).sort("period")
 
 
+def _target_trend_hints(outputs: dict[str, Any]) -> list[str]:
+    rows = [r for r in h.rows(outputs.get("table")) if h.num(r.get("n"))]
+    if len(rows) < 2:
+        return []
+    hints = []
+    counts = sorted(r["n"] for r in rows)
+    median = counts[len(counts) // 2]
+    if rows[-1]["n"] < h.IMMATURE_LAST_PERIOD * median:
+        hints.append(
+            f"The last period ({rows[-1]['period']}) has {rows[-1]['n']} rows against a typical {median} -- likely "
+            "immature; consider leaving it out (time_split's oot_end)."
+        )
+    thin = [str(r["period"]) for r in rows if r["n"] < h.THIN_PERIOD]
+    if thin:
+        hints.append(f"Periods with < {h.THIN_PERIOD} rows: {h.names(thin)} -- their target rates are noise.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="target_trend",
@@ -267,6 +333,13 @@ register_block(
         aggregate_outputs=("table",),
         fn=target_trend,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("date_col", "Date column", "column"),
+            FieldSpec("target_col", "Target column", "column", auto_role="target"),
+            FieldSpec("period", "Period", "select", options=("month", "quarter", "year")),
+            FieldSpec("features", "Features to trend (optional)", "columns"),
+        ),
+        hints=_target_trend_hints,
     )
 )
 
@@ -321,5 +394,9 @@ register_block(
         outputs=[PortSpec("image", type="image")],
         fn=bin_chart,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("feature", "Feature", "text", placeholder="credit_score"),
+            FieldSpec("title", "Title (optional)", "text"),
+        ),
     )
 )

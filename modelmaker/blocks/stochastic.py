@@ -42,10 +42,13 @@ than a parquet-file handle).
 
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
+from ..agent import hints as h
 from ..metadata_transforms import infer_dtypes, passthrough
-from .base import BlockSpec, PortSpec, register_block
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 # ---------------------------------------------------------------------------
 # Distribution fitting
@@ -93,6 +96,20 @@ def fit_distribution(
     return dist, table
 
 
+def _fit_distribution_hints(outputs: dict[str, Any]) -> list[str]:
+    dist = h.metric(outputs, "distribution")
+    stats = dist.get("fit_stats") or {}
+    p = stats.get("ks_p")
+    if not dist.get("family") or not h.num(p):
+        return []
+    if p < h.GOOD_FIT_P:
+        return [
+            f"The best family ({dist['family']}) still fits poorly (KS p = {p:.3g}) -- try other families, or "
+            "spliced_tail for a heavy tail."
+        ]
+    return [f"{dist['family']} fits best (lowest AIC) and fits well (KS p = {p:.3g})."]
+
+
 register_block(
     BlockSpec(
         category="fit_distribution",
@@ -105,6 +122,10 @@ register_block(
         aggregate_outputs=("fit_table",),
         fn=fit_distribution,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("column", "Column to fit", "column"),
+        ),
+        hints=_fit_distribution_hints,
     )
 )
 
@@ -134,6 +155,10 @@ register_block(
         outputs=[PortSpec("samples")],
         fn=sample_distribution,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("n", "Number of samples", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -187,6 +212,12 @@ register_block(
         outputs=[PortSpec("dependency", type="dependency")],
         fn=build_dependency,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("columns", "Columns", "columns"),
+            FieldSpec("copula_type", "Copula", "select", options=("gaussian", "t", "clayton", "gumbel")),
+            FieldSpec("dof", "Degrees of freedom (t copula)", "number"),
+            FieldSpec("theta", "Theta (Clayton / Gumbel)", "number", step=0.1),
+        ),
     )
 )
 
@@ -289,6 +320,15 @@ register_block(
         aggregate_outputs=("quantile_table",),
         fn=simulate_op_risk_lda,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("n_paths", "Number of paths", "number"),
+            FieldSpec("chunk_size", "Chunk size", "number"),
+            FieldSpec("frequency_family", "Frequency family", "select", options=("poisson", "negbinom")),
+            FieldSpec("frequency_mean", "Frequency mean", "number", step=0.1),
+            FieldSpec("frequency_dispersion", "Frequency dispersion (negbinom)", "number", step=0.1),
+            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -335,6 +375,11 @@ register_block(
         aggregate_outputs=("quantile_table",),
         fn=risk_measures,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("column", "Loss column", "column"),
+            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -426,6 +471,10 @@ register_block(
         aggregate_outputs=("quantile_table", "contributions"),
         fn=aggregate_simulation,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -485,6 +534,12 @@ register_block(
         outputs=[PortSpec("simulation_result", type="simulation_result"), PortSpec("detail")],
         fn=asrf_economic_capital,
         metadata_transform=passthrough,
+        form=(
+            FieldSpec("pd_col", "PD column", "column"),
+            FieldSpec("lgd_col", "LGD column", "column"),
+            FieldSpec("ead_col", "EAD column", "column"),
+            FieldSpec("confidence", "Confidence level", "number", step=0.001),
+        ),
     )
 )
 
@@ -615,6 +670,17 @@ register_block(
         aggregate_outputs=("quantile_table",),
         fn=simulate_credit_portfolio,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("pd_col", "PD column", "column"),
+            FieldSpec("lgd_col", "LGD column", "column"),
+            FieldSpec("ead_col", "EAD column", "column"),
+            FieldSpec("sector_col", "Sector column (must match the dependency labels)", "column"),
+            FieldSpec("name_col", "Segment name column (optional)", "column"),
+            FieldSpec("n_paths", "Number of paths", "number"),
+            FieldSpec("chunk_size", "Chunk size", "number"),
+            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -672,6 +738,14 @@ register_block(
         outputs=[PortSpec("proxy", type="proxy_function")],
         fn=fit_proxy,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("value_col", "Value column (polynomial)", "column"),
+            FieldSpec("method", "Method", "select", options=("closed_form", "polynomial")),
+            FieldSpec("expr", "Expression (closed_form)", "text", placeholder="x + 0.5 * y"),
+            FieldSpec("degree", "Degree (polynomial)", "number"),
+            FieldSpec("regressor", "Regressor (polynomial)", "select", options=("ridge", "lasso", "ols")),
+            FieldSpec("alpha", "Regularization (ridge / lasso)", "number", step=0.1),
+        ),
     )
 )
 
@@ -725,6 +799,18 @@ def validate_proxy(proxy: dict, validation: pl.DataFrame, value_col: str) -> tup
     return diagnostics, table
 
 
+def _validate_proxy_hints(outputs: dict[str, Any]) -> list[str]:
+    r2 = h.metric(outputs, "diagnostics").get("out_of_sample_r2")
+    if not h.num(r2):
+        return []
+    if r2 < h.PROXY_MIN_R2:
+        return [
+            f"Out-of-sample R^2 {r2:.3f} < {h.PROXY_MIN_R2} -- the proxy isn't accurate enough: fit on more scenarios "
+            "or a richer basis."
+        ]
+    return [f"Out-of-sample R^2 {r2:.3f}: the proxy is accurate enough to use."]
+
+
 register_block(
     BlockSpec(
         category="validate_proxy",
@@ -736,6 +822,10 @@ register_block(
         outputs=[PortSpec("diagnostics", type="scalar_metric"), PortSpec("error_table")],
         fn=validate_proxy,
         metadata_transform=passthrough,
+        form=(
+            FieldSpec("value_col", "Actual value column", "column"),
+        ),
+        hints=_validate_proxy_hints,
     )
 )
 
@@ -809,6 +899,12 @@ register_block(
         outputs=[PortSpec("aggregation_result", type="simulation_result"), PortSpec("contributions")],
         fn=var_covar_aggregate,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("method", "Method", "select", options=("normal", "cornish_fisher", "moment_matching", "delta_gamma_copula")),
+            FieldSpec("bump_size", "Bump size", "number", step=0.001),
+            FieldSpec("n_mc", "Monte Carlo draws (non-normal methods)", "number"),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -893,6 +989,11 @@ register_block(
         outputs=[PortSpec("out")],
         fn=iterate,
         metadata_transform=passthrough,
+        form=(
+            FieldSpec("n_iterations", "Iterations", "number"),
+            FieldSpec("iterator", "Iterator", "select", options=("bootstrap_resample", "scenario_row")),
+            FieldSpec("seed", "Random seed", "number"),
+        ),
     )
 )
 
@@ -945,5 +1046,12 @@ register_block(
         outputs=[PortSpec("table"), PortSpec("simulation_result", type="simulation_result", required=False)],
         fn=collect,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("iterate_block", "Paired 'iterate' block id", "text", placeholder="b_042"),
+            FieldSpec("reducer", "Reducer", "select", options=("concat", "risk_measures")),
+            FieldSpec("value_col", "Value column (risk_measures)", "column"),
+            FieldSpec("n_bootstrap", "Bootstrap replicates (risk_measures)", "number"),
+            FieldSpec("seed", "Random seed (risk_measures)", "number"),
+        ),
     )
 )

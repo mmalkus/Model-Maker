@@ -10,10 +10,13 @@ only guarantees `polars as pl` at module level.
 
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
+from ..agent import hints as h
 from ..metadata_transforms import infer_dtypes
-from .base import BlockSpec, PortSpec, register_block
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 
 def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
@@ -36,6 +39,17 @@ def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     return {"kind": "ks_test", "ks_statistic": float(result.statistic), "p_value": float(result.pvalue)}
 
 
+def _ks_test_hints(outputs: dict[str, Any]) -> list[str]:
+    ks = h.metric(outputs).get("ks_statistic")
+    if not h.num(ks):
+        return []
+    if ks >= h.SUSPICIOUS_KS:
+        return [f"KS {ks:.2f} is unusually high for a credit model -- check the features for leakage."]
+    if ks < h.WEAK_KS:
+        return [f"KS {ks:.2f} is weak -- the score separates goods and bads poorly."]
+    return [f"KS {ks:.2f} is in the usual range."]
+
+
 register_block(
     BlockSpec(
         category="ks_test",
@@ -47,6 +61,11 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=ks_test,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
+            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+        ),
+        hints=_ks_test_hints,
     )
 )
 
@@ -65,6 +84,22 @@ def auc_gini(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     return {"kind": "auc_gini", "auc": auc, "gini": 2 * auc - 1}
 
 
+def _gini_value(gini: Any) -> list[str]:
+    if not h.num(gini):
+        return []
+    if gini < 0:
+        return ["Gini is negative -- the score runs the wrong way (higher = safer). Check score_col is the predicted PD."]
+    if gini >= h.SUSPICIOUS_GINI:
+        return [f"Gini {gini:.2f} is unusually high for a credit model -- check the features for leakage before going on."]
+    if gini < h.WEAK_GINI:
+        return [f"Gini {gini:.2f} is weak -- revisit feature selection before validating further."]
+    return [f"Gini {gini:.2f} is in the usual range."]
+
+
+def _auc_gini_hints(outputs: dict[str, Any]) -> list[str]:
+    return _gini_value(h.metric(outputs).get("gini"))
+
+
 register_block(
     BlockSpec(
         category="auc_gini",
@@ -76,6 +111,11 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=auc_gini,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
+            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+        ),
+        hints=_auc_gini_hints,
     )
 )
 
@@ -137,6 +177,18 @@ def rating_summary(df: pl.DataFrame, grade_col: str, target_col: str) -> dict:
     return {"kind": "rating_summary", "grades": rows, "monotonic": monotonic}
 
 
+def _rating_summary_hints(outputs: dict[str, Any]) -> list[str]:
+    metric = h.metric(outputs)
+    if "monotonic" not in metric:
+        return []
+    if metric["monotonic"]:
+        return ["Default rates rise grade by grade, as they should."]
+    return [
+        "Default rates aren't monotonic across grades -- refit the master scale with algorithm "
+        "'monotonic_default_rate' (or fewer grades)."
+    ]
+
+
 register_block(
     BlockSpec(
         category="rating_summary",
@@ -148,8 +200,24 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=rating_summary,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("grade_col", "Grade column", "column"),
+            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+        ),
+        hints=_rating_summary_hints,
     )
 )
+
+
+def _psi_test_hints(outputs: dict[str, Any]) -> list[str]:
+    psi = h.metric(outputs).get("psi")
+    if not h.num(psi):
+        return []
+    if psi >= h.PSI_SHIFTED:
+        return [f"PSI {psi:.3f} >= {h.PSI_SHIFTED}: a significant shift -- ask_user before relying on it."]
+    if psi >= h.PSI_STABLE:
+        return [f"PSI {psi:.3f}: a moderate shift -- worth noting in the stage summary."]
+    return [f"PSI {psi:.3f} < {h.PSI_STABLE}: stable."]
 
 
 register_block(
@@ -163,6 +231,11 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=psi_test,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("col", "Column to compare", "column"),
+            FieldSpec("bins", "Bins", "number"),
+        ),
+        hints=_psi_test_hints,
     )
 )
 
@@ -172,7 +245,8 @@ def roc_curve(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     score threshold -- not just the scalar AUC that auc_gini reports, for
     plotting or a closer look at where a model's discrimination actually
     comes from."""
-    from sklearn.metrics import roc_auc_score, roc_curve as _roc_curve
+    from sklearn.metrics import roc_auc_score
+    from sklearn.metrics import roc_curve as _roc_curve
 
     y = df[target_col].to_numpy()
     scores = df[score_col].to_numpy()
@@ -191,6 +265,11 @@ def roc_curve(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     }
 
 
+def _roc_curve_hints(outputs: dict[str, Any]) -> list[str]:
+    auc = h.metric(outputs).get("auc")
+    return _gini_value(2 * auc - 1) if h.num(auc) else []
+
+
 register_block(
     BlockSpec(
         category="roc_curve",
@@ -202,6 +281,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=roc_curve,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_roc_curve_hints,
     )
 )
 
@@ -254,6 +334,18 @@ def calibration_test(df: pl.DataFrame, score_col: str, target_col: str, bins: in
     }
 
 
+def _calibration_test_hints(outputs: dict[str, Any]) -> list[str]:
+    p = h.metric(outputs).get("p_value")
+    if not h.num(p):
+        return []
+    if p < h.CALIBRATION_P:
+        return [
+            f"Hosmer-Lemeshow p = {p:.3g} < {h.CALIBRATION_P}: predicted PDs don't match observed rates -- calibrate "
+            "(calibrate_model) or explain why not in the stage summary."
+        ]
+    return [f"Hosmer-Lemeshow p = {p:.3g}: calibration is acceptable."]
+
+
 register_block(
     BlockSpec(
         category="calibration_test",
@@ -265,6 +357,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=calibration_test,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_calibration_test_hints,
     )
 )
 
@@ -320,6 +413,24 @@ def continuous_accuracy(df: pl.DataFrame, actual_col: str, predicted_col: str) -
     }
 
 
+def _continuous_accuracy_hints(outputs: dict[str, Any]) -> list[str]:
+    m = h.metric(outputs)
+    hints = []
+    if h.num(m.get("r2")) and m["r2"] < 0:
+        hints.append("R^2 is negative -- the model predicts worse than the mean. Revisit the features.")
+    if h.num(m.get("spearman")) and m["spearman"] < h.WEAK_SPEARMAN:
+        hints.append(f"Spearman {m['spearman']:.2f} is weak -- the prediction barely ranks the outcome.")
+    actual, bias = m.get("mean_actual"), m.get("bias")
+    if h.num(actual) and h.num(bias) and actual and abs(bias) / abs(actual) > h.CALIBRATION_GAP:
+        hints.append(
+            f"Mean prediction is {abs(bias) / abs(actual):.0%} {'above' if bias > 0 else 'below'} the mean outcome -- "
+            "calibrate the model."
+        )
+    if m and not hints and h.num(m.get("spearman")):
+        hints.append(f"Accuracy looks reasonable (Spearman {m['spearman']:.2f}, bias {m.get('bias', 0):+.4f}).")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="continuous_accuracy",
@@ -331,6 +442,11 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=continuous_accuracy,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
+            FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
+        ),
+        hints=_continuous_accuracy_hints,
     )
 )
 
@@ -363,6 +479,24 @@ def bucketed_calibration(df: pl.DataFrame, actual_col: str, predicted_col: str, 
     }
 
 
+def _bucketed_calibration_hints(outputs: dict[str, Any]) -> list[str]:
+    buckets = h.metric(outputs).get("buckets") or []
+    off = [
+        b["bucket"]
+        for b in buckets
+        if h.num(b.get("observed_mean"))
+        and h.num(b.get("predicted_mean"))
+        and b["predicted_mean"]
+        and abs(b["observed_mean"] - b["predicted_mean"]) / abs(b["predicted_mean"]) > h.CALIBRATION_GAP
+    ]
+    if off:
+        return [
+            f"{len(off)} of {len(buckets)} buckets miss their prediction by more than {h.CALIBRATION_GAP:.0%}: "
+            f"{h.names(off)} -- calibrate the model, or say why in the stage summary."
+        ]
+    return ["Every bucket's observed mean is close to its prediction."] if buckets else []
+
+
 register_block(
     BlockSpec(
         category="bucketed_calibration",
@@ -374,6 +508,12 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=bucketed_calibration,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
+            FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
+            FieldSpec("bins", "Bins", "number"),
+        ),
+        hints=_bucketed_calibration_hints,
     )
 )
 
@@ -430,6 +570,30 @@ def grade_backtest(
     }
 
 
+def _grade_backtest_hints(outputs: dict[str, Any]) -> list[str]:
+    metric = h.metric(outputs)
+    grades = metric.get("grades") or []
+    if not grades:
+        return []
+    hints = []
+    red = [str(g["grade"]) for g in grades if g.get("traffic_light") == "red"]
+    if red:
+        hints.append(
+            f"Red grades ({h.names(red)}): their PD is too low for the observed default rate -- recalibrate, or add a "
+            "margin of conservatism."
+        )
+    if (metric.get("portfolio") or {}).get("traffic_light") == "red":
+        hints.append("The portfolio-level PD is too low -- recalibrate before anything else.")
+    if metric.get("monotonic") is False:
+        hints.append("Observed rates aren't monotonic across grades -- refit the master scale ('monotonic_default_rate').")
+    hhi = metric.get("herfindahl")
+    if h.num(hhi) and hhi > 2 / len(grades):
+        hints.append(f"The population is concentrated in few grades (Herfindahl {hhi:.2f}) -- consider more even grades.")
+    if not hints:
+        hints.append("The back-test passes: no red grades, monotonic, evenly spread.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="grade_backtest",
@@ -441,6 +605,13 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=grade_backtest,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("grade_col", "Grade column", "column"),
+            FieldSpec("target_col", "Default flag column", "column", auto_role="target"),
+            FieldSpec("pd_col", "Grade PD column (e.g. grade_pd)", "column"),
+            FieldSpec("confidence", "Confidence level", "number", step=0.005),
+        ),
+        hints=_grade_backtest_hints,
     )
 )
 
@@ -504,6 +675,33 @@ def compare_samples(
     return pl.DataFrame(rows)
 
 
+def _compare_samples_hints(outputs: dict[str, Any]) -> list[str]:
+    rows = h.rows(outputs.get("table"))
+    if not rows:
+        return []
+    hints = []
+    base = rows[0]
+    for key, limit in (("gini", h.OVERFIT_GINI_DROP), ("spearman", h.OVERFIT_SPEARMAN_DROP)):
+        for r in rows[1:]:
+            if h.num(base.get(key)) and h.num(r.get(key)) and base[key] - r[key] > limit:
+                hints.append(
+                    f"{key.title()} falls {base[key] - r[key]:.2f} from {base['sample']} ({base[key]:.2f}) to "
+                    f"{r['sample']} ({r[key]:.2f}) -- likely overfitting: try fewer features or stronger regularisation."
+                )
+    for r in rows:
+        actual, predicted = r.get("mean_actual"), r.get("mean_predicted")
+        if h.num(actual) and h.num(predicted) and actual:
+            gap = (predicted - actual) / abs(actual)
+            if abs(gap) > h.CALIBRATION_GAP:
+                hints.append(
+                    f"On {r['sample']} the mean prediction ({predicted:.4f}) is {abs(gap):.0%} "
+                    f"{'above' if gap > 0 else 'below'} the mean outcome ({actual:.4f}) -- calibrate the model."
+                )
+    if not hints:
+        hints.append("Performance holds across the samples and predictions match outcomes on average.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="compare_samples",
@@ -516,5 +714,6 @@ register_block(
         aggregate_outputs=("table",),
         fn=compare_samples,
         metadata_transform=infer_dtypes,
+        hints=_compare_samples_hints,
     )
 )

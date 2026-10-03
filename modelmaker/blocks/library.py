@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from typing import Any
 
 import polars as pl
 
-from ..metadata_transforms import broadcast_to_all_outputs, infer_dtypes, narrow_from_single_input, passthrough
-from ..packet import ColumnMeta, ColumnRole
-from .base import BlockSpec, PortSpec, register_block
+from ..agent import hints as h
+from ..metadata_transforms import (
+    broadcast_to_all_outputs,
+    infer_dtypes,
+    narrow_from_single_input,
+    passthrough,
+)
+from ..packet import ColumnMeta, ColumnRole, DataFramePacket
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 
 def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
@@ -191,6 +198,9 @@ register_block(
         fn=read_excel,
         metadata_transform=infer_dtypes,
         probe=_probe_path_mtime,
+        form=(
+            FieldSpec("sheet", "Sheet name (optional -- defaults to the first sheet)", "text"),
+        ),
     )
 )
 
@@ -248,6 +258,9 @@ register_block(
         fn=read_sql,
         metadata_transform=infer_dtypes,
         probe=_probe_sql,
+        form=(
+            FieldSpec("query", "SQL query", "text", placeholder="SELECT * FROM loans"),
+        ),
     )
 )
 
@@ -274,6 +287,9 @@ register_block(
         # lazy_fn a streaming run's fusion path calls (see BlockSpec.lazy_fn).
         lazy_fn=filter_rows,
         metadata_transform=passthrough,
+        form=(
+            FieldSpec("expr", "Filter expression (SQL)", "text", placeholder="age > 30 and region = 'West'"),
+        ),
     )
 )
 
@@ -296,6 +312,9 @@ register_block(
         fn=select_cols,
         lazy_fn=select_cols,  # same reasoning as filter's lazy_fn above
         metadata_transform=narrow_from_single_input,
+        form=(
+            FieldSpec("cols", "Columns to keep", "columns"),
+        ),
     )
 )
 
@@ -379,6 +398,10 @@ register_block(
         fn=join,
         lazy_fn=join,  # same reasoning as filter's lazy_fn above
         metadata_transform=_join_meta,
+        form=(
+            FieldSpec("on", "Join on", "columns"),
+            FieldSpec("how", "How", "select", options=("inner", "left", "right", "outer", "semi", "anti", "cross")),
+        ),
     )
 )
 
@@ -412,6 +435,34 @@ def train_test_split(
     return pl.concat(trains), pl.concat(tests)
 
 
+def _split_hints(outputs: dict[str, Any]) -> list[str]:
+    samples = {}
+    for port, packet in outputs.items():
+        target = h.target_column(packet)
+        if target is None or packet.data.height == 0:
+            continue
+        y = packet.data[target].drop_nulls()
+        if y.len() == 0 or not y.dtype.is_numeric():
+            continue
+        binary = set(y.unique().to_list()) <= {0, 1}
+        samples[port] = (packet.data.height, float(y.mean()), int(y.sum()) if binary else None)
+    hints = []
+    for port, packet in outputs.items():
+        if isinstance(packet, DataFramePacket) and packet.data.height == 0:
+            hints.append(f"{port} is empty -- check the split settings (test_size, cutoff, oot_end).")
+    thin = [f"{p} has {ev}" for p, (_, _, ev) in samples.items() if ev is not None and ev < h.MIN_EVENTS]
+    if thin:
+        hints.append(f"Few events (< {h.MIN_EVENTS}): {h.names(thin)} -- metrics on it will be noisy.")
+    if len(samples) == 2:
+        (a, (_, ra, _)), (b, (_, rb, _)) = samples.items()
+        if ra and abs(rb - ra) / abs(ra) > h.SPLIT_RATE_GAP:
+            hints.append(
+                f"Target rate differs between {a} ({ra:.4f}) and {b} ({rb:.4f}) -- for a random split, set "
+                "stratify_col to the target."
+            )
+    return hints
+
+
 register_block(
     BlockSpec(
         category="train_test_split",
@@ -422,6 +473,12 @@ register_block(
         outputs=[PortSpec("train"), PortSpec("test")],
         fn=train_test_split,
         metadata_transform=broadcast_to_all_outputs,
+        form=(
+            FieldSpec("test_size", "Test size (fraction)", "number", step=0.05),
+            FieldSpec("seed", "Random seed", "number"),
+            FieldSpec("stratify_col", "Stratify by (optional, e.g. the default flag)", "column"),
+        ),
+        hints=_split_hints,
     )
 )
 
@@ -465,6 +522,12 @@ register_block(
         outputs=[PortSpec("development"), PortSpec("out_of_time")],
         fn=time_split,
         metadata_transform=broadcast_to_all_outputs,
+        form=(
+            FieldSpec("date_col", "Date column", "column"),
+            FieldSpec("cutoff", "Cut-off date (first out-of-time day)", "text", placeholder="2025-01-01"),
+            FieldSpec("oot_end", "Out-of-time end date (optional, exclusive)", "text", placeholder="2026-01-01"),
+        ),
+        hints=_split_hints,
     )
 )
 
@@ -595,6 +658,9 @@ register_block(
         fn=write_csv,
         lazy_sink_fn=_write_csv_sink,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("filename", "Output filename", "text", placeholder="output.csv"),
+        ),
     )
 )
 
@@ -722,5 +788,12 @@ register_block(
         outputs=[PortSpec("image", type="image")],
         fn=generate_image,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("kind", "Chart type", "select", options=("hist", "bar", "scatter", "line")),
+            FieldSpec("x", "X column", "column"),
+            FieldSpec("y", "Y column (bar / scatter / line)", "column"),
+            FieldSpec("bins", "Bins (hist)", "number"),
+            FieldSpec("title", "Title", "text"),
+        ),
     )
 )

@@ -19,11 +19,14 @@ inspect.getsource(fn) (see compiler.py).
 
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
+from ..agent import hints as h
 from ..metadata_transforms import infer_dtypes
 from ..packet import ColumnMeta, ColumnRole
-from .base import BlockSpec, PortSpec, register_block
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 
 def fit_binning(
@@ -345,6 +348,10 @@ def _fit_binning_meta(input_metas, outputs, params):
     return infer_dtypes(input_metas, {k: v for k, v in outputs.items() if isinstance(v, pl.DataFrame)}, params)
 
 
+def _fit_binning_hints(outputs: dict[str, Any]) -> list[str]:
+    return h.iv_rows(h.rows(outputs.get("summary")), keep_monotonic=True)
+
+
 register_block(
     BlockSpec(
         category="fit_binning",
@@ -361,6 +368,7 @@ register_block(
         aggregate_outputs=("bins", "summary"),
         fn=fit_binning,
         metadata_transform=_fit_binning_meta,
+        hints=_fit_binning_hints,
     )
 )
 
@@ -449,6 +457,10 @@ register_block(
         outputs=[PortSpec("out")],
         fn=apply_binning,
         metadata_transform=_apply_binning_meta,
+        form=(
+            FieldSpec("output", "Output", "select", options=("woe", "target_mean", "bin", "both")),
+            FieldSpec("features", "Features (optional -- defaults to every binned feature)", "columns"),
+        ),
     )
 )
 
@@ -499,5 +511,10 @@ register_block(
         aggregate_outputs=("table",),
         fn=scorecard_table,
         metadata_transform=infer_dtypes,
+        form=(
+            FieldSpec("base_score", "Base score", "number"),
+            FieldSpec("base_odds", "Base odds (good:bad)", "number"),
+            FieldSpec("pdo", "Points to double the odds", "number"),
+        ),
     )
 )

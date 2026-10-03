@@ -11,9 +11,11 @@ itself (see compiler.py), not sibling module-level helpers.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import polars as pl
 
+from ..agent import hints as h
 from ..packet import ColumnMeta, ColumnRole
 from .base import BlockSpec, PortSpec, register_block
 
@@ -66,6 +68,33 @@ def data_profile(df: pl.DataFrame, features: list[str] | None = None) -> dict:
     return {"kind": "data_profile", "row_count": n, "columns": rows}
 
 
+def _data_profile_hints(outputs: dict[str, Any]) -> list[str]:
+    cols = h.metric(outputs).get("columns") or []
+    empty = [c["column"] for c in cols if h.num(c.get("fill_rate")) and c["fill_rate"] < h.LOW_FILL_RATE]
+    flat = [
+        c["column"]
+        for c in cols
+        if h.num(c.get("dominant_value_share")) and c["dominant_value_share"] >= h.DOMINANT_SHARE and c["column"] not in empty
+    ]
+    ids = [
+        c["column"]
+        for c in cols
+        if h.num(c.get("distinct_ratio"))
+        and c["distinct_ratio"] >= h.ID_LIKE_DISTINCT
+        and not str(c.get("dtype", "")).startswith("Float")
+    ]
+    hints = []
+    if empty:
+        hints.append(f"Mostly empty (filled < {h.LOW_FILL_RATE:.0%}): {h.names(empty)} -- leave out, or treat the missing values.")
+    if flat:
+        hints.append(f"Near-constant (one value >= {h.DOMINANT_SHARE:.0%}): {h.names(flat)} -- leave out as features.")
+    if ids:
+        hints.append(f"Id-like (almost every value distinct): {h.names(ids)} -- never use as features.")
+    if cols and not hints:
+        hints.append("No empty, constant or id-like columns among those profiled.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="data_profile",
@@ -77,6 +106,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=data_profile,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_data_profile_hints,
     )
 )
 
@@ -118,6 +148,27 @@ def _apply_exclusions_meta(input_metas, outputs, params):
     return {"out": {name: in_meta[name] for name in df.columns if name in in_meta}}
 
 
+def _apply_exclusions_hints(outputs: dict[str, Any]) -> list[str]:
+    summary = h.metric(outputs, "summary")
+    start, final = summary.get("starting_population"), summary.get("final_population")
+    if not h.num(start) or not start:
+        return []
+    hints = []
+    for step in summary.get("steps") or []:
+        if step.get("rule") is None:
+            continue
+        if step.get("dropped") == 0:
+            hints.append(f"Rule {step['step']!r} dropped nothing -- check its expression keeps the right rows.")
+        elif h.num(step.get("dropped")) and step["dropped"] / start > h.BIG_EXCLUSION:
+            hints.append(
+                f"Rule {step['step']!r} dropped {step['dropped'] / start:.0%} of the population -- confirm that's "
+                "intended (ask_user if the plan didn't say)."
+            )
+    if not hints and h.num(final):
+        hints.append(f"Exclusions kept {final / start:.0%} of the population; no rule looks off.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="apply_exclusions",
@@ -129,6 +180,7 @@ register_block(
         outputs=[PortSpec("out"), PortSpec("summary", type="scalar_metric")],
         fn=apply_exclusions,
         metadata_transform=_apply_exclusions_meta,
+        hints=_apply_exclusions_hints,
     )
 )
 
@@ -212,6 +264,20 @@ def data_quality_rules(df: pl.DataFrame, rules: list[dict]) -> dict:
     }
 
 
+def _data_quality_rules_hints(outputs: dict[str, Any]) -> list[str]:
+    results = h.metric(outputs).get("results") or []
+    errors = [r["name"] for r in results if not r.get("passed") and r.get("severity", "error") == "error"]
+    warnings = [r["name"] for r in results if not r.get("passed") and r.get("severity") == "warning"]
+    hints = []
+    if errors:
+        hints.append(f"Failed: {h.names(errors)} -- fix the data (or ask_user) before modelling on it.")
+    if warnings:
+        hints.append(f"Warnings: {h.names(warnings)} -- mention them in the stage summary.")
+    if results and not hints:
+        hints.append("Every data-quality rule passed.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="data_quality_rules",
@@ -223,6 +289,7 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=data_quality_rules,
         metadata_transform=lambda *_a, **_k: {},
+        hints=_data_quality_rules_hints,
     )
 )
 
