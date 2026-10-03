@@ -21,7 +21,7 @@ from ..metadata_transforms import resolve_metadata_transform
 from ..packet import ColumnRole, DataFramePacket
 from ..runslot import RunBusy, RunFailed
 from ..session import new_id, wire_is_valid
-from . import catalogue
+from . import catalogue, leakage
 from .build import AWAITING_APPROVAL, AWAITING_INPUT, BUILDING, PLANNING, STAGE_ACTIVE, STAGE_DONE, STAGE_SKIPPED, AgentBuild, ToolError
 from .layout import Placer, next_lane_order
 
@@ -654,7 +654,63 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
                 if a != bt and "any" not in (a, bt):
                     errors.append(f"{where}: can't wire {a} output {src}.{inp['from_port']} into {bt} input {inp['port']}")
         refs[ref] = step
+    if not errors:
+        errors += _plan_leaks(b, steps)
     return errors
+
+
+def _leak_graph(
+    b: AgentBuild, steps: list[dict[str, Any]] | None = None, wire: tuple[str, str, str, str] | None = None
+) -> tuple[dict[str, leakage.Node], list[leakage.Edge], dict[str, str]]:
+    """The graph as leakage.find_leaks sees it -- the real one, plus a
+    stage's planned steps (each step's planned inputs replacing whatever
+    its built block is wired to) or one wire about to be connected.
+    Returns (nodes, edges, node id -> step ref)."""
+    graph = b.session.graph
+    nodes = {
+        bid: leakage.Node(bid, blk.name, blk.category, {p.name: p.type for p in blk.inputs}, {p.name: p.type for p in blk.outputs})
+        for bid, blk in graph.blocks.items()
+    }
+    edges = [leakage.Edge(w.from_block, w.from_port, w.to_block, w.to_port) for w in graph.wires.values()]
+    planned: dict[str, str] = {}
+    if steps:
+        built = _step_blocks(b)
+        for step in steps:
+            cat = step.get("category")
+            if cat != "custom" and cat not in BLOCK_REGISTRY:
+                continue
+            nid = built.get(step["ref"], step["ref"])
+            planned[nid] = step["ref"]
+            if nid not in nodes:
+                ins, outs = _step_ports(step)
+                nodes[nid] = leakage.Node(nid, step.get("name") or step["ref"], cat, ins or {}, outs or {})
+            edges = [e for e in edges if e.dst != nid]
+            for inp in step.get("inputs") or []:
+                edges.append(leakage.Edge(built.get(inp["from"], inp["from"]), inp["from_port"], nid, inp["port"]))
+    if wire is not None:
+        src, src_port, dst, dst_port = wire
+        edges = [e for e in edges if not (e.dst == dst and e.dst_port == dst_port)]
+        edges.append(leakage.Edge(src, src_port, dst, dst_port))
+    return nodes, edges, planned
+
+
+def _plan_leaks(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
+    """Holdout leakage a stage plan would create (see agent/leakage.py)."""
+    nodes, edges, planned = _leak_graph(b, steps=steps)
+    out = []
+    for leak in leakage.find_leaks(nodes, edges):
+        step = planned.get(leak.block) or planned.get(leak.fitter)
+        if step:
+            out.append(f"step {step}: {leak.message} (If the user wants it anyway, they can wire it themselves.)")
+    return out
+
+
+def flag_leaks(b: AgentBuild) -> None:
+    """Record any holdout leakage left in the graph -- e.g. among the
+    user's own blocks -- as a concern for the stage summary and report."""
+    nodes, edges, _ = _leak_graph(b)
+    for leak in leakage.find_leaks(nodes, edges):
+        b.add_concern(leak.message)
 
 
 def layout_plan(b: AgentBuild, plan: dict[str, Any]) -> None:
@@ -843,6 +899,7 @@ def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool =
             entry["status"] = "green"
         report.append(entry)
         b.log("step", ref=ref, block=bid, status=entry["status"])
+    flag_leaks(b)
     return {
         "ok": True,
         "steps": report,
@@ -1072,6 +1129,14 @@ def connect(b: AgentBuild, from_block: str, from_port: str, to_block: str, to_po
         raise ToolError(f"{dst.name!r} has no input port {to_port!r}; inputs: {[p.name for p in dst.inputs]}")
     if src_port.type != dst_port.type and "any" not in (src_port.type, dst_port.type):
         raise ToolError(f"type mismatch: {from_port} is {src_port.type}, {to_port} expects {dst_port.type}")
+    before = {(lk.block, lk.fitter, lk.split) for lk in leakage.find_leaks(*_leak_graph(b)[:2])}
+    new = [
+        lk
+        for lk in leakage.find_leaks(*_leak_graph(b, wire=(from_block, from_port, to_block, to_port))[:2])
+        if (lk.block, lk.fitter, lk.split) not in before
+    ]
+    if new:
+        raise ToolError(new[0].message + " (If the user wants it anyway, they can wire it themselves.)")
     try:
         with b.session.edit():
             wire = b.session.add_wire(from_block, from_port, to_block, to_port)
