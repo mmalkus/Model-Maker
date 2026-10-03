@@ -419,7 +419,7 @@ def test_anthropic_usage_counts_cache_reads_and_writes(planning_build):
     assert b.usage["output_tokens"] == 50
 
 
-def test_claude_cli_cost_is_the_session_total_not_a_sum(planning_build, tmp_path):
+def test_claude_cli_cost_is_the_session_total_not_a_sum(planning_build, tmp_path, monkeypatch):
     """The CLI reports total_cost_usd for the whole session, and a resume
     continues the session -- so a build adds the increase, not each total."""
     from modelmaker.agent.loop import ClaudeCliLoop
@@ -440,8 +440,10 @@ def test_claude_cli_cost_is_the_session_total_not_a_sum(planning_build, tmp_path
         "  'result': 'ok'}))\n"
     )
     fake.chmod(0o755)
+    # The fake is the only claude on PATH (CI has no real one).
+    monkeypatch.setenv("PATH", str(tmp_path))
     loop = ClaudeCliLoop("haiku", "http://127.0.0.1:1", "tok")
-    loop.binary = str(fake)
+    assert loop.binary == str(fake)
     loop.start(b, "S", "P", [])
     loop.resume(b, "P2", [])
     assert b.usage["cost_usd"] == pytest.approx(0.08)  # 0.05, then +0.03
