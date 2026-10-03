@@ -80,7 +80,7 @@ def planning_build(tmp_path):
 def _plan(anchor):
     return {
         "summary": "split",
-        "stages": [{"key": "est", "name": "Estimation", "goal": f"70/30 holdout split of {anchor}"}],
+        "stages": [{"key": "est", "name": "Estimation", "goal": f"70/30 holdout split of {anchor}", "blocks": ["train_test_split"]}],
     }
 
 
@@ -320,13 +320,15 @@ def test_lmstudio_unreachable_server_is_a_clear_error():
         make_loop("lmstudio", None, api_base_url="", token="", base_url="http://127.0.0.1:9/v1")
 
 
-def test_compact_catalogue_lists_tags_only():
+def test_compact_catalogue_lists_tags_and_block_names_only():
     from modelmaker.agent import prompts
 
     compact, full = prompts._catalogue_context(True), prompts._catalogue_context(False)
-    assert len(compact) * 8 < len(full)
-    assert "- pd (" in compact and "- regression (" in compact and "list_block_types" in compact
-    assert "logistic_regression" not in compact  # block names come from list_block_types(tag=...)
+    assert len(compact) * 4 < len(full)
+    assert "- pd: " in compact and "- regression: " in compact and "list_block_types" in compact
+    # Names (so a category is never a guess), not ports or summaries.
+    assert "train_test_split, time_split" in compact and "logistic_regression" in compact
+    assert "logistic_regression [" not in compact
     assert "- logistic_regression [regression, scorecard, pd]" in full
     assert "read_csv" not in compact  # disallowed blocks stay out either way
 

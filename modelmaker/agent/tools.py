@@ -506,7 +506,7 @@ _PLAN_SCHEMA = {
                         "handed to the build when the stage starts.",
                     },
                 },
-                "required": ["key", "name", "goal"],
+                "required": ["key", "name", "goal", "blocks"],
             },
         },
         "changes_to_existing": {
@@ -575,9 +575,12 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
         keys.add(key)
         if not (stage.get("goal") or "").strip():
             errors.append(f"{where}: needs a goal")
+        if not stage.get("blocks"):
+            errors.append(f"{where}: list the registry blocks it will most likely use in `blocks`")
         unknown = [c for c in stage.get("blocks") or [] if c not in BLOCK_REGISTRY or c in catalogue.AGENT_DISALLOWED]
         if unknown:
-            errors.append(f"{where}: blocks {unknown} aren't registry blocks an AI build can add")
+            hints = "; ".join(f"{c!r}{catalogue.unknown_category_hint(c)}" for c in unknown)
+            errors.append(f"{where}: blocks {unknown} aren't registry blocks an AI build can add ({hints})")
         lane = stage.get("lane")
         if lane is not None and lane not in graph.lanes:
             errors.append(f"{where}: lane {lane!r} isn't an existing lane id -- leave it out to create a new lane")
@@ -611,7 +614,7 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
             errors.append(f"{where}: ref {ref!r} was used by an earlier stage -- pick a new one")
         cat = step.get("category")
         if cat != "custom" and cat not in BLOCK_REGISTRY:
-            errors.append(f"{where}: unknown category {cat!r}")
+            errors.append(f"{where}: unknown category {cat!r}{catalogue.unknown_category_hint(cat)}")
             refs[ref] = step
             continue
         if cat in catalogue.AGENT_DISALLOWED:
@@ -903,7 +906,8 @@ def add_block(
     b: AgentBuild, category: str, lane: str, name: str | None = None, params: dict | None = None, plan_step: str | None = None
 ) -> dict[str, Any]:
     if category not in BLOCK_REGISTRY:
-        raise ToolError(f"unknown category {category!r} -- use add_custom_block for custom code")
+        custom = " (or add_custom_block for custom code)" if b.options.allow_custom_blocks else ""
+        raise ToolError(f"unknown category {category!r}{catalogue.unknown_category_hint(category)}{custom}")
     if category in catalogue.AGENT_DISALLOWED:
         raise ToolError(f"{category} can't be added by an AI build: {catalogue.AGENT_DISALLOWED[category]}")
     params = params or {}

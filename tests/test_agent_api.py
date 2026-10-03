@@ -34,7 +34,7 @@ def _plan(anchor):
             {
                 "plan": {
                     "summary": "split",
-                    "stages": [{"key": "est", "name": "Estimation", "goal": "70/30 holdout split of the anchor"}],
+                    "stages": [{"key": "est", "name": "Estimation", "goal": "70/30 holdout split of the anchor", "blocks": ["train_test_split"]}],
                 }
             },
         )
@@ -227,7 +227,7 @@ def test_mcp_bridge_drives_the_tool_layer(client, live_server):
                 bad = await session.call_tool("add_block", {"category": "filter", "lane": "x"})
                 plan = await session.call_tool(
                     "submit_plan",
-                    {"plan": {"summary": "s", "stages": [{"key": "est", "name": "Estimation", "goal": "split"}]}},
+                    {"plan": {"summary": "s", "stages": [{"key": "est", "name": "Estimation", "goal": "split", "blocks": ["train_test_split"]}]}},
                 )
                 return tools, graph, summary, bad, plan
 

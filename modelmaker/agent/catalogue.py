@@ -76,6 +76,25 @@ def list_tags() -> list[dict[str, Any]]:
     return [{"tag": tag, "blocks": len(_tagged(tag)), "about": about} for tag, about in TAGS.items()]
 
 
+def tag_block_names(tag: str) -> list[str]:
+    """A tag's addable block categories, by name only."""
+    ensure_blocks_registered()
+    return [spec.category for spec in _tagged(tag)]
+
+
+def unknown_category_hint(category: str) -> str:
+    """Why a category isn't a block, and what to use instead: a tag name
+    (a common mix-up) lists its blocks; anything else, the closest names."""
+    import difflib
+
+    ensure_blocks_registered()
+    if category in TAGS:
+        return f" -- that's a tag, not a block; its blocks are: {', '.join(tag_block_names(category))}"
+    names = [c for c in BLOCK_REGISTRY if c not in AGENT_DISALLOWED]
+    close = difflib.get_close_matches(str(category), names, n=3, cutoff=0.5)
+    return f" -- did you mean {', '.join(close)}?" if close else " -- list_block_types(tag=...) lists the blocks"
+
+
 def ensure_blocks_registered() -> None:
     """Import every block library module so BLOCK_REGISTRY is complete --
     the API server does this at import time; the agent may also run from

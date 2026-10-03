@@ -194,11 +194,17 @@ def _catalogue_context(compact: bool = False) -> str:
     block's ports and params with describe_block_type, only for what the
     goal needs."""
     if compact:
-        lines = [f"- {t['tag']} ({t['blocks']}): {t['about']}" for t in catalogue.list_tags()]
+        # Tags with their blocks' names: names only, so a step's category
+        # is never a guess (or a tag name) -- describe_block_type has the rest.
+        lines = [
+            f"- {t['tag']}: {t['about']}\n  blocks: {', '.join(catalogue.tag_block_names(t['tag']))}"
+            for t in catalogue.list_tags()
+        ]
         return (
-            "## Registry block tags\n"
-            "Call list_block_types with tag=<tag> to see that tag's blocks, and "
-            "describe_block_type for a block's ports and params, before using it.\n" + "\n".join(lines)
+            "## Registry blocks, by tag\n"
+            "A step's category is one of these block names (never a tag). list_block_types(tag=...) gives each "
+            "block's one-line summary, and describe_block_type its ports and params -- read it before using a "
+            "block whose ports you haven't seen.\n" + "\n".join(lines)
         )
     lines = []
     for e in catalogue.list_block_types():

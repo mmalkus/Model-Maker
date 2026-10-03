@@ -93,8 +93,8 @@ def plan_turn(call):
                 "assumptions": ["default_flag is the default indicator"],
                 "questions": [],
                 "stages": [
-                    {"key": "est", "name": "Estimation", "goal": "70/30 split; logistic regression on the numeric drivers"},
-                    {"key": "val", "name": "Validation", "goal": "Score the test set and report its Gini"},
+                    {"key": "est", "name": "Estimation", "goal": "70/30 split; logistic regression on the numeric drivers", "blocks": ["train_test_split", "logistic_regression"]},
+                    {"key": "val", "name": "Validation", "goal": "Score the test set and report its Gini", "blocks": ["predict", "auc_gini"]},
                 ],
                 "changes_to_existing": [],
             }
@@ -107,7 +107,7 @@ def plan_turn(call):
 def plan_one_stage(call):
     result = call(
         "submit_plan",
-        {"plan": {"summary": "Split it.", "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split"}]}},
+        {"plan": {"summary": "Split it.", "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split", "blocks": ["train_test_split"]}]}},
     )
     assert result.get("ok"), result
     return "Plan submitted."
@@ -478,7 +478,7 @@ def test_plan_validation_reports_every_problem(prepared):
             "plan": {
                 "summary": "x",
                 "stages": [
-                    {"key": "est", "name": "Estimation", "goal": "fit"},
+                    {"key": "est", "name": "Estimation", "goal": "fit", "blocks": ["logistic_regression"]},
                     {"key": "est", "name": "Again", "goal": ""},
                     {"key": "val", "name": "Validation", "goal": "check", "lane": "lane_nowhere"},
                 ],
@@ -488,6 +488,7 @@ def test_plan_validation_reports_every_problem(prepared):
     )
     err = r["error"]
     assert "key must be unique" in err and "needs a goal" in err and "'lane_nowhere'" in err and "'blk_missing'" in err
+    assert "stage val: list the registry blocks" in err  # every stage names its likely blocks
     assert b.phase == PLANNING and b.plan is None
     assert "no stages" in b.call_tool("submit_plan", {"plan": {"summary": "x", "stages": []}})["error"]
 
@@ -630,7 +631,7 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
                 "plan": {
                     "summary": "split",
                     "questions": ["Which seed?"],
-                    "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split"}],
+                    "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split", "blocks": ["train_test_split"]}],
                 }
             },
         )
@@ -976,13 +977,13 @@ def test_plan_stage_can_just_plan(prepared):
     assert b.call_tool("build_stage", {})["steps"][0]["status"] == "green"
 
 
-def test_the_build_prompt_carries_only_the_block_tags(prepared):
+def test_the_build_prompt_carries_only_the_block_names_by_tag(prepared):
     from modelmaker.agent import prompts
 
     session, anchor = prepared
     b = staged(session, anchor)
     system = prompts.build_system(b)
-    assert "## Registry block tags" in system and "## Registry blocks\n" not in system
+    assert "## Registry blocks, by tag" in system and "## Registry blocks\n" not in system
     assert "## Registry blocks\n" in prompts.plan_system(b)
 
 
@@ -1106,3 +1107,15 @@ def test_small_context_starts_each_stage_fresh_with_the_decisions(prepared, smal
     else:
         assert "The user approved this outline" not in stage2 and "fresh conversation" not in stage2
     assert b.log_record()["options"]["small_context"] is small
+
+
+def test_a_tag_used_as_a_block_gets_its_blocks_named(prepared):
+    session, anchor = prepared
+    b = staged(session, anchor)
+    r = b.call_tool("plan_stage", {"steps": [
+        {"ref": "x1", "category": "sampling", "name": "split", "why": "", "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]},
+        {"ref": "x2", "category": "logistic_regresion", "name": "fit", "why": "", "inputs": [{"port": "df", "from": "x1", "from_port": "train"}]},
+    ]})
+    assert "that's a tag, not a block; its blocks are: train_test_split, time_split" in r["error"]
+    assert "did you mean logistic_regression" in r["error"]
+    assert "its blocks are" in b.call_tool("add_block", {"category": "sampling", "lane": "est"})["error"]
