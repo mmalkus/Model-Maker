@@ -250,7 +250,7 @@ export interface LLMSettingsOut {
   include_reference: boolean | null
   settings: Record<string, LLMProviderSettings>
   // The AI builder's plan and build LLMs (see agent-builder-proposal.md §9.1).
-  agent: { plan: AgentLLMChoice; build: AgentLLMChoice; capable_providers: string[]; small_context?: boolean }
+  agent: { plan: AgentLLMChoice; build: AgentLLMChoice; capable_providers: string[]; small_context?: boolean; decision_hints?: boolean }
 }
 
 export interface Provenance {
@@ -346,7 +346,7 @@ export interface BuildOut {
   ended_at: string | null
   plan_llm: { provider: string | null; model: string | null }
   build_llm: { provider: string | null; model: string | null }
-  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_custom_blocks: boolean; small_context?: boolean }
+  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_custom_blocks: boolean; small_context?: boolean; decision_hints?: boolean }
   // Where the build's full log is saved (see AgentBuild.save_log).
   log_path: string | null
   preflight: { blocking: PreflightIssue[]; warnings: PreflightIssue[]; max_rows?: number | null }

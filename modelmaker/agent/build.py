@@ -104,6 +104,11 @@ class BuildOptions:
     # stage. For models with a small context window; see
     # controller._next_stage and prompts.decisions_so_far.
     small_context: bool = False
+    # Decision hints: run_to adds a short rule-based "what this result
+    # means / what to do next" (`next`) for blocks the build has to judge
+    # -- binning, fits, Gini, PSI... For small models that call tools well
+    # but read statistics poorly; see hints.py.
+    decision_hints: bool = False
     limits: BuildLimits = field(default_factory=BuildLimits)
 
 
@@ -498,6 +503,7 @@ class AgentBuild:
                 "auto_build": self.options.auto_build,
                 "allow_custom_blocks": self.options.allow_custom_blocks,
                 "small_context": self.options.small_context,
+                "decision_hints": self.options.decision_hints,
             },
             "log_path": str(self.log_path) if self.log_path else None,
             "preflight": self.preflight,

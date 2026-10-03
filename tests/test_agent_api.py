@@ -275,6 +275,21 @@ def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
     c.post("/api/agent/builds/current/stop")
 
 
+def test_decision_hints_come_from_settings_unless_the_build_says(client):
+    c = client
+    c.scripts.update({"plan": [_plan(c.anchor)]})
+    assert c.get("/api/llm/settings").json()["agent"]["decision_hints"] is False
+    assert c.put("/api/llm/settings", json={"agent_decision_hints": True}).json()["agent"]["decision_hints"] is True
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
+    assert started.json()["options"]["decision_hints"] is True
+    c.post("/api/agent/builds/current/stop")
+    c.post("/api/agent/builds/current/discard")
+    started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "decision_hints": False})
+    assert started.json()["options"]["decision_hints"] is False
+    c.post("/api/agent/builds/current/stop")
+    c.put("/api/llm/settings", json={"agent_decision_hints": False})
+
+
 def test_small_context_is_a_setting_builds_pick_up(client):
     c = client
     assert c.get("/api/llm/settings").json()["agent"]["small_context"] is False

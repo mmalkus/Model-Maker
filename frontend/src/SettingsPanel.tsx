@@ -283,6 +283,22 @@ export function SettingsPanel({
                   </div>
                 </span>
               </label>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={settings.agent.decision_hints ?? false}
+                  disabled={busy}
+                  onChange={(e) => update({ agent_decision_hints: e.target.checked })}
+                />
+                <span>
+                  Decision hints
+                  <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+                    Add a short, rule-based "what this means and what to do next" to the build's results (binning,
+                    coefficients, Gini, PSI...), so the model reads a recommendation rather than a statistics table.
+                    For small models.
+                  </div>
+                </span>
+              </label>
             </div>
           )}
         </>

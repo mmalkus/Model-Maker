@@ -17,7 +17,7 @@ from ..blocks.base import BLOCK_REGISTRY
 from ..packet import ColumnRole, DataFramePacket
 from . import catalogue
 from .build import AgentBuild, ToolError
-from .tools import is_statistics_table, table_rows
+from .tools import block_hints, is_statistics_table, table_rows
 
 COMMON = """You are building a model inside Model-Maker, a visual, Polars-based \
 modelling tool used by credit-risk and actuarial model developers. A model \
@@ -245,6 +245,15 @@ def plan_feedback_prompt(feedback: str) -> str:
     )
 
 
+# BuildOptions.decision_hints: how to treat run_to's `next`.
+HINTS_RULE = """\
+## Hints
+A run_to result (and each built step of plan_stage) may carry `next`: what \
+the result means and what to do about it, from the app's modelling rules. \
+Follow it unless the approved plan or the user says otherwise; if you don't, \
+say why with note_deviation."""
+
+
 def build_system(build: AgentBuild, compact: bool = False) -> str:
     """The build always gets the compact catalogue (tags only): it's
     re-sent on every one of the build's many round trips, and the build
@@ -264,6 +273,7 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
                 update_tool=" / update_custom_block" if build.options.allow_custom_blocks else "",
                 custom_steps=CUSTOM_STEPS if build.options.allow_custom_blocks else "",
             ),
+            *([HINTS_RULE] if build.options.decision_hints else []),
             _catalogue_context(compact=True),
         ]
     )
@@ -344,6 +354,8 @@ def built_so_far(build: AgentBuild) -> str:
             tags.append(f"step {prov['plan_step']}")
         lines.append(f"- {block.name} (id {bid}; {', '.join(tags)}; {build.session.runner.status(bid)})")
         lines += [_output_line(build, bid, p.name, seen) for p in block.outputs]
+        if build.options.decision_hints and build.session.runner.status(bid) == "green":
+            lines += [f"  next: {hint}" for hint in block_hints(build, bid)]
     text = "\n".join(lines)
     if len(text) > STAGE_CONTEXT_CHARS:
         text = text[:STAGE_CONTEXT_CHARS] + "\n... (cut short -- get_graph / get_output_summary for the rest)"

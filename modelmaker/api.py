@@ -256,6 +256,8 @@ class LLMSettingsUpdate(BaseModel):
     agent_build: dict[str, Any] | None = None
     # Each build stage in a fresh conversation (see BuildOptions.small_context).
     agent_small_context: bool | None = None
+    # Rule-based next-step hints in run results (see BuildOptions.decision_hints).
+    agent_decision_hints: bool | None = None
 
 
 # ---- helpers -------------------------------------------------------------
@@ -1027,6 +1029,7 @@ def _effective_llm_settings() -> dict[str, Any]:
             "build": agent_choice(LLM_SETTINGS.agent_build),
             "capable_providers": list(AGENT_CAPABLE_PROVIDERS),
             "small_context": LLM_SETTINGS.agent_small_context,
+            "decision_hints": LLM_SETTINGS.agent_decision_hints,
         },
     }
 
@@ -1045,7 +1048,13 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
         if provider and provider not in AGENT_CAPABLE_PROVIDERS:
             raise HTTPException(400, f"{provider} can't drive an AI build; use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}")
     LLM_SETTINGS.update(
-        req.active_provider, req.include_reference, req.settings, req.agent_plan, req.agent_build, req.agent_small_context
+        req.active_provider,
+        req.include_reference,
+        req.settings,
+        req.agent_plan,
+        req.agent_build,
+        req.agent_small_context,
+        req.agent_decision_hints,
     )
     return _effective_llm_settings()
 
@@ -1549,6 +1558,8 @@ class AgentBuildStart(BaseModel):
     allow_custom_blocks: bool = True
     # A fresh conversation per stage; None = Settings' AI-builder choice.
     small_context: bool | None = None
+    # Next-step hints in run results; None = Settings' AI-builder choice.
+    decision_hints: bool | None = None
 
 
 class AgentText(BaseModel):
@@ -1590,6 +1601,7 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         auto_build=req.auto_build,
         allow_custom_blocks=req.allow_custom_blocks,
         small_context=LLM_SETTINGS.agent_small_context if req.small_context is None else req.small_context,
+        decision_hints=LLM_SETTINGS.agent_decision_hints if req.decision_hints is None else req.decision_hints,
     )
     return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
 

@@ -23,6 +23,7 @@ from ..runslot import RunBusy, RunFailed
 from ..session import new_id, wire_is_valid
 from . import catalogue, leakage
 from .build import AWAITING_APPROVAL, AWAITING_INPUT, BUILDING, PLANNING, STAGE_ACTIVE, STAGE_DONE, STAGE_SKIPPED, AgentBuild, ToolError
+from .hints import decision_hints
 from .layout import Placer, next_lane_order
 
 READ = frozenset({PLANNING, BUILDING})
@@ -252,6 +253,20 @@ def check_excluded(b: AgentBuild, params: dict[str, Any], where: str) -> None:
 
 
 SUSPICIOUS_BAND = "suspicious"  # fit_binning's iv_band for IV >= 0.5
+
+
+def block_hints(b: AgentBuild, block_id: str) -> list[str]:
+    """Decision hints (see hints.py) for a block that just ran green."""
+    blk = b.session.graph.blocks[block_id]
+    if blk.is_custom:
+        return []
+    outputs = {}
+    for p in blk.outputs:
+        try:
+            outputs[p.name] = b.current_output(block_id, p.name)[1]
+        except ToolError:
+            continue
+    return decision_hints(blk.category, outputs)
 
 
 def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
@@ -896,6 +911,8 @@ def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool =
                 entry.update({k: ran[k] for k in ("error", "upstream_failures", "must_ask_user") if k in ran})
                 return stop(entry, next="read the error, fix the step (set_params, or plan_stage with changed steps), then call build_stage")
             entry["outputs"] = ran.get("outputs")
+            if ran.get("next"):
+                entry["next"] = ran["next"]
         else:
             entry["status"] = "green"
         report.append(entry)
@@ -1247,6 +1264,10 @@ def run_to(b: AgentBuild, block: str) -> dict[str, Any]:
     if status == "green":
         b.failures.pop(block, None)
         out["outputs"] = run_report(b, block)
+        if b.options.decision_hints:
+            hints = block_hints(b, block)
+            if hints:
+                out["next"] = hints
         return out
     st = runner.state.get(block)
     out["error"] = (st.last_error or "")[-1500:] if st else None

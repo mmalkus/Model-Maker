@@ -283,6 +283,19 @@ reports it) or set with `MODELMAKER_LLM_CONTEXT_TOKENS`. Expect a local
 build to take a while; `MODELMAKER_LLM_TIMEOUT_SECONDS` (default 900 for
 local models) caps a single request.
 
+Two **Settings → AI builder** switches help small models:
+- **Small context** starts each build stage in a fresh conversation,
+  carrying only the outline, what's built and the decisions so far.
+- **Decision hints** adds a short, rule-based recommendation (`next`) to the
+  results the build has to judge. Binning splits features into candidates,
+  no-signal and likely leakage by IV. A fitted logistic regression gets
+  wrong-sign (WoE) and insignificant coefficients flagged. Gini, train/test
+  comparison, PSI and rating-scale monotonicity get a verdict. The model
+  then reads a recommendation rather than a statistics table. Departing
+  from a hint is allowed, but the model must say why with a recorded
+  deviation. The thresholds are the usual credit-risk rules of thumb, in
+  [`modelmaker/agent/hints.py`](modelmaker/agent/hints.py).
+
 ## Project structure
 
 ```
