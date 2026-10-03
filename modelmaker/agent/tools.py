@@ -128,6 +128,76 @@ TABLE_ROW_LIMIT = 200
 TABLE_CHAR_LIMIT = 20_000
 
 
+# What run_to (and so plan_stage, per step) reports of a block that ran:
+# enough to check the step without a get_output_summary round trip, which
+# re-sends the whole conversation. A statistics table comes whole when its
+# rows fit REPORT_TABLE_CHARS; a dataframe brings its target rate and the
+# statistics of the columns the block added (a split's samples, WoE
+# columns, a score) -- not all of them, which get_output_summary has.
+REPORT_TABLE_CHARS = 6_000
+REPORT_NEW_COLUMNS = 8
+
+
+def _input_columns(b: AgentBuild, block_id: str) -> set[str] | None:
+    """The columns of the dataframes wired into a block; None when one
+    can't be read (then nothing counts as new)."""
+    cols: set[str] = set()
+    for wire in b.session.graph.input_wires(block_id).values():
+        try:
+            _, value = b.current_output(wire.from_block, wire.from_port)
+        except ToolError:
+            return None
+        if isinstance(value, DataFramePacket):
+            cols.update(value.data.columns)
+    return cols
+
+
+def _dataframe_report(b: AgentBuild, block_id: str, packet: DataFramePacket) -> dict[str, Any]:
+    columns = list(packet.data.columns)
+    out: dict[str, Any] = {"type": "dataframe", "row_count": packet.data.height, "columns": columns}
+    targets = [n for n, m in packet.schema_meta.items() if m.role == ColumnRole.TARGET and n in columns]
+    seen = _input_columns(b, block_id)
+    new = [] if seen is None else [c for c in columns if c not in seen]
+    if not new and not targets:
+        return out
+    full = summarize_value(packet)
+    by_name = {c["name"]: c for c in full["columns"]}
+    for t in targets:
+        if "mean" in by_name.get(t, {}):
+            out[f"{t}_mean"] = by_name[t]["mean"]
+    if new:
+        out["new_columns"] = [by_name[c] for c in new[:REPORT_NEW_COLUMNS] if c in by_name]
+        if len(new) > REPORT_NEW_COLUMNS:
+            out["new_columns_note"] = f"{len(new) - REPORT_NEW_COLUMNS} more new columns -- get_output_summary has them"
+    return out
+
+
+def run_report(b: AgentBuild, block_id: str) -> dict[str, Any]:
+    """Each output of a block that just ran green (see REPORT_TABLE_CHARS)."""
+    blk = b.session.graph.blocks[block_id]
+    outputs: dict[str, Any] = {}
+    for p in blk.outputs:
+        try:
+            _, value = b.current_output(block_id, p.name)
+        except ToolError:
+            continue
+        if isinstance(value, DataFramePacket) and is_statistics_table(b, block_id, p.name):
+            table = table_rows(value, char_limit=REPORT_TABLE_CHARS)
+            if table.get("rows_shown"):
+                table = {
+                    "type": "statistics_table",
+                    "row_count": table["row_count"],
+                    "columns": table["columns"],
+                    "note": "too big to show here -- get_output_summary shows its rows",
+                }
+            outputs[p.name] = table
+        elif isinstance(value, DataFramePacket):
+            outputs[p.name] = _dataframe_report(b, block_id, value)
+        else:
+            outputs[p.name] = summarize_value(value, with_stats=False)
+    return outputs
+
+
 def is_statistics_table(b: AgentBuild, block_id: str, port: str) -> bool:
     """Whether a block's output port is one its registry spec declares a
     statistics table. Never true for a custom block: the build writes
@@ -145,14 +215,15 @@ def _round(value: Any) -> Any:
     return value
 
 
-def table_rows(packet: DataFramePacket) -> dict[str, Any]:
+def table_rows(packet: DataFramePacket, char_limit: int | None = None) -> dict[str, Any]:
     """A statistics table as the model sees it: its rows, rounded, within
-    TABLE_ROW_LIMIT/TABLE_CHAR_LIMIT -- id-role columns left out even
-    here."""
+    TABLE_ROW_LIMIT and char_limit (default TABLE_CHAR_LIMIT) -- id-role
+    columns left out even here."""
+    char_limit = TABLE_CHAR_LIMIT if char_limit is None else char_limit
     df = packet.data
     keep = [n for n, m in packet.schema_meta.items() if m.role != ColumnRole.ID and n in df.columns]
     rows = [{k: _round(v) for k, v in r.items()} for r in df.select(keep).head(TABLE_ROW_LIMIT).iter_rows(named=True)]
-    while rows and len(json.dumps(rows, default=str)) > TABLE_CHAR_LIMIT:
+    while rows and len(json.dumps(rows, default=str)) > char_limit:
         rows = rows[: len(rows) * 3 // 4]
     rows = json.loads(json.dumps(rows, default=str))
     out: dict[str, Any] = {"type": "statistics_table", "row_count": df.height, "columns": keep, "rows": rows}
@@ -772,7 +843,7 @@ def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool =
     return {
         "ok": True,
         "steps": report,
-        "next": "check the results (get_output_summary for statistics tables), then complete_stage -- or finish on the last stage",
+        "next": "check the results above (get_output_summary only for what they leave out), then complete_stage -- or finish on the last stage",
     }
 
 
@@ -1105,20 +1176,7 @@ def run_to(b: AgentBuild, block: str) -> dict[str, Any]:
     out: dict[str, Any] = {"block": block, "status": status}
     if status == "green":
         b.failures.pop(block, None)
-        outputs = {}
-        for p in blk.outputs:
-            try:
-                _, value = b.current_output(block, p.name)
-            except ToolError:
-                continue
-            s = summarize_value(value, with_stats=False)
-            if s["type"] == "dataframe":
-                s = {"type": "dataframe", "row_count": s["row_count"], "columns": [c["name"] for c in s["columns"]]}
-                if is_statistics_table(b, block, p.name):
-                    s["type"] = "statistics_table"
-                    s["note"] = "get_output_summary shows its rows"
-            outputs[p.name] = s
-        out["outputs"] = outputs
+        out["outputs"] = run_report(b, block)
         return out
     st = runner.state.get(block)
     out["error"] = (st.last_error or "")[-1500:] if st else None
@@ -1163,6 +1221,7 @@ def note_deviation(b: AgentBuild, what: str, why: str, plan_step: str | None = N
 )
 def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
     b.pending_question = question
+    b.last_question = question
     b.set_phase(AWAITING_INPUT)
     b.turn_over = True
     return {"ok": True, "message": "Question sent to the user. End your turn now."}

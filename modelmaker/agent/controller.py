@@ -352,6 +352,7 @@ class BuildController:
                 # Back into the stage the user just reviewed.
                 stage = b.current_stage
                 stage["status"] = STAGE_ACTIVE
+                b.user_inputs.append({"stage": stage["key"], "text": text})
                 b.set_phase(BUILDING)
                 b.log("user", text=text)
 
@@ -361,6 +362,13 @@ class BuildController:
 
                 self._spawn(revise)
             else:
+                stage = b.current_stage
+                b.user_inputs.append(
+                    {"stage": stage["key"] if stage else None, "question": b.last_question, "text": text}
+                    if b.last_question
+                    else {"stage": stage["key"] if stage else None, "text": text}
+                )
+                b.last_question = None
                 b.pending_question = None
                 b.set_phase(BUILDING)
                 b.log("user", text=text)
@@ -432,12 +440,23 @@ class BuildController:
 
     def _next_stage(self) -> None:
         """Move on to the next stage, in the same build conversation (so the
-        model keeps what it learned building the earlier ones). Runs on
-        the worker."""
+        model keeps what it learned building the earlier ones) -- or, with
+        small_context, in a fresh one whose opening prompt carries the
+        outline, what's built and the decisions so far. Runs on the
+        worker."""
         b = self.build
         b.stage_index += 1
         self._start_stage()
-        outcome = self._build_loop.resume(b, prompts.stage_prompt(b), self._tools(BUILDING))
+        if b.options.small_context:
+            b.log("fresh_conversation", stage=b.current_stage["key"])
+            outcome = self._build_loop.start(
+                b,
+                prompts.build_system(b, getattr(self._build_loop, "compact", False)),
+                prompts.build_prompt(b),
+                self._tools(BUILDING),
+            )
+        else:
+            outcome = self._build_loop.resume(b, prompts.stage_prompt(b), self._tools(BUILDING))
         self._after_build_turn(outcome)
 
     def _maybe_sample(self) -> None:

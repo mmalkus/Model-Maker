@@ -316,6 +316,7 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
         {build.options.auto_build ? ' · builds automatically' : ''}
         {build.options.allow_custom_blocks === false ? ' · registry blocks only' : ''}
+        {build.options.small_context ? ' · small context' : ''}
       </div>
     </div>
   )

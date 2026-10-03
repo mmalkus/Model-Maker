@@ -1032,3 +1032,77 @@ def test_the_outline_names_real_blocks_per_stage(prepared):
     r = b.call_tool("submit_plan", {"plan": {"summary": "x", "stages": [
         {"key": "est", "name": "Estimation", "goal": "fit", "blocks": ["logistic_regression"]}]}})
     assert r["ok"] and b.plan["stages"][0]["blocks"] == ["logistic_regression"]
+
+
+def test_a_step_report_carries_what_the_step_needs_checking(prepared):
+    """run_to (and so each plan_stage step) reports a small statistics
+    table whole, a dataframe's target rate and the columns the block
+    added -- so checking a step needs no get_output_summary round trip."""
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    b = staged(session, anchor)
+    built = b.call_tool("plan_stage", {"steps": est_steps()})
+    assert built.get("ok"), built
+    split = built["steps"][0]["outputs"]
+    for sample in ("train", "test"):
+        assert 0 < split[sample]["default_flag_mean"] < 1
+        assert "new_columns" not in split[sample]  # a split adds no columns
+    scored = b.call_tool("add_block", {"category": "predict", "lane": "est"})["block"]
+    b.call_tool("connect", {"from_block": built["steps"][0]["block"], "from_port": "test", "to_block": scored, "to_port": "df"})
+    b.call_tool("connect", {"from_block": built["steps"][1]["block"], "from_port": "model", "to_block": scored, "to_port": "model"})
+    ran = b.call_tool("run_to", {"block": scored})
+    new = ran["outputs"]["predictions"]["new_columns"]
+    assert new and all(0 <= c["min"] <= c["max"] <= 1 for c in new if c.get("role") == "predicted")
+
+    fit, ran = _binned(session, anchor, b)
+    summary = ran["outputs"]["summary"]
+    assert summary["type"] == "statistics_table" and {r["feature"] for r in summary["rows"]} == set(FEATURES) | {"region"}
+
+
+def test_a_big_statistics_table_points_to_get_output_summary(prepared, monkeypatch):
+    import modelmaker.agent.tools as T
+
+    session, anchor = prepared
+    monkeypatch.setattr(T, "REPORT_TABLE_CHARS", 300)
+    b = building(session, anchor)
+    fit, ran = _binned(session, anchor, b)
+    assert "rows" not in ran["outputs"]["summary"] and "get_output_summary" in ran["outputs"]["summary"]["note"]
+
+
+@pytest.mark.parametrize("small", [False, True])
+def test_small_context_starts_each_stage_fresh_with_the_decisions(prepared, small):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def asks(call):
+        call("ask_user", {"question": "Which seed should the split use?"})
+        return "Waiting."
+
+    def builds_as_told(call):
+        assert call("note_deviation", {"what": "Used seed 1", "why": "the user asked"})["ok"]
+        return build_est(call)
+
+    controller = make_controller(session, {"plan": [plan_turn], "build": [asks, builds_as_told, build_val]})
+    b = start(controller, anchor, small_context=small)
+    controller.join(60)
+    controller.approve()
+    controller.join(120)
+    controller.feedback("Seed 1, and keep all five drivers.")
+    controller.join(300)
+    assert b.phase == AWAITING_STAGE_REVIEW
+    controller.approve()
+    controller.join(300)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+
+    stage2 = controller.loops["build"].prompts[-1]
+    assert "Stage 2 of 2" in stage2
+    if small:
+        # A fresh conversation: the whole outline again, plus what the
+        # first stage decided -- its summary, the user's answer, the deviation.
+        assert "The user approved this outline" in stage2
+        assert "Which seed should the split use?" in stage2 and "Seed 1, and keep all five drivers." in stage2
+        assert "Split 70/30 and fitted the PD model" in stage2 and "Used seed 1" in stage2
+        assert any(e["kind"] == "fresh_conversation" for e in b.events_since())
+    else:
+        assert "The user approved this outline" not in stage2 and "fresh conversation" not in stage2
+    assert b.log_record()["options"]["small_context"] is small

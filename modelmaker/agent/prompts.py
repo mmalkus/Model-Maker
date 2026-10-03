@@ -372,6 +372,40 @@ def block_docs(categories: list[str]) -> str:
     return "\n\n".join(out)
 
 
+DECISION_SUMMARY_CHARS = 1_200  # each earlier stage's summary, at most
+
+
+def decisions_so_far(build: AgentBuild) -> str:
+    """What the earlier stages decided, for a stage that starts in a fresh
+    conversation (BuildOptions.small_context): their summaries, the user's
+    answers and feedback, deviations and concerns. Empty on the first
+    stage."""
+    lines: list[str] = []
+    for st in build.stages[: build.stage_index]:
+        if st.get("summary"):
+            text = st["summary"].strip()
+            if len(text) > DECISION_SUMMARY_CHARS:
+                text = text[:DECISION_SUMMARY_CHARS].rstrip() + " ..."
+            lines.append(f"### Stage {st['name']!r} ({st['status']})\n{text}")
+    said = []
+    for u in build.user_inputs:
+        where = f" (stage {u['stage']})" if u.get("stage") else ""
+        if u.get("question"):
+            said.append(f"- You asked{where}: {u['question'].strip()}\n  The user answered: {u['text'].strip()}")
+        else:
+            said.append(f"- The user said{where}: {u['text'].strip()}")
+    if said:
+        lines.append("### The user's answers and feedback\n" + "\n".join(said))
+    if build.deviations:
+        lines.append(
+            "### Deviations recorded\n"
+            + "\n".join(f"- {d['what']}" + (f" -- {d['why']}" if d.get("why") else "") for d in build.deviations)
+        )
+    if build.concerns:
+        lines.append("### Concerns flagged\n" + "\n".join(f"- {c['what']}" for c in build.concerns))
+    return "\n\n".join(lines)
+
+
 def stage_prompt(build: AgentBuild) -> str:
     stage = build.current_stage
     n = len(build.stages)
@@ -384,6 +418,12 @@ def stage_prompt(build: AgentBuild) -> str:
         f"Stage {build.stage_index + 1} of {n}: {stage['name']} (key {stage['key']!r}).\nGoal: {stage['goal']}",
         f"Built so far (current outputs):\n{built_so_far(build)}",
     ]
+    if build.options.small_context:
+        decided = decisions_so_far(build)
+        if decided:
+            parts.append(
+                "This stage starts a fresh conversation. What the earlier stages decided -- keep to it:\n\n" + decided
+            )
     docs = block_docs(_stage_block_names(stage))
     if docs:
         parts.append(

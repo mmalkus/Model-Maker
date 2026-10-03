@@ -273,3 +273,14 @@ def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
     tools = {t["name"] for t in c.get("/api/agent/mcp/tools", headers={"X-Agent-Token": api.AGENT.token}).json()}
     assert "add_block" in tools and "add_custom_block" not in tools
     c.post("/api/agent/builds/current/stop")
+
+
+def test_small_context_is_a_setting_builds_pick_up(client):
+    c = client
+    assert c.get("/api/llm/settings").json()["agent"]["small_context"] is False
+    assert c.put("/api/llm/settings", json={"agent_small_context": True}).json()["agent"]["small_context"] is True
+    # Untouched by other updates.
+    assert c.put("/api/llm/settings", json={"agent_plan": {"model": "m"}}).json()["agent"]["small_context"] is True
+    b = c.post("/api/agent/builds", json={"goal": "x", "anchors": [c.anchor]}).json()
+    assert b["options"]["small_context"] is True
+    c.post("/api/agent/stop")

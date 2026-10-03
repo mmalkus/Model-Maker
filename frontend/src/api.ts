@@ -167,6 +167,7 @@ export const api = {
     settings?: Record<string, { model?: string | null; base_url?: string | null; api_key?: string | null }>
     agent_plan?: { provider?: string | null; model?: string | null }
     agent_build?: { provider?: string | null; model?: string | null }
+    agent_small_context?: boolean
   }) => request<LLMSettingsOut>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   // AI model builder -- see agent-builder-proposal.md. One build at a time;
@@ -180,6 +181,7 @@ export const api = {
     sample_rows?: number | null
     auto_build?: boolean
     allow_custom_blocks?: boolean
+    small_context?: boolean | null
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
   agentBuildLog: (buildId: string) => request<Record<string, unknown>>(`/agent/builds/${buildId}/log`),
   agentCurrent: (cursor = 0) => request<BuildStateOut>(`/agent/builds/current?cursor=${cursor}`),

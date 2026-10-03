@@ -98,6 +98,12 @@ class BuildOptions:
     # registry block does the job. Off: registry blocks only, and the
     # custom-code tools aren't offered at all (tools.tools_for_phase).
     allow_custom_blocks: bool = True
+    # Small context: each stage starts a fresh conversation (the stage
+    # prompt carries what it needs -- the outline, what's built, and the
+    # decisions so far) instead of continuing one that grows stage by
+    # stage. For models with a small context window; see
+    # controller._next_stage and prompts.decisions_so_far.
+    small_context: bool = False
     limits: BuildLimits = field(default_factory=BuildLimits)
 
 
@@ -169,6 +175,11 @@ class AgentBuild:
         # feature fit_binning banded 'suspicious' used in a model -- shown
         # at the stage review and in the report: [{stage, what}].
         self.concerns: list[dict[str, Any]] = []
+        # The user's say during the build: answers to ask_user questions
+        # and stage-review feedback ({stage, question?, text}), so a stage
+        # started in a fresh conversation still knows them.
+        self.user_inputs: list[dict[str, Any]] = []
+        self.last_question: str | None = None  # the open ask_user question
         self.error: str | None = None
 
         self.owned_blocks: set[str] = set()
@@ -486,6 +497,7 @@ class AgentBuild:
                 "sample_rows": self.options.sample_rows,
                 "auto_build": self.options.auto_build,
                 "allow_custom_blocks": self.options.allow_custom_blocks,
+                "small_context": self.options.small_context,
             },
             "log_path": str(self.log_path) if self.log_path else None,
             "preflight": self.preflight,
