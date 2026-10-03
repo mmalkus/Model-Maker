@@ -375,7 +375,12 @@ def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inn
     Non-key columns present on both sides get a "_right" suffix on the
     right-hand copy; a "full" join also keeps the right-hand keys as
     "<key>_right". Where a column exists on both sides, the left side's
-    role wins."""
+    role wins. "outer" (polars' old name for "full") still works, for
+    projects saved before the rename."""
+    if how == "outer":
+        how = "full"
+    if how == "cross":
+        raise ValueError('how="cross" is not supported: polars rejects join keys with it')
     return left.join(right, on=on, how=how)
 
 
@@ -400,7 +405,7 @@ register_block(
         metadata_transform=_join_meta,
         form=(
             FieldSpec("on", "Join on", "columns"),
-            FieldSpec("how", "How", "select", options=("inner", "left", "right", "outer", "semi", "anti", "cross")),
+            FieldSpec("how", "How", "select", options=("inner", "left", "right", "full", "semi", "anti")),
         ),
     )
 )
