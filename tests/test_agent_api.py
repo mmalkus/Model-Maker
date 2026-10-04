@@ -108,6 +108,10 @@ def test_build_endpoints_and_canvas_lock(client):
     # Second build can't start.
     assert c.post("/api/agent/builds", json={"goal": "again", "anchors": [c.anchor]}).status_code == 409
 
+    # ask_user sets awaiting_input mid-turn; while the turn is still ending,
+    # stop only flags the build and the turn's wrap-up stops it. Let the
+    # turn end so stop answers with the final phase.
+    api.AGENT.join(10)
     stopped = c.post("/api/agent/builds/current/stop").json()
     assert stopped["phase"] == "stopped"
     assert c.post("/api/blocks", json={"category": "filter"}).status_code == 200
