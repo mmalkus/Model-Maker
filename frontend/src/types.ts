@@ -22,6 +22,32 @@ export interface PortSpec {
   required: boolean
 }
 
+// One params form field, as the API serves it (see modelmaker/forms.py:
+// a block's own BlockSpec.form fields, then fields inferred from its
+// function's signature).
+export interface FormField {
+  key: string
+  label: string
+  kind: 'text' | 'number' | 'select' | 'column' | 'columns' | 'checkbox'
+  placeholder: string
+  step: number | null
+  options: string[]
+  // A 'column' field that defaults to whichever input column currently
+  // carries this role (see packet.resolve_role_column) when the param is
+  // left out of `params` entirely -- the field then offers an "Auto" option
+  // that clears the key rather than setting it to ''.
+  auto_role: 'target' | 'predicted' | null
+  // The function's own default for the param -- what leaving it unset means.
+  default: unknown
+}
+
+// Params with no flat field (dicts, rule lists) are in other_params, edited
+// as JSON.
+export interface BlockForm {
+  fields: FormField[]
+  other_params: string[]
+}
+
 export interface RegistryEntry {
   category: string
   block_type: BlockType
@@ -32,6 +58,7 @@ export interface RegistryEntry {
   display_name: string
   inputs: PortSpec[]
   outputs: PortSpec[]
+  form: BlockForm
 }
 
 export interface BlockTag {
@@ -51,6 +78,9 @@ export interface BlockOut {
   params: Record<string, unknown>
   code: string | null
   source: string | null
+  // The params form for a registry block; null for a custom block (the
+  // inspector derives its `_col` pickers from its params instead).
+  form: BlockForm | null
   metadata_transform: Record<string, unknown> | null
   inputs: PortSpec[]
   outputs: PortSpec[]

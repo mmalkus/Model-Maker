@@ -64,6 +64,8 @@ the user (ask_user) first, and name it in your summary either way.
 - Use time_split for an out-of-time sample, train_test_split with \
 stratify_col for a low default rate, derive_columns for ratios/flags and \
 one_hot_encode for categorical regressors rather than custom code.
+- For a PD target from a monthly account panel with no outcome flag yet, \
+use forward_default_flag (tags the flag as the target) rather than derive_columns.
 - For LGD: discount_recoveries -> compute_lgd (tags lgd as the target); for \
 CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
 (train/test/OOT side by side) and, for a rating scale, grade_backtest."""

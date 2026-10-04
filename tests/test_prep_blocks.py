@@ -4,6 +4,7 @@ feature-level analysis tables (characteristic stability, target trend)."""
 
 from __future__ import annotations
 
+import warnings
 from datetime import date
 
 import polars as pl
@@ -15,6 +16,7 @@ from modelmaker.blocks.library import (
     _one_hot_meta,
     derive_columns,
     groupby_agg,
+    join,
     one_hot_encode,
     time_split,
     train_test_split,
@@ -125,3 +127,16 @@ def test_target_trend_by_quarter():
     assert out["target_mean"].to_list() == [0.5, 0.0, 1.0]
     assert out["x_mean"].to_list() == [2.0, 5.0, None]
     assert out["s_null_share"].to_list() == [0.5, 0.0, 0.0]
+
+
+def test_join_accepts_the_old_outer_name_and_rejects_cross():
+    left = pl.DataFrame({"k": [1, 2], "a": [10, 20]})
+    right = pl.DataFrame({"k": [2, 3], "b": [200, 300]})
+    full = join(left, right, ["k"], how="full")
+    assert full.height == 3
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # polars warns on "outer"; the block maps it first
+        assert join(left, right, ["k"], how="outer").equals(full)
+    assert join(left.lazy(), right.lazy(), ["k"], how="outer").collect().equals(full)
+    with pytest.raises(ValueError, match="cross"):
+        join(left, right, ["k"], how="cross")

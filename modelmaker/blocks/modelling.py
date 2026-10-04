@@ -9,10 +9,14 @@ never needs a special deserializer downstream.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any, Callable
+
 import polars as pl
 
-from ..packet import ColumnMeta, ColumnRole
-from .base import BlockSpec, PortSpec, register_block
+from ..agent import hints as h
+from ..packet import ColumnMeta, ColumnRole, DataFramePacket
+from .base import BlockSpec, FieldSpec, PortSpec, register_block
 
 
 def _predictions_meta(new_col_roles: dict[str, ColumnRole]):
@@ -88,6 +92,12 @@ register_block(
         outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
         fn=glm_fit,
         metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
+        form=(
+            FieldSpec("target", "Target column", "column", auto_role="target"),
+            FieldSpec("features", "Feature columns", "columns"),
+            FieldSpec("family", "Family", "select", options=("gaussian", "poisson", "gamma", "inverse_gaussian")),
+            FieldSpec("alpha", "Regularization (alpha)", "number", step=0.01),
+        ),
     )
 )
 
@@ -162,6 +172,39 @@ def logistic_regression(
     return predictions, artifact
 
 
+def _coefficient_hints(model: Any, woe_signs: bool) -> list[str]:
+    if not isinstance(model, dict):
+        return []
+    stats = {k: v for k, v in (model.get("statistics") or {}).items() if k != "intercept"}
+    coefs = model.get("coefficients") or {k: v.get("estimate") for k, v in stats.items()}
+    hints = []
+    if model.get("converged") is False:
+        hints.append("The fit didn't converge -- try fewer features, or check for collinear or constant ones.")
+    # WoE is higher where the outcome is rarer, so every WoE coefficient
+    # of a PD model should be negative (logistic_regression's docstring).
+    wrong = (
+        [f for f, c in coefs.items() if f.endswith("_woe") and h.num(c) and c > 0] if woe_signs else []
+    )
+    if wrong:
+        hints.append(
+            f"Positive coefficient on WoE feature(s) {h.names(wrong)} -- the wrong sign, usually collinearity. "
+            "Drop them (or the feature they overlap with) and refit."
+        )
+    weak = [f for f, s in stats.items() if (s.get("p_value") or 0.0) > h.MAX_P_VALUE and f not in wrong]
+    if weak:
+        hints.append(f"Not significant (p > {h.MAX_P_VALUE}): {h.names(weak)} -- consider dropping them and refitting.")
+    if coefs and not hints:
+        woe = woe_signs and all(f.endswith("_woe") for f in coefs)
+        hints.append(
+            "Coefficients look sound: signs as expected and all significant." if woe else "All coefficients are significant."
+        )
+    return hints
+
+
+def _logistic_regression_hints(outputs: dict[str, Any]) -> list[str]:
+    return _coefficient_hints(outputs.get("model"), woe_signs=True)
+
+
 register_block(
     BlockSpec(
         category="logistic_regression",
@@ -175,6 +218,13 @@ register_block(
         metadata_transform=_predictions_meta(
             {"predicted_proba": ColumnRole.PREDICTED, "predicted_class": ColumnRole.FEATURE}
         ),
+        form=(
+            FieldSpec("target", "Target column (binary)", "column", auto_role="target"),
+            FieldSpec("features", "Feature columns", "columns"),
+            FieldSpec("C", "Inverse regularization (C)", "number", step=0.1),
+            FieldSpec("max_iter", "Max iterations", "number"),
+        ),
+        hints=_logistic_regression_hints,
     )
 )
 
@@ -273,6 +323,10 @@ def lgd_regression(
     return predictions, artifact
 
 
+def _lgd_regression_hints(outputs: dict[str, Any]) -> list[str]:
+    return _coefficient_hints(outputs.get("model"), woe_signs=False)
+
+
 register_block(
     BlockSpec(
         category="lgd_regression",
@@ -284,6 +338,13 @@ register_block(
         outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
         fn=lgd_regression,
         metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
+        form=(
+            FieldSpec("target", "Target column (LGD or CCF, in [0, 1])", "column", auto_role="target"),
+            FieldSpec("features", "Feature columns", "columns"),
+            FieldSpec("max_iter", "Max iterations", "number"),
+            FieldSpec("tol", "Convergence tolerance", "number", step=1e-08),
+        ),
+        hints=_lgd_regression_hints,
     )
 )
 
@@ -557,6 +618,23 @@ def fit_master_scale(
     return {"kind": "master_scale", "score_col": score_col, "algorithm": algorithm, "grades": grades}
 
 
+def _fit_master_scale_hints(outputs: dict[str, Any]) -> list[str]:
+    grades = h.metric(outputs, "master_scale").get("grades") or []
+    if not grades:
+        return []
+    hints = []
+    rates = [g.get("observed_rate") for g in grades]
+    if all(h.num(r) for r in rates) and any(b < a for a, b in zip(rates, rates[1:])):
+        hints.append("Observed rates aren't monotonic across grades -- refit with algorithm 'monotonic_default_rate'.")
+    total = sum(g.get("n") or 0 for g in grades)
+    thin = [str(g["grade"]) for g in grades if total and (g.get("n") or 0) / total < h.THIN_GRADE]
+    if thin:
+        hints.append(f"Thin grades ({h.names(thin)}, < {h.THIN_GRADE:.0%} of the population) -- set min_grade_share.")
+    if not hints:
+        hints.append(f"{len(grades)} grades, monotonic and none too thin.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="fit_master_scale",
@@ -568,6 +646,14 @@ register_block(
         outputs=[PortSpec("master_scale", type="master_scale")],
         fn=fit_master_scale,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
+            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
+            FieldSpec("n_grades", "Number of grades", "number"),
+            FieldSpec("algorithm", "Algorithm", "select", options=("quantile", "equal_width", "monotonic_default_rate")),
+            FieldSpec("min_grade_share", "Minimum grade share (e.g. 0.03)", "number", step=0.01),
+        ),
+        hints=_fit_master_scale_hints,
     )
 )
 
@@ -612,6 +698,9 @@ register_block(
         outputs=[PortSpec("out")],
         fn=assign_rating_grade,
         metadata_transform=_rating_grade_meta,
+        form=(
+            FieldSpec("score_col", "Score column (defaults to the scale's own)", "column", auto_role="predicted"),
+        ),
     )
 )
 
@@ -627,6 +716,150 @@ register_block(
         outputs=[PortSpec("out")],
         fn=woe_transform,
         metadata_transform=_woe_meta,
+        form=(
+            FieldSpec("col", "Column to transform", "column"),
+            FieldSpec("target", "Target column (binary)", "column", auto_role="target"),
+            FieldSpec("bins", "Bins (numeric columns)", "number"),
+        ),
+    )
+)
+
+
+def forward_default_flag(
+    df: pl.DataFrame,
+    id_col: str,
+    date_col: str,
+    default_col: str,
+    horizon: int = 12,
+    flag_col: str | None = None,
+    performing_only: bool = True,
+    incomplete: str = "drop",
+) -> pl.DataFrame:
+    """Builds the PD target from a monthly account panel (one row per
+    account per month): `flag_col` (default "default_<horizon>m") is 1 when
+    the account is in default (`default_col` truthy) in any month after the
+    row's own, up to `horizon` calendar months ahead, else 0. Months are
+    calendar months, not rows, so a gap in an account's history doesn't
+    stretch the window.
+
+    `date_col` may be a Date/Datetime column, ISO date strings, or integer
+    YYYYMM periods. `id_col` + `date_col` must be unique.
+
+    `performing_only` (default on) keeps only rows not already in default
+    at observation -- the usual PD population. A window is incomplete when
+    the account's history ends before `horizon` months out with no default
+    seen (the most recent periods, or accounts that closed or were sold):
+    `incomplete` "drop" (default) removes those rows, "null" keeps them
+    with a null flag. A default found inside the window always counts, even
+    if the history ends right after it."""
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1 month")
+    if incomplete not in ("drop", "null"):
+        raise ValueError("incomplete must be 'drop' or 'null'")
+    flag_col = flag_col or f"default_{horizon}m"
+
+    dtype = df.schema[date_col]
+    if dtype.is_integer():
+        month = (pl.col(date_col) // 100) * 12 + pl.col(date_col) % 100
+    else:
+        if dtype == pl.Utf8:
+            d = pl.col(date_col).str.slice(0, 10).str.to_date("%Y-%m-%d", strict=False)
+        elif isinstance(dtype, pl.Datetime):
+            d = pl.col(date_col).dt.date()
+        else:
+            d = pl.col(date_col).cast(pl.Date)
+        month = d.dt.year().cast(pl.Int64) * 12 + d.dt.month().cast(pl.Int64)
+
+    work = df.with_row_index("__row").with_columns(
+        month.cast(pl.Int64).alias("__m"),
+        (pl.col(default_col).cast(pl.Float64).fill_null(0) > 0).alias("__d"),
+    )
+    if work.select(pl.struct(id_col, "__m").is_duplicated().any()).item():
+        raise ValueError(f"{id_col} + {date_col} is not unique: expected one row per account per month")
+
+    work = (
+        work.sort(id_col, "__m")
+        .with_columns(
+            # First default month strictly after this row's, per account.
+            pl.when(pl.col("__d")).then(pl.col("__m")).shift(-1).fill_null(strategy="backward").over(id_col).alias("__next"),
+            pl.col("__m").max().over(id_col).alias("__last"),
+        )
+        .with_columns((pl.col("__next") <= pl.col("__m") + horizon).fill_null(False).alias("__hit"))
+        .with_columns((pl.col("__hit") | (pl.col("__last") >= pl.col("__m") + horizon)).alias("__complete"))
+        .sort("__row")
+    )
+    if performing_only:
+        work = work.filter(~pl.col("__d"))
+    if incomplete == "drop":
+        work = work.filter(pl.col("__complete"))
+    flag = pl.when(pl.col("__complete")).then(pl.col("__hit").cast(pl.Int64)).otherwise(None)
+    return work.with_columns(flag.alias(flag_col)).drop("__row", "__m", "__d", "__next", "__last", "__hit", "__complete")
+
+
+def _forward_default_flag_meta(input_metas, outputs, params):
+    """The new flag is the modelling target. Target is a unique role, so an
+    input column already tagged target gives it up (to excluded), and so does
+    `default_col` itself -- the current-month default status is the outcome
+    the flag is built from, never a feature."""
+    (in_meta,) = input_metas.values()
+    (df,) = outputs.values()
+    flag_col = params.get("flag_col") or f"default_{params.get('horizon', 12)}m"
+    default_col = params.get("default_col")
+    result = {}
+    for name in df.columns:
+        if name == flag_col:
+            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=ColumnRole.TARGET)
+        elif name in in_meta:
+            meta = in_meta[name]
+            if name == default_col or meta.role == ColumnRole.TARGET:
+                meta = replace(meta, role=ColumnRole.EXCLUDED)
+            result[name] = meta
+    return {"out": result}
+
+
+def _forward_default_flag_hints(outputs: dict[str, Any]) -> list[str]:
+    packet = outputs.get("out")
+    target = h.target_column(packet)
+    if target is None:
+        return []
+    flag = packet.data[target]
+    if flag.len() == 0:
+        return ["No rows left -- check id_col/date_col/default_col and the horizon against the data's span."]
+    hints = []
+    nulls = flag.null_count()
+    if nulls:
+        hints.append(
+            f"{nulls} rows have an incomplete outcome window (null {target}) -- filter them out "
+            f"({target} IS NOT NULL) before fitting."
+        )
+    events = int(flag.sum() or 0)
+    if events < h.MIN_EVENTS:
+        hints.append(f"Only {events} defaults (< {h.MIN_EVENTS}) -- a PD model on this will be unstable.")
+    else:
+        hints.append(f"{target}: {events} defaults in {flag.len() - nulls} rows ({events / (flag.len() - nulls):.2%}).")
+    return hints
+
+
+register_block(
+    BlockSpec(
+        category="forward_default_flag",
+        block_type="standard",
+        group="modelling",
+        display_name="Forward default flag (PD target)",
+        tags=("data_prep", "pd"),
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=forward_default_flag,
+        metadata_transform=_forward_default_flag_meta,
+        form=(
+            FieldSpec("id_col", "Account id column", "column"),
+            FieldSpec("date_col", "Month column (date or YYYYMM)", "column"),
+            FieldSpec("default_col", "Current default status column", "column"),
+            FieldSpec("horizon", "Horizon (months)", "number"),
+            FieldSpec("flag_col", "Flag column name (optional)", "text", placeholder="default_12m"),
+            FieldSpec("incomplete", "Incomplete outcome windows", "select", options=("drop", "null")),
+        ),
+        hints=_forward_default_flag_hints,
     )
 )
 
@@ -676,6 +909,21 @@ def _compute_lgd_meta(input_metas, outputs, params):
     return {"out": {name: result[name] for name in df.columns if name in result}}
 
 
+def _computed_target_hints(column: str) -> Callable[[dict[str, Any]], list[str]]:
+    def hints(outputs: dict[str, Any]) -> list[str]:
+        packet = outputs.get("out")
+        if not isinstance(packet, DataFramePacket) or column not in packet.data.columns or packet.data.height == 0:
+            return []
+        nulls = packet.data[column].null_count() / packet.data.height
+        if nulls > h.MAX_NULL_SHARE:
+            return [
+                f"{nulls:.0%} of rows have a null {column} -- filter them out ({column} IS NOT NULL) before fitting."
+            ]
+        return []
+
+    return hints
+
+
 register_block(
     BlockSpec(
         category="compute_lgd",
@@ -687,6 +935,14 @@ register_block(
         outputs=[PortSpec("out")],
         fn=compute_lgd,
         metadata_transform=_compute_lgd_meta,
+        form=(
+            FieldSpec("ead_col", "EAD column", "column"),
+            FieldSpec("recovered_col", "Recovered amount column", "column"),
+            FieldSpec("cost_col", "Workout cost column (optional)", "column"),
+            FieldSpec("floor", "Floor", "number", step=0.05),
+            FieldSpec("cap", "Cap", "number", step=0.05),
+        ),
+        hints=_computed_target_hints("lgd"),
     )
 )
 
@@ -751,6 +1007,15 @@ register_block(
         outputs=[PortSpec("out")],
         fn=compute_ccf,
         metadata_transform=_compute_ccf_meta,
+        form=(
+            FieldSpec("limit_col", "Limit column", "column"),
+            FieldSpec("balance_ref_col", "Balance at reference date column", "column"),
+            FieldSpec("balance_default_col", "Balance at default column", "column"),
+            FieldSpec("floor", "Floor", "number", step=0.05),
+            FieldSpec("cap", "Cap", "number", step=0.05),
+            FieldSpec("no_headroom", "No undrawn headroom at reference", "select", options=("zero", "null")),
+        ),
+        hints=_computed_target_hints("ccf"),
     )
 )
 
@@ -903,6 +1168,25 @@ def stepwise_selection(
     }
 
 
+def _stepwise_selection_hints(outputs: dict[str, Any]) -> list[str]:
+    metric = h.metric(outputs)
+    selected = metric.get("selected")
+    if selected is None:
+        return []
+    if not selected:
+        return ["Nothing passed p_enter -- revisit the candidate features (or loosen p_enter) before fitting."]
+    hints = [f"Use these as the model's features: {h.names(selected)}."]
+    if metric.get("dropped"):
+        hints.append(f"Dropped along the way: {h.names(metric['dropped'])}.")
+    if metric.get("target_type") == "binary":
+        wrong = [
+            c["feature"] for c in metric.get("coefficients") or [] if c["feature"].endswith("_woe") and c.get("sign") == "+"
+        ]
+        if wrong:
+            hints.append(f"Wrong (positive) sign on {h.names(wrong)} -- drop them before fitting the final model.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="stepwise_selection",
@@ -914,6 +1198,15 @@ register_block(
         outputs=[PortSpec("metric", type="scalar_metric")],
         fn=stepwise_selection,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("target", "Target column (binary, or LGD/CCF in [0, 1])", "column", auto_role="target"),
+            FieldSpec("features", "Candidate features", "columns"),
+            FieldSpec("direction", "Direction", "select", options=("both", "forward", "backward")),
+            FieldSpec("p_enter", "p-value to enter", "number", step=0.01),
+            FieldSpec("p_remove", "p-value to remove", "number", step=0.01),
+            FieldSpec("max_features", "Max features (optional)", "number"),
+        ),
+        hints=_stepwise_selection_hints,
     )
 )
 
@@ -964,6 +1257,19 @@ def calibrate_model(df: pl.DataFrame, model: dict, central_tendency: float) -> d
     return out
 
 
+def _calibrate_model_hints(outputs: dict[str, Any]) -> list[str]:
+    cal = h.metric(outputs, "model").get("calibration") or {}
+    shift, before, after = cal.get("intercept_shift"), cal.get("mean_prediction_before"), cal.get("mean_prediction_after")
+    if not (h.num(shift) and h.num(before) and h.num(after)):
+        return []
+    if abs(shift) > h.BIG_INTERCEPT_SHIFT:
+        return [
+            f"A large shift (log-odds {shift:+.2f}, mean {before:.4f} -> {after:.4f}) -- check the central tendency "
+            "is the right one, and mention it in the stage summary."
+        ]
+    return [f"Calibrated: mean prediction {before:.4f} -> {after:.4f}. Use this model for prediction from here on."]
+
+
 register_block(
     BlockSpec(
         category="calibrate_model",
@@ -975,6 +1281,10 @@ register_block(
         outputs=[PortSpec("model", type="model")],
         fn=calibrate_model,
         metadata_transform=lambda *_a, **_k: {},
+        form=(
+            FieldSpec("central_tendency", "Central tendency (target mean, e.g. long-run default rate)", "number", step=0.001),
+        ),
+        hints=_calibrate_model_hints,
     )
 )
 
@@ -1025,6 +1335,14 @@ register_block(
         outputs=[PortSpec("out")],
         fn=margin_of_conservatism,
         metadata_transform=_moc_meta,
+        form=(
+            FieldSpec("predicted_col", "Estimate column", "column", auto_role="predicted"),
+            FieldSpec("add_on", "Add-on", "number", step=0.01),
+            FieldSpec("multiplier", "Multiplier", "number", step=0.05),
+            FieldSpec("floor", "Floor (optional)", "number", step=0.0001),
+            FieldSpec("cap", "Cap (optional)", "number", step=0.05),
+            FieldSpec("output_col", "Output column", "text", placeholder="predicted_moc"),
+        ),
     )
 )
 
@@ -1110,6 +1428,15 @@ register_block(
         outputs=[PortSpec("out")],
         fn=discount_recoveries,
         metadata_transform=_discount_recoveries_meta,
+        form=(
+            FieldSpec("id_col", "Facility id column (both inputs)", "column"),
+            FieldSpec("default_date_col", "Default date column (facilities)", "column"),
+            FieldSpec("cf_date_col", "Cash-flow date column (cash flows)", "column"),
+            FieldSpec("recovery_col", "Recovery amount column", "column"),
+            FieldSpec("cost_col", "Workout cost column (optional)", "column"),
+            FieldSpec("annual_rate", "Annual discount rate", "number", step=0.005),
+            FieldSpec("rate_col", "Per-facility rate column (optional, overrides the rate)", "column"),
+        ),
     )
 )
 
@@ -1151,6 +1478,12 @@ register_block(
         outputs=[PortSpec("out")],
         fn=compute_ead,
         metadata_transform=_compute_ead_meta,
+        form=(
+            FieldSpec("balance_col", "Drawn balance column", "column"),
+            FieldSpec("limit_col", "Limit column", "column"),
+            FieldSpec("predicted_col", "CCF column", "column", auto_role="predicted"),
+            FieldSpec("output_col", "Output column", "text", placeholder="ead_predicted"),
+        ),
     )
 )
 
@@ -1204,6 +1537,26 @@ def long_run_average(
     return table, metric
 
 
+def _long_run_average_hints(outputs: dict[str, Any]) -> list[str]:
+    metric = h.metric(outputs)
+    hints = []
+    periods = metric.get("n_periods")
+    if h.num(periods) and periods < h.SHORT_HISTORY:
+        hints.append(
+            f"Only {periods} period(s) -- likely short of a full cycle. Say so in the stage summary; a margin of "
+            "conservatism may be needed."
+        )
+    dw, tw = metric.get("default_weighted"), metric.get("time_weighted")
+    if h.num(dw) and h.num(tw) and dw and abs(tw - dw) / abs(dw) > h.LRA_GAP:
+        hints.append(
+            f"Default-weighted ({dw:.4f}) and time-weighted ({tw:.4f}) averages differ by more than {h.LRA_GAP:.0%} -- "
+            "the choice matters; state which you use as the central tendency and why."
+        )
+    if not hints and h.num(periods):
+        hints.append(f"{periods} periods, and the default- and time-weighted averages agree.")
+    return hints
+
+
 register_block(
     BlockSpec(
         category="long_run_average",
@@ -1216,5 +1569,12 @@ register_block(
         aggregate_outputs=("table",),
         fn=long_run_average,
         metadata_transform=lambda _im, outputs, _p: {k: {c: ColumnMeta(dtype=str(v.schema[c])) for c in v.columns} for k, v in outputs.items()},
+        form=(
+            FieldSpec("target_col", "Realised value column (LGD, CCF or default flag)", "column", auto_role="target"),
+            FieldSpec("date_col", "Default date column", "column"),
+            FieldSpec("weight_col", "Exposure weight column (optional, e.g. EAD)", "column"),
+            FieldSpec("period", "Period", "select", options=("year", "quarter", "month")),
+        ),
+        hints=_long_run_average_hints,
     )
 )

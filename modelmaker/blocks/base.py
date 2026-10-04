@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
@@ -40,6 +41,35 @@ MetadataTransformFn = Callable[
 # is what keeps the compiled --with-metadata=off script "clean" by
 # construction (see plan section 7).
 BlockFn = Callable[..., Any]
+
+
+FieldKind = Literal["text", "number", "select", "column", "columns", "checkbox"]
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """One field of a block's params form in the web UI and the TUI (see
+    forms.block_form). A block lists only the fields worth a better label,
+    a placeholder or a fixed set of options; every other param gets a field
+    inferred from the function's signature."""
+
+    key: str
+    label: str
+    kind: FieldKind
+    placeholder: str = ""
+    step: float | None = None
+    options: tuple[str, ...] = ()
+    # 'target' picks up the role=target column; 'predicted' picks up
+    # whichever column a modelling block upstream tagged role=predicted --
+    # see packet.resolve_role_column / blocks/modelling.py. Only meaningful
+    # for kind='column'; leaving the param out of `params` entirely puts it
+    # back in this dynamically-resolved "Auto" state.
+    auto_role: Literal["target", "predicted"] | None = None
+
+
+# (outputs_by_port) -> short "what this result means" notes for an AI build
+# (see agent/hints.decision_hints).
+HintsFn = Callable[[dict[str, Any]], list[str]]
 
 
 @dataclass
@@ -96,6 +126,12 @@ class BlockSpec:
     # Declared here, on the registry spec, so a block instance (or custom
     # code) can never claim it for itself.
     aggregate_outputs: tuple[str, ...] = ()
+    # Params form fields to show ahead of the inferred ones (see FieldSpec).
+    # Lives here, not in `fn`, so it never reaches a compiled script.
+    form: tuple[FieldSpec, ...] = ()
+    # Decision hints for an AI build once this block has run green (see
+    # agent/hints.py for the thresholds they share). None: nothing to judge.
+    hints: HintsFn | None = None
 
 
 BLOCK_REGISTRY: dict[str, BlockSpec] = {}
@@ -106,5 +142,9 @@ def register_block(spec: BlockSpec) -> BlockSpec:
     unknown = set(spec.aggregate_outputs) - frames
     if unknown:
         raise ValueError(f"{spec.category}: aggregate_outputs {sorted(unknown)} aren't dataframe outputs")
+    params = inspect.signature(spec.fn).parameters
+    unknown = [f.key for f in spec.form if f.key not in params]
+    if unknown:
+        raise ValueError(f"{spec.category}: form fields {unknown} aren't params of {spec.fn.__name__}")
     BLOCK_REGISTRY[spec.category] = spec
     return spec

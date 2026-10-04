@@ -33,6 +33,7 @@ from .blocks import stat_tests as _stat_tests  # noqa: F401
 from .blocks import stochastic as _stochastic  # noqa: F401
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
+from .forms import block_form
 from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
 from .llm import claude_cli_provider as _claude_cli_provider
 from .llm import gemini_provider as _gemini_provider
@@ -288,6 +289,13 @@ def _source_for_block(block) -> str | None:
     return _safe_getsource(spec.fn)
 
 
+def _form_for_block(block) -> dict[str, Any] | None:
+    """The params form for a registry block (see forms.block_form); None
+    for a custom block, whose UI derives its `_col` pickers from params."""
+    spec = None if block.is_custom else BLOCK_REGISTRY.get(block.category)
+    return block_form(spec) if spec is not None else None
+
+
 def _block_out(block_id: str) -> dict[str, Any]:
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
@@ -308,6 +316,7 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "params": block.params,
         "code": block.code,
         "source": _source_for_block(block),
+        "form": _form_for_block(block),
         "metadata_transform": block.metadata_transform,
         "inputs": [asdict(p) for p in block.inputs],
         "outputs": [asdict(p) for p in block.outputs],
@@ -438,6 +447,7 @@ def registry() -> list[dict[str, Any]]:
             "display_name": spec.display_name,
             "inputs": [asdict(p) for p in spec.inputs],
             "outputs": [asdict(p) for p in spec.outputs],
+            "form": block_form(spec),
         }
         for spec in BLOCK_REGISTRY.values()
     ]

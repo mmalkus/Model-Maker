@@ -74,10 +74,17 @@ def client(tmp_path, monkeypatch):
 
 
 def _wait(c, *phases, timeout=60):
+    """Wait for the build to reach one of `phases` -- each a phase where it
+    waits on the user -- and for the worker's turn to end. ask_user sets
+    awaiting_input mid-turn, and the turn's wrap-up still acts after that:
+    a stop or forced phase sent before it ends gets overtaken by it."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         b = c.get("/api/agent/builds/current").json()["build"]
         if b["phase"] in phases:
+            api.AGENT.join(max(deadline - time.time(), 0))
+            b = c.get("/api/agent/builds/current").json()["build"]
+            assert b["phase"] in phases, b["phase"]
             return b
         time.sleep(0.1)
     raise AssertionError(f"build never reached {phases}: {b['phase']}")
@@ -269,9 +276,6 @@ def test_custom_blocks_off_reaches_the_build_and_its_tools(client):
     _wait(c, "awaiting_approval")
     c.post("/api/agent/builds/current/approve")
     _wait(c, "awaiting_input")
-    # ask_user sets awaiting_input mid-turn; let the turn end first, or its
-    # wrap-up resets the phase this forces.
-    api.AGENT.join(10)
     api.AGENT.build.set_phase("building")  # as if the model were mid-turn
     tools = {t["name"] for t in c.get("/api/agent/mcp/tools", headers={"X-Agent-Token": api.AGENT.token}).json()}
     assert "add_block" in tools and "add_custom_block" not in tools
@@ -286,7 +290,6 @@ def test_decision_hints_come_from_settings_unless_the_build_says(client):
     started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
     assert started.json()["options"]["decision_hints"] is True
     _wait(c, "awaiting_approval")
-    api.AGENT.join(10)
     assert c.post("/api/agent/builds/current/discard").status_code == 200
     started = c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor], "decision_hints": False})
     assert started.status_code == 200, started.text
