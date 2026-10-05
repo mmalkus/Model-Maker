@@ -9,7 +9,7 @@ import secrets
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +37,7 @@ from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, g
 from .llm import claude_cli_provider as _claude_cli_provider
 from .llm import gemini_provider as _gemini_provider
 from .llm import lmstudio_provider as _lmstudio_provider
+from .llm import local_model as _local_model
 from .llm import openai_provider as _openai_provider
 from .llm.redact import column_info_for_llm
 from .llm.settings import LLMSettingsStore
@@ -254,10 +255,16 @@ class LLMSettingsUpdate(BaseModel):
     # a null/empty field resets it to the default (active provider / its model).
     agent_plan: dict[str, Any] | None = None
     agent_build: dict[str, Any] | None = None
-    # Each build stage in a fresh conversation (see BuildOptions.small_context).
-    agent_small_context: bool | None = None
+    # Each build stage in a fresh conversation (see BuildOptions.small_context);
+    # "auto" = on only for a build LLM with a small context window.
+    agent_small_context: bool | Literal["auto"] | None = None
     # Rule-based next-step hints in run results (see BuildOptions.decision_hints).
     agent_decision_hints: bool | None = None
+    # One narrow question at a time (see BuildOptions.guided); "auto" = on
+    # for local (lmstudio) build LLMs.
+    agent_guided: bool | Literal["auto"] | None = None
+    # Guided answers' thinking budget (tokens) for local models; "default" clears it.
+    agent_think_tokens: int | Literal["default"] | None = None
 
 
 # ---- helpers -------------------------------------------------------------
@@ -1030,6 +1037,8 @@ def _effective_llm_settings() -> dict[str, Any]:
             "capable_providers": list(AGENT_CAPABLE_PROVIDERS),
             "small_context": LLM_SETTINGS.agent_small_context,
             "decision_hints": LLM_SETTINGS.agent_decision_hints,
+            "guided": LLM_SETTINGS.agent_guided,
+            "think_tokens": LLM_SETTINGS.agent_think_tokens,
         },
     }
 
@@ -1055,6 +1064,8 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
         req.agent_build,
         req.agent_small_context,
         req.agent_decision_hints,
+        req.agent_guided,
+        req.agent_think_tokens,
     )
     return _effective_llm_settings()
 
@@ -1494,8 +1505,13 @@ def agent_llm_choice(stored: dict[str, Any], override: dict[str, Any] | None) ->
     """Resolve the plan or build LLM: a per-build override, else Settings'
     AI-builder choice, else the active provider -- with the model falling
     back to that provider's configured model (else the loop's default)."""
-    provider = (override or {}).get("provider") or stored.get("provider") or LLM_SETTINGS.active_provider or os.environ.get(
-        "MODELMAKER_LLM_PROVIDER", "claude_cli"
+    provider = (
+        (override or {}).get("provider")
+        or stored.get("provider")
+        or LLM_SETTINGS.active_provider
+        or os.environ.get("MODELMAKER_LLM_PROVIDER")
+        # Nothing chosen: the built-in local model once it's downloaded.
+        or ("local" if _local_model.is_downloaded() and _local_model.runtime_available() else "claude_cli")
     )
     model = (override or {}).get("model") or stored.get("model") or LLM_SETTINGS.for_provider(provider).get("model")
     return LLMChoice(provider=provider, model=model)
@@ -1521,7 +1537,7 @@ _AGENT_CALLBACK: dict[str, str] = {"url": ""}
 
 # Mutating endpoints that stay open while a build is changing the graph:
 # the agent's own routes, and things that don't touch the graph.
-_AGENT_LOCK_ALLOWED = ("/api/agent/", "/api/llm/", "/api/env_vars/", "/api/project/save", "/api/check_all_sources")
+_AGENT_LOCK_ALLOWED = ("/api/agent/", "/api/llm/", "/api/local-model/", "/api/env_vars/", "/api/project/save", "/api/check_all_sources")
 
 
 @app.middleware("http")
@@ -1560,6 +1576,10 @@ class AgentBuildStart(BaseModel):
     small_context: bool | None = None
     # Next-step hints in run results; None = Settings' AI-builder choice.
     decision_hints: bool | None = None
+    # One narrow question at a time; None = Settings' AI-builder choice
+    # (itself automatic by default: on for local models).
+    guided: bool | None = None
+    think_tokens: int | None = None
 
 
 class AgentText(BaseModel):
@@ -1577,6 +1597,28 @@ def _agent_call(fn: Callable[[], Any], cursor: int = 0) -> dict[str, Any]:
     except BuildError as e:
         raise HTTPException(409, str(e))
     return build.to_dict(cursor)
+
+
+@app.get("/api/local-model/")
+def local_model_status() -> dict[str, Any]:
+    """The built-in local model (llm/local_model.py): whether it's
+    downloaded, whether llama-cpp-python is installed, and a running
+    download's progress."""
+    return _local_model.status()
+
+
+@app.post("/api/local-model/download")
+def local_model_download() -> dict[str, Any]:
+    if _local_model.is_downloaded():
+        return _local_model.status()
+    _local_model.start_download()
+    return _local_model.status()
+
+
+@app.post("/api/local-model/cancel")
+def local_model_cancel() -> dict[str, Any]:
+    _local_model.cancel_download()
+    return _local_model.status()
 
 
 @app.post("/api/agent/builds")
@@ -1602,6 +1644,8 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         allow_custom_blocks=req.allow_custom_blocks,
         small_context=LLM_SETTINGS.agent_small_context if req.small_context is None else req.small_context,
         decision_hints=LLM_SETTINGS.agent_decision_hints if req.decision_hints is None else req.decision_hints,
+        guided=LLM_SETTINGS.agent_guided if req.guided is None else req.guided,
+        think_tokens=LLM_SETTINGS.agent_think_tokens if req.think_tokens is None else req.think_tokens,
     )
     return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
 

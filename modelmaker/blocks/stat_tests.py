@@ -23,7 +23,12 @@ def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     {"kind": "ks_test", "ks_statistic", "p_value"} -- higher KS means
     better separation. `target_col` must be binary 0/1 with both values
     present. `score_col` auto-fills from the input's role=predicted column
-    and `target_col` from its role=target column when left unset."""
+    and `target_col` from its role=target column when left unset.
+
+    Best practice: measure each holdout sample (predict's output), not just
+    the development predictions -- or use compare_samples for all samples in
+    one table. Leave score_col unset: it fills from the predicted
+    probability, never the 0/1 predicted_class."""
     from scipy.stats import ks_2samp
 
     scores = df[score_col].to_numpy()
@@ -58,7 +63,13 @@ def auc_gini(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     "gini"}. Assumes a higher score means higher probability of
     target == 1 (e.g. a predicted PD); a score where higher = safer gives
     AUC < 0.5. `score_col` auto-fills from the input's role=predicted
-    column and `target_col` from its role=target column when left unset."""
+    column and `target_col` from its role=target column when left unset.
+
+    Best practice: measure each holdout sample (predict's output), not just
+    the development predictions -- or use compare_samples for all samples in
+    one table. Leave score_col unset: it fills from the predicted
+    probability, never the 0/1 predicted_class. A Gini more than ~10 points
+    lower on the holdout than on development signals overfitting."""
     from sklearn.metrics import roc_auc_score
 
     auc = float(roc_auc_score(df[target_col].to_numpy(), df[score_col].to_numpy()))
@@ -461,7 +472,11 @@ def compare_samples(
     continuous one (LGD/CCF), RMSE, MAE, R^2 and Spearman's rho. A drop in
     Gini (or rho) from train to test/OOT is the overfitting / stability
     signal. `target_col` and `score_col` auto-fill from the role=target
-    and role=predicted columns."""
+    and role=predicted columns.
+
+    Best practice: wire the development predictions (logistic_regression's
+    `predictions`) as sample_1 and each holdout's predict output as sample_2
+    / sample_3, with `labels` that name them."""
     import numpy as np
     from scipy.stats import ks_2samp, spearmanr
     from sklearn.metrics import roc_auc_score

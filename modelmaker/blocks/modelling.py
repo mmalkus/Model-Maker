@@ -116,7 +116,13 @@ def logistic_regression(
     inverse of the penalized Hessian -- with the default mild penalty these
     are close to the unpenalized maximum-likelihood ones. With WoE
     features every coefficient should be negative (higher WoE = safer); a
-    positive one is a sign of collinearity worth investigating."""
+    positive one is a sign of collinearity worth investigating.
+
+    Best practice: fit it on the development sample's `<feature>_woe`
+    columns (from apply_binning), usually 5-15 features with useful IV or
+    stepwise_selection's choice. Every WoE coefficient should come out
+    negative. Score each holdout sample with predict, using this block's
+    `model`."""
     import math
 
     import numpy as np
@@ -293,7 +299,11 @@ def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
     their `model` output port) to a different dataframe -- the held-out/test
     half of a train_test_split, typically -- without refitting anything.
     Reads the coefficients straight out of the JSON artifact, so no pickled
-    estimator is ever needed."""
+    estimator is ever needed.
+
+    Best practice: wire the fitted `model` and a holdout sample that went
+    through the same apply_binning, so it has the model's WoE columns;
+    validation blocks then read its predicted_proba."""
     import numpy as np
 
     features = model["features"]
@@ -832,7 +842,11 @@ def stepwise_selection(
     (copy it into the model block's `features`), every step taken, and the
     final model's coefficient table -- including each coefficient's sign,
     to check it against the univariate direction. `features` must be
-    numeric and null-free (e.g. WoE columns)."""
+    numeric and null-free (e.g. WoE columns).
+
+    Best practice: run it on the development sample's WoE columns of the
+    features that passed the IV screen, then copy its `selected` list into
+    logistic_regression's `features`."""
     import math
 
     import numpy as np
@@ -928,7 +942,11 @@ def calibrate_model(df: pl.DataFrame, model: dict, central_tendency: float) -> d
     moves); the output is a new `model` for predict / scorecard blocks,
     recording the shift and the mean prediction before and after. `df` is
     the calibration sample (usually the development data) and must carry
-    the model's feature columns."""
+    the model's feature columns.
+
+    Best practice: calibrate to the long-run average default rate when the
+    development period's rate isn't representative of the cycle; leave it
+    out when the goal doesn't ask for calibration."""
     import copy
 
     import numpy as np

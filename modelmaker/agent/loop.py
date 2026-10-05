@@ -38,12 +38,30 @@ class LoopOutcome:
     error: str | None = None
 
 
+@dataclass
+class Answer:
+    """One guided question's answer (AgentLoop.ask): the tool the model
+    called and its arguments, or none -- plus any text it wrote, and why
+    its arguments couldn't be read."""
+
+    tool: str | None = None
+    args: dict[str, Any] | None = None
+    text: str = ""
+    error: str | None = None
+
+
 class AgentLoop(ABC):
     @abstractmethod
     def start(self, build: AgentBuild, system: str, prompt: str, tools: list[Tool]) -> LoopOutcome: ...
 
     @abstractmethod
     def resume(self, build: AgentBuild, prompt: str, tools: list[Tool]) -> LoopOutcome: ...
+
+    def ask(self, build: AgentBuild, system: str, prompt: str, tools: list[dict[str, Any]]) -> Answer:
+        """One question, no conversation: a single request with these
+        tools (OpenAI function format), answered by one tool call. Guided
+        builds (agent/guided.py) are made of these."""
+        raise NotImplementedError(f"{type(self).__name__} can't run a guided build")
 
     def cancel(self) -> None:
         """Called from another thread on Stop. Loops also check
@@ -93,6 +111,15 @@ class ScriptedLoop(AgentLoop):
 
     def resume(self, build, prompt, tools):
         return self._play(build, prompt)
+
+    def ask(self, build, system, prompt, tools):
+        # Guided turns: each is a function of the prompt returning
+        # (tool, args) -- or an Answer, for a turn without a tool call.
+        self.prompts.append(prompt)
+        if not self.turns:
+            return Answer(text="(script exhausted)")
+        out = self.turns.pop(0)(prompt)
+        return out if isinstance(out, Answer) else Answer(tool=out[0], args=out[1])
 
 
 # ---- Anthropic Messages API -------------------------------------------------------
@@ -178,7 +205,10 @@ class AnthropicLoop(AgentLoop):
 HTTP_TIMEOUT_SECONDS = 300
 # Self-hosted OpenAI-compatible servers (llama-server, vLLM, Ollama...) are
 # often slow models on modest hardware and can take many minutes per turn.
-LOCAL_HTTP_TIMEOUT_SECONDS = 900
+# Not much more, though: at ~10 tokens/s, 10 minutes is ~6000 tokens, and a
+# turn that long is nearly always a reasoning loop that times out with
+# nothing to show -- better to give up and let the user retry sooner.
+LOCAL_HTTP_TIMEOUT_SECONDS = 600
 
 
 def _post_json(
@@ -258,6 +288,30 @@ class OpenAILoop(AgentLoop):
     def resume(self, build, prompt, tools):
         self.messages.append({"role": "user", "content": prompt})
         return self._run(build, tools)
+
+    def ask(self, build: AgentBuild, system: str, prompt: str, tools: list[dict[str, Any]]) -> Answer:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "tools": tools,
+        }
+        response = _post_json(
+            f"{self.base_url}/chat/completions", payload, self._headers(), f"{self.what} at {self.base_url}", self.timeout_seconds
+        )
+        usage = response.get("usage") or {}
+        build.usage["input_tokens"] += usage.get("prompt_tokens") or 0
+        build.usage["output_tokens"] += usage.get("completion_tokens") or 0
+        try:
+            message = response["choices"][0]["message"]
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"response missing expected fields: {str(response)[:500]}") from e
+        text = (message.get("content") or "").strip()
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return Answer(text=text)
+        fn = calls[0].get("function") or {}
+        args, err = _parse_args(fn.get("arguments"))
+        return Answer(tool=fn.get("name"), args=args, text=text, error=err)
 
     def _fit_context(self, build: AgentBuild, defs: list[dict[str, Any]]) -> None:
         """Keep the conversation inside `context_tokens`: estimate its size
@@ -360,6 +414,8 @@ class LMStudioLoop(OpenAILoop):
     (llama.cpp's /v1/models carries n_ctx), else a conservative 16k."""
 
     compact = True
+    # The cap for a 16k window; a bigger window gets a tenth of itself
+    # (~3 chars/token), so its tool results aren't cut short and re-fetched.
     max_result_chars = 6000
     what = "local model server"
     DEFAULT_CONTEXT_TOKENS = 16384
@@ -379,6 +435,29 @@ class LMStudioLoop(OpenAILoop):
         served = next((m for m in models if m.get("id") == self.model), models[0] if models else {})
         n_ctx = (served.get("meta") or {}).get("n_ctx")
         self.context_tokens = int(env_ctx) if env_ctx else int(n_ctx) if n_ctx else self.DEFAULT_CONTEXT_TOKENS
+        self.max_result_chars = max(type(self).max_result_chars, self.context_tokens * 3 // 10)
+        # Guided answers' thinking budget (see budgeted_answer): None = the
+        # model's own tool calls, thinking unbounded.
+        self.think_tokens: int | None = None
+
+    def ask(self, build: AgentBuild, system: str, prompt: str, tools: list[dict[str, Any]]) -> Answer:
+        if self.think_tokens is None:
+            return super().ask(build, system, prompt, tools)
+        # The raw completions endpoint, with the prompt in ChatML (Qwen,
+        # MiniCPM, ...) -- the chat endpoint gives no control over thinking.
+        text = f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+        def complete(text: str, max_tokens: int, stop: list[str], schema: dict | None) -> str:
+            payload: dict[str, Any] = {"model": self.model, "prompt": text, "max_tokens": max_tokens, "stop": stop, "temperature": 0.6 if schema is None else 0.2}
+            if schema is not None:
+                payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "strict": True, "schema": schema}}
+            response = _post_json(f"{self.base_url}/completions", payload, {}, f"{self.what} at {self.base_url}", self.timeout_seconds)
+            usage = response.get("usage") or {}
+            build.usage["input_tokens"] += usage.get("prompt_tokens") or 0
+            build.usage["output_tokens"] += usage.get("completion_tokens") or 0
+            return response["choices"][0]["text"]
+
+        return budgeted_answer(build, complete, text, self.think_tokens, tools)
 
     def _server_models(self) -> list[dict[str, Any]]:
         try:
@@ -389,6 +468,87 @@ class LMStudioLoop(OpenAILoop):
                 f"could not reach the local model server at {self.base_url} -- is it running "
                 "(LM Studio > Developer > Start Server, or llama-server --jinja)? Check the base URL in Settings."
             ) from e
+
+
+class LocalLoop(AgentLoop):
+    """The built-in local model (llm/local_model.py), in-process via
+    llama.cpp, guided builds only. Each answer comes in two steps: a think
+    within a token budget, then the answer under a JSON schema built from
+    the offered tools -- always one well-formed tool call. JSON from the
+    first token leaves a small model no room to think; an unbounded think
+    runs to thousands of tokens."""
+
+    compact = True
+    THINK_TOKENS = 1024
+
+    def __init__(self, model: str | None = None) -> None:
+        from ..llm import local_model
+
+        self.model = model or local_model.DEFAULT_MODEL.key
+        self.context_tokens = local_model.DEFAULT_MODEL.context_tokens
+        self.think_tokens = self.THINK_TOKENS
+        self._lock = threading.Lock()
+
+    def start(self, *args):
+        raise RuntimeError("the built-in local model runs guided builds only -- set Guided to auto or on in Settings")
+
+    def resume(self, *args):
+        return self.start()
+
+    def ask(self, build: AgentBuild, system: str, prompt: str, tools: list[dict[str, Any]]) -> Answer:
+        from llama_cpp import LlamaGrammar, StoppingCriteriaList
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+        from ..llm import local_model
+
+        llm = local_model.load()
+        render = Jinja2ChatFormatter(llm.metadata["tokenizer.chat_template"], eos_token="<|im_end|>", bos_token="")
+        text = render(messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}]).prompt
+        halt = StoppingCriteriaList([lambda ids, logits: build.stop_requested])
+
+        def complete(text: str, max_tokens: int, stop: list[str], schema: dict | None) -> str:
+            grammar = LlamaGrammar.from_json_schema(json.dumps(schema), verbose=False) if schema is not None else None
+            with self._lock:
+                out = llm.create_completion(text, max_tokens=max_tokens, stop=stop, temperature=0.6 if schema is None else 0.2,
+                                            grammar=grammar, stopping_criteria=halt)
+            build.usage["input_tokens"] += out["usage"]["prompt_tokens"]
+            build.usage["output_tokens"] += out["usage"]["completion_tokens"]
+            return out["choices"][0]["text"]
+
+        return budgeted_answer(build, complete, text, self.think_tokens, tools)
+
+
+ANSWER_TOKENS = 768
+
+
+def budgeted_answer(build: AgentBuild, complete: Callable[..., str], text: str, think_tokens: int, tools: list[dict[str, Any]]) -> Answer:
+    """A guided answer in two steps over a raw completion function
+    `complete(text, max_tokens, stop, schema) -> str`, `text` ending at the
+    assistant turn: think up to `think_tokens` (0: not at all -- the think
+    block is closed straight away), then the answer under a JSON schema
+    built from the offered tools, so it is always one well-formed tool call."""
+    if think_tokens:
+        thought = complete(text + "<think>\n", think_tokens, ["</think>"], None)
+        build.check_stop()
+        text += "<think>\n" + thought.strip() + "\n</think>\n\n"
+    else:
+        text += "<think>\n\n</think>\n\n"
+    raw = complete(text, ANSWER_TOKENS, [], _answer_schema(tools))
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:  # cut off at ANSWER_TOKENS
+        return Answer(error=f"the answer wasn't complete JSON ({e}) -- answer more briefly")
+    return Answer(tool=parsed.get("tool"), args=parsed.get("args") or {})
+
+
+def _answer_schema(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """One of the offered tools with its own parameter schema: {"tool", "args"}."""
+    options = [
+        {"type": "object", "required": ["tool", "args"],
+         "properties": {"tool": {"const": t["function"]["name"]}, "args": t["function"].get("parameters") or {"type": "object"}}}
+        for t in tools
+    ]
+    return options[0] if len(options) == 1 else {"anyOf": options}
 
 
 class GeminiLoop(AgentLoop):
@@ -641,7 +801,7 @@ class ClaudeCliLoop(AgentLoop):
 
 # ---- factory ---------------------------------------------------------------------------
 
-AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini", "lmstudio")
+AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini", "lmstudio", "local")
 
 
 def make_loop(
@@ -666,6 +826,8 @@ def make_loop(
         return GeminiLoop(model, api_key=api_key, base_url=base_url)
     if provider == "lmstudio":
         return LMStudioLoop(model, base_url=base_url)
+    if provider == "local":
+        return LocalLoop(model)
     raise ValueError(
         f"provider {provider!r} can't drive an AI build yet (tool calling isn't wired up for it); "
         f"use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}"

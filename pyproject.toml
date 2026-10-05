@@ -60,6 +60,9 @@ excel = ["fastexcel>=0.10.0"]
 # Server/Oracle/SQLite/Redshift by URI scheme with no OS-level ODBC driver;
 # pyarrow is its own required intermediary for handing rows to polars.
 db = ["connectorx>=0.3.3", "pyarrow>=16.0.0"]
+# The built-in local model for AI builds (llm/local_model.py): llama.cpp,
+# CPU by default. The model file itself is downloaded from the app.
+local = ["llama-cpp-python>=0.3.0"]
 
 [project.scripts]
 modelmaker-api = "modelmaker.api:main"

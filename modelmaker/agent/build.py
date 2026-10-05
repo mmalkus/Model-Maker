@@ -102,13 +102,20 @@ class BuildOptions:
     # prompt carries what it needs -- the outline, what's built, and the
     # decisions so far) instead of continuing one that grows stage by
     # stage. For models with a small context window; see
-    # controller._next_stage and prompts.decisions_so_far.
-    small_context: bool = False
+    # controller._next_stage and prompts.decisions_so_far. None = on when
+    # the build LLM's window is small (controller.SMALL_CONTEXT_TOKENS).
+    small_context: bool | None = None
     # Decision hints: run_to adds a short rule-based "what this result
     # means / what to do next" (`next`) for blocks the build has to judge
     # -- data checks, feature screens, fits, validation tests. For small
     # models that call tools well but read statistics poorly; see hints.py.
     decision_hints: bool = False
+    # Guided: one narrow question at a time instead of every tool (see
+    # agent/guided.py). None = on for local build LLMs.
+    guided: bool | None = None
+    # Guided answers' thinking budget in tokens, for local models (0 = no
+    # thinking); None = the model's default (see loop.budgeted_answer).
+    think_tokens: int | None = None
     limits: BuildLimits = field(default_factory=BuildLimits)
 
 
@@ -343,6 +350,17 @@ class AgentBuild:
     def is_owned(self, block_id: str) -> bool:
         return block_id in self.owned_blocks
 
+    def resolve_block(self, ref: Any) -> Any:
+        """A block id, or the name of exactly one block, as its id; anything
+        else unchanged (the caller reports it). A shared name raises."""
+        graph = self.session.graph
+        if not isinstance(ref, str) or ref in graph.blocks:
+            return ref
+        named = [bid for bid, blk in graph.blocks.items() if blk.name.strip().casefold() == ref.strip().casefold()]
+        if len(named) > 1:
+            raise ToolError(f"{len(named)} blocks are named {ref!r} ({', '.join(named)}) -- use the block id")
+        return named[0] if named else ref
+
     def require_block(self, block_id: str) -> Any:
         block = self.session.graph.blocks.get(block_id)
         if block is None:
@@ -447,7 +465,7 @@ class AgentBuild:
         the tool's result, or {"error": ...} for anything the model should
         see and react to. Never raises, except that the loop should end
         its conversation once `stop_requested` is set."""
-        from .tools import CUSTOM_TOOLS, TOOLS  # local: tools imports this module
+        from .tools import BLOCK_ARG, CUSTOM_TOOLS, TOOLS  # local: tools imports this module
 
         args = args or {}
         tool = TOOLS.get(name)
@@ -472,6 +490,8 @@ class AgentBuild:
                 self.stop_requested = True
                 raise BuildStopped(f"The build hit its limit of {limit} tool calls for this phase. End your turn now.")
             with self._tool_lock:
+                props = tool.schema["properties"]
+                args = {k: self.resolve_block(v) if props.get(k) is BLOCK_ARG else v for k, v in args.items()}
                 result = tool.fn(self, **args)
             ok = True
         except BuildStopped as e:
@@ -503,6 +523,8 @@ class AgentBuild:
                 "auto_build": self.options.auto_build,
                 "allow_custom_blocks": self.options.allow_custom_blocks,
                 "small_context": self.options.small_context,
+                "guided": self.options.guided,
+                "think_tokens": self.options.think_tokens,
                 "decision_hints": self.options.decision_hints,
             },
             "log_path": str(self.log_path) if self.log_path else None,

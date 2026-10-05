@@ -297,10 +297,11 @@ def test_decision_hints_come_from_settings_unless_the_build_says(client):
 
 def test_small_context_is_a_setting_builds_pick_up(client):
     c = client
-    assert c.get("/api/llm/settings").json()["agent"]["small_context"] is False
+    assert c.get("/api/llm/settings").json()["agent"]["small_context"] is None  # auto
     assert c.put("/api/llm/settings", json={"agent_small_context": True}).json()["agent"]["small_context"] is True
     # Untouched by other updates.
     assert c.put("/api/llm/settings", json={"agent_plan": {"model": "m"}}).json()["agent"]["small_context"] is True
     b = c.post("/api/agent/builds", json={"goal": "x", "anchors": [c.anchor]}).json()
     assert b["options"]["small_context"] is True
     c.post("/api/agent/stop")
+    assert c.put("/api/llm/settings", json={"agent_small_context": "auto"}).json()["agent"]["small_context"] is None

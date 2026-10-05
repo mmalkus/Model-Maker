@@ -93,7 +93,12 @@ def apply_exclusions(df: pl.DataFrame, rules: list[dict]) -> tuple[pl.DataFrame,
     expression identifying rows to KEEP (same convention as Filter).
     Rules apply in order against whatever survived the rules before it, so
     each step's count is conditional on every earlier exclusion, not
-    independent of it."""
+    independent of it.
+
+    Best practice: it removes rows (out-of-scope products, an incomplete
+    outcome window), not columns -- columns tagged excluded or id never
+    become features anyway. Give each rule a name and an expr saying which
+    rows to KEEP."""
     starting = df.height
     steps = [{"step": "starting population", "rule": None, "dropped": 0, "remaining": starting}]
     kept = df
@@ -251,7 +256,13 @@ def missing_value_treatment(df: pl.DataFrame, strategies: dict[str, dict]) -> pl
     `add_indicator: true` on any strategy also adds a `{column}_was_missing`
     0/1 column recording which rows were originally null, computed before
     any fill runs -- the standard way to keep "this was imputed" itself as
-    a feature rather than silently hiding it."""
+    a feature rather than silently hiding it.
+
+    Best practice: treat only columns you'll use as features, before the
+    split so every sample is treated the same way. Median for skewed
+    amounts, mode or a constant for categories; add_indicator when much of a
+    column is missing (over ~10%), because being missing often predicts
+    default itself."""
     indicator_exprs = [
         pl.col(col).is_null().cast(pl.Int8).alias(f"{col}_was_missing")
         for col, spec in strategies.items()

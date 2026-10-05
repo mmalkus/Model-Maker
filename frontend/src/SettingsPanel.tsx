@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
-import type { LLMSettingsOut } from './types'
+import type { LLMSettingsOut, LocalModelStatus } from './types'
 
 const PROVIDER_HELP: Record<string, string> = {
   lmstudio: 'Local LM Studio server -- start it from Developer > Start Server, then Fetch models below.',
@@ -252,6 +252,7 @@ export function SettingsPanel({
                 Which LLMs plan and build models with "Build with AI". Planning is short but benefits from the strongest
                 model; building is many tool calls. Each can be overridden per build.
               </div>
+              <LocalModelCard />
               <AgentLlmRow
                 key={`plan-${settings.agent.plan.provider}-${settings.agent.plan.model}`}
                 label="Plan"
@@ -269,17 +270,54 @@ export function SettingsPanel({
                 onSave={(v) => update({ agent_build: v })}
               />
               <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={settings.agent.small_context ?? false}
+                <select
+                  value={settings.agent.guided == null ? 'auto' : settings.agent.guided ? 'on' : 'off'}
                   disabled={busy}
-                  onChange={(e) => update({ agent_small_context: e.target.checked })}
-                />
+                  onChange={(e) => update({ agent_guided: e.target.value === 'auto' ? 'auto' : e.target.value === 'on' })}
+                  style={{ fontSize: 12 }}
+                >
+                  <option value="auto">auto</option>
+                  <option value="on">on</option>
+                  <option value="off">off</option>
+                </select>
+                <span>
+                  Guided{' '}
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="default"
+                    title="Thinking budget per question, in tokens (local models; 0 = no thinking)"
+                    defaultValue={settings.agent.think_tokens ?? ''}
+                    disabled={busy}
+                    onBlur={(e) => update({ agent_think_tokens: e.target.value === '' ? 'default' : Number(e.target.value) })}
+                    style={{ width: 70, fontSize: 11 }}
+                  />{' '}
+                  thinking tokens
+                  <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+                    The app asks one narrow question at a time -- the plan in one prompt, then per stage which block
+                    to place next -- with the data profiled for it. For small models. Auto turns it on for local
+                    (LM Studio) models.
+                  </div>
+                </span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 6 }}>
+                <select
+                  value={settings.agent.small_context == null ? 'auto' : settings.agent.small_context ? 'on' : 'off'}
+                  disabled={busy}
+                  onChange={(e) =>
+                    update({ agent_small_context: e.target.value === 'auto' ? 'auto' : e.target.value === 'on' })
+                  }
+                  style={{ fontSize: 12 }}
+                >
+                  <option value="auto">auto</option>
+                  <option value="on">on</option>
+                  <option value="off">off</option>
+                </select>
                 <span>
                   Small context
                   <div style={{ color: '#9ca3af', fontWeight: 400 }}>
                     Start each build stage in a fresh conversation, carrying only the outline, what's built and the
-                    decisions so far. For models with a small context window (e.g. local models).
+                    decisions so far. Auto turns it on for a build LLM with a context window under 32k tokens.
                   </div>
                 </span>
               </label>
@@ -350,6 +388,48 @@ function AgentLlmRow({
         placeholder={choice.model ?? '(default)'}
         style={{ flex: 1, minWidth: 0, fontSize: 12, fontFamily: 'monospace' }}
       />
+    </div>
+  )
+}
+
+// The built-in local model (provider "local"): one-click download, polled
+// while it runs. The model itself is never part of the package.
+function LocalModelCard() {
+  const [status, setStatus] = useState<LocalModelStatus | null>(null)
+  const state = status?.download?.state
+  const busy = state === 'downloading' || state === 'verifying'
+  useEffect(() => {
+    api.localModel().then(setStatus, () => {})
+  }, [])
+  useEffect(() => {
+    if (!busy) return
+    const timer = setInterval(() => api.localModel().then(setStatus, () => {}), 1000)
+    return () => clearInterval(timer)
+  }, [busy])
+  if (!status) return null
+  const gb = (n: number) => `${(n / 1e9).toFixed(2)} GB`
+  return (
+    <div style={{ border: '1px solid #e5e7eb', borderRadius: 4, padding: 6, marginBottom: 8 }}>
+      <div style={{ fontWeight: 600 }}>Local model: {status.name}</div>
+      <div style={{ color: '#9ca3af' }}>
+        Runs on this computer's CPU as the <code>local</code> provider (guided).{' '}
+        <a href={status.license_url} target="_blank" rel="noreferrer">Licence</a>
+      </div>
+      {!status.runtime_available && <div style={{ color: '#b45309' }}>Needs <code>pip install modelmaker[local]</code>.</div>}
+      {status.downloaded ? (
+        <div style={{ color: '#15803d' }}>Downloaded -- used for AI builds unless you pick another provider.</div>
+      ) : busy && status.download ? (
+        <div>
+          <progress value={status.download.bytes} max={status.download.total} style={{ width: '100%' }} />
+          {state === 'verifying' ? 'Checking...' : `${gb(status.download.bytes)} of ${gb(status.download.total)} `}
+          <button onClick={() => api.localModelCancel().then(setStatus)}>Cancel</button>
+        </div>
+      ) : (
+        <div>
+          <button onClick={() => api.localModelDownload().then(setStatus)}>Download ({gb(status.size)})</button>
+          {state === 'failed' && <span style={{ color: '#b91c1c' }}> {status.download?.error}</span>}
+        </div>
+      )}
     </div>
   )
 }

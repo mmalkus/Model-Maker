@@ -277,15 +277,49 @@ llama.cpp's `llama-server` (start it with `--jinja`, which tool calling
 needs), Ollama's `/v1`, or vLLM. The model is auto-detected when unset.
 Local models get a compact prompt, where the block catalogue is block names
 per category and details are fetched on demand. They also get length caps
-on tool results, and older results are dropped when the conversation nears
+on tool results (a tenth of the window), and older results are dropped when the conversation nears
 the context window. The window size is read from the server (llama.cpp
 reports it) or set with `MODELMAKER_LLM_CONTEXT_TOKENS`. Expect a local
-build to take a while; `MODELMAKER_LLM_TIMEOUT_SECONDS` (default 900 for
+build to take a while; `MODELMAKER_LLM_TIMEOUT_SECONDS` (default 600 for
 local models) caps a single request.
 
-Two **Settings → AI builder** switches help small models:
+**Guided mode** (Settings → AI builder → Guided; **auto** turns it on for
+local models) replaces the open-ended conversation with narrow questions,
+because small models given every tool explore without acting:
+- **Planning:** one prompt with one tool, `submit_plan`. The prompt holds
+  the goal, a profile of the data, the blocks that fit the goal (from the
+  registry) and the plan rules.
+- **Building:** for each step, the prompt gives the stage goal, the data
+  and results so far (labelled `D1`, `M1`, …), the stage's blocks with
+  their docs, and what the last step did. The model answers with
+  `place_block` or `stage_done`.
+- **Handled in code:** the app maps labels to ports and parses text dates
+  first. A block that fails is removed, and its error comes back with the
+  next question.
+
+The data profile classifies each column: target, id, date (with its range),
+numeric, binary or categorical, and so on. It never shows values from the
+data; date ranges are the one exception. Block docs can end with a
+**Best practice:** paragraph, which AI builds see.
+
+**The built-in local model** (`local` provider) runs builds on your CPU,
+always in guided mode.
+- **Set up:** `pip install modelmaker[local]` adds llama.cpp. Then
+  **Download** under Settings → AI builder fetches MiniCPM5 2B (1.6 GB)
+  into `~/.modelmaker/models`, checksummed and resumable. The model is not
+  part of the package.
+- **Default:** once the model is downloaded, AI builds use it unless you
+  pick another provider.
+- **How it answers:** each answer thinks within
+  `MODELMAKER_LOCAL_THINK_TOKENS` (default 1024), then answers under the
+  tools' JSON schema.
+- **Other settings:** `MODELMAKER_LOCAL_MODEL_PATH` reuses an existing
+  `.gguf`, and `MODELMAKER_LOCAL_GPU_LAYERS` offloads to a GPU.
+
+Two more **Settings → AI builder** switches help small models:
 - **Small context** starts each build stage in a fresh conversation,
-  carrying only the outline, what's built and the decisions so far.
+  carrying only the outline, what's built and the decisions so far. On
+  **auto** (the default), it's on for context windows under 32k tokens.
 - **Decision hints** adds a short, rule-based recommendation (`next`) to the
   results the build has to judge, so the model reads a recommendation
   rather than a statistics table. For example:

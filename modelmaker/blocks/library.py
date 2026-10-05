@@ -396,7 +396,12 @@ def train_test_split(
     values separately, so `train` and `test` get the same share of each --
     the usual choice for a low default rate, where a plain random split can
     leave the test sample with a noticeably different event rate. Left
-    unset, it's a simple random split."""
+    unset, it's a simple random split.
+
+    Best practice: for a binary target set stratify_col to the target;
+    test_size 0.3 is common. With a date column and enough history, use
+    time_split for the out-of-time holdout first, and split its development
+    part like this only if you also want an in-time test sample."""
     if stratify_col is None:
         shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
         n_test = int(len(shuffled) * test_size)
@@ -436,7 +441,13 @@ def time_split(
     set, also drops rows on/after that date from `out_of_time` (e.g. a
     period whose outcome window isn't complete yet). `date_col` may be a
     Date/Datetime column or ISO date strings. Rows with a null date go to
-    neither output. Both outputs keep every column and role."""
+    neither output. Both outputs keep every column and role.
+
+    Best practice: choose the cutoff so the development sample holds the
+    earlier ~70-80% of the rows and the out-of-time sample the most recent
+    ~20-30% -- the column profile gives each date column the date before
+    which 75% of its rows fall. Set oot_end when the latest period's outcome
+    window isn't complete."""
     from datetime import date
 
     dtype = df.schema[date_col]
@@ -562,6 +573,57 @@ register_block(
         outputs=[PortSpec("out")],
         fn=one_hot_encode,
         metadata_transform=_one_hot_meta,
+    )
+)
+
+
+def parse_dates(df: pl.DataFrame, columns: dict[str, str] | None = None) -> pl.DataFrame:
+    """Converts text date columns into real Date columns (Datetime when they
+    carry a time). `columns` maps a column to its strptime format, e.g.
+    {"opened": "%d-%m-%Y"} (a value that doesn't fit is an error); unset,
+    every text column whose values all parse with one common format is
+    converted -- ISO (with or without a time), 2024/03/31, 20240331, and
+    31-03-2024, 31/03/2024, 31.03.2024 before 03/31/2024 (day-first wins
+    when both fit). Other columns, and every role, are kept.
+
+    Best practice: run it straight after the input, before any split or date
+    filter, so every later block works on real dates."""
+
+    def parse(c: str, fmt: str, strict: bool) -> pl.Expr:
+        return pl.col(c).str.strip_chars().str.strptime(pl.Datetime if "%H" in fmt else pl.Date, fmt, strict=strict)
+
+    if columns:
+        return df.with_columns(parse(c, fmt, True) for c, fmt in columns.items())
+    formats = ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y%m%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%m/%d/%Y"]
+    converted = []
+    for c in (c for c, t in df.schema.items() if t == pl.String and df[c].drop_nulls().len()):
+        fmt = next((f for f in formats if df.select(parse(c, f, False)).to_series().null_count() == df[c].null_count()), None)
+        if fmt:
+            converted.append(parse(c, fmt, False))
+    return df.with_columns(converted)
+
+
+def _parse_dates_meta(input_metas, outputs, params):
+    # Same columns, roles and notes; only the converted columns' dtype changes.
+    (in_meta,) = input_metas.values()
+    (out,) = outputs.values()
+    result = {}
+    for name in out.columns:
+        dtype = str(out.schema[name])
+        result[name] = replace(in_meta[name], dtype=dtype) if name in in_meta else ColumnMeta(dtype=dtype)
+    return {"out": result}
+
+
+register_block(
+    BlockSpec(
+        category="parse_dates",
+        block_type="standard",
+        display_name="Parse dates",
+        tags=("data_prep", "data_quality"),
+        inputs=[PortSpec("df")],
+        outputs=[PortSpec("out")],
+        fn=parse_dates,
+        metadata_transform=_parse_dates_meta,
     )
 )
 

@@ -22,9 +22,11 @@ from modelmaker.agent.build import (
     AgentBuild,
     BuildOptions,
     LLMChoice,
+    ToolError,
 )
 from modelmaker.agent.controller import BuildController, BuildError
 from modelmaker.agent.loop import LLMUnavailable, ScriptedLoop
+from modelmaker.agent.tools import get_graph
 from modelmaker.runslot import RunSlot
 from modelmaker.session import ProjectSession
 
@@ -510,25 +512,16 @@ def test_stage_plan_validation_reports_every_problem(prepared):
         {
             "steps": [
                 {"ref": "s1", "category": "read_csv", "lane": "nowhere", "name": "a", "inputs": [], "why": ""},
-                {"ref": "s2", "category": "auc_gini", "name": "b", "inputs": [{"port": "df", "from": anchor, "from_port": "nope"}], "why": ""},
+                {"ref": "s0", "category": "train_test_split", "name": "split", "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": ""},
+                {"ref": "s2", "category": "auc_gini", "name": "b", "inputs": [{"port": "df", "from": "s0", "from_port": "nope"}], "why": ""},
+                {"ref": "s3", "category": "time_split", "name": "c", "inputs": [{"port": "df", "from": anchor, "from_port": "out"}], "why": ""},
             ]
         },
     )
     err = r["error"]
     assert "read_csv can't be added" in err and "lane 'nowhere'" in err and "no output port 'nope'" in err
+    assert "time_split needs params ['cutoff']" in err  # date_col can fill from the date role
     assert b.stages[0]["plan"] is None
-
-    # A step without a lane goes into the stage's own.
-    ok = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "train_test_split", "name": "split", "why": "",
-                                               "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
-    assert ok.get("ok"), ok
-    assert b.stages[0]["plan"]["steps"][0]["lane"] == "est"
-
-    # Refs stay unique across stages, and earlier stages' steps are wired by block id.
-    b.stages[0]["status"], b.stages[1]["status"], b.stage_index = "done", "active", 1
-    r = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "auc_gini", "name": "g", "why": "",
-                                              "inputs": [{"port": "df", "from": "s1", "from_port": "test"}]}]})
-    assert "used by an earlier stage" in r["error"] and "wire from the block it built" in r["error"]
 
 
 def test_stage_tools_keep_to_the_outline(prepared):
@@ -1107,6 +1100,84 @@ def test_small_context_starts_each_stage_fresh_with_the_decisions(prepared, smal
     else:
         assert "The user approved this outline" not in stage2 and "fresh conversation" not in stage2
     assert b.log_record()["options"]["small_context"] is small
+
+
+def _first_stage_built(prepared, window=None):
+    """Plan, approve and build the estimation stage; the build loop reports
+    a context window of `window` tokens (None: it doesn't know one)."""
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [plan_turn], "build": [build_est]})
+    factory = controller.loop_factory
+
+    def with_window(choice, phase):
+        loop = factory(choice, phase)
+        loop.context_tokens = window
+        return loop
+
+    controller.loop_factory = with_window
+    b = start(controller, anchor)
+    assert b.options.small_context is None  # auto until the build LLM is known
+    controller.join(60)
+    controller.approve()
+    controller.join(120)
+    assert b.phase == AWAITING_STAGE_REVIEW, (b.phase, b.error, b.pending_question)
+    return b
+
+
+@pytest.mark.parametrize("window, small", [(16384, True), (100096, False), (None, False)])
+def test_small_context_on_auto_follows_the_build_llms_context_window(prepared, window, small):
+    b = _first_stage_built(prepared, window)
+    assert b.options.small_context is small
+    assert [e for e in b.events_since() if e["kind"] == "small_context"][0]["context_tokens"] == window
+    assert b.log_record()["options"]["small_context"] is small
+
+
+def test_get_graph_names_ports_plainly_and_flags_only_what_stands_out(prepared):
+    b = _first_stage_built(prepared)
+    graph = get_graph(b)  # directly: the build is paused for stage review
+    blocks = {blk["category"]: blk for blk in graph["blocks"]}
+    split = blocks["train_test_split"]
+    assert split["inputs"] == ["df"] and set(split["outputs"]) >= {"train", "test"}
+    assert split["owned_by_this_build"] is True
+    assert "owned_by_this_build" not in blocks["read_csv"]  # the user's block
+    assert graph["wires"] and all("valid" not in w for w in graph["wires"])  # all valid
+    assert all(w["owned_by_this_build"] is True for w in graph["wires"])
+
+
+def test_blocks_can_be_named_instead_of_by_id_when_the_name_is_unique(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    seen = {}
+
+    def by_name(call):
+        # The anchor by its name ("applications"; case doesn't matter).
+        steps = est_steps()
+        steps[0]["inputs"][0]["from"] = "Applications"
+        built = call("plan_stage", {"steps": steps})
+        assert built.get("ok"), built
+        BUILT.update({st["ref"]: st["block"] for st in built["steps"]})
+        seen["summary"] = call("get_output_summary", {"block": "pd model"})
+        call("complete_stage", {"summary": "Split and fitted."})
+        return "Done."
+
+    controller = make_controller(session, {"plan": [plan_turn], "build": [by_name]})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(120)
+    assert b.phase == AWAITING_STAGE_REVIEW, (b.phase, b.error, b.pending_question)
+    split = session.graph.blocks[BUILT["s1"]]
+    assert split.category == "train_test_split"
+    assert any(w.from_block == anchor and w.to_block == split.id for w in session.graph.wires.values())
+    assert seen["summary"]["block"] == BUILT["s2"]
+
+    # A name two blocks share is refused, naming both ids.
+    with session.edit():
+        session.add_block("read_csv", name="pd model", lane="lane_prep", params={"path": str(DATA)})
+    with pytest.raises(ToolError, match="2 blocks are named 'pd model'"):
+        b.resolve_block("pd model")
+    assert b.resolve_block("no such name") == "no such name"  # left for the tool's own error
 
 
 def test_a_tag_used_as_a_block_gets_its_blocks_named(prepared):

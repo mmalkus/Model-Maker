@@ -37,12 +37,15 @@ from .build import (
     LLMChoice,
     ToolError,
 )
+from . import guided
 from .loop import AgentLoop, LLMUnavailable
 from .tools import resolve_lane, summarize_value, tools_for_phase
 
 # Sample only when the data is big enough for it to matter.
 AUTO_SAMPLE_THRESHOLD_ROWS = 100_000
 AUTO_SAMPLE_ROWS = 50_000
+# Small-context mode by default below this context window (tokens).
+SMALL_CONTEXT_TOKENS = 32_768
 
 LoopFactory = Callable[[LLMChoice, str], AgentLoop]  # (choice, "plan"|"build") -> loop
 
@@ -232,6 +235,9 @@ class BuildController:
                 raise BuildError("an AI build is already in progress -- finish, stop or discard it first")
             if not goal.strip():
                 raise BuildError("describe what to build")
+            if options.guided is None or build_llm.provider in guided.GUIDED_ONLY_PROVIDERS:
+                # Auto: guided for local models (see guided.is_guided_provider).
+                options.guided = guided.is_guided_provider(build_llm.provider)
             b = AgentBuild(self.session, self.run_slot, goal.strip(), anchors, plan_llm, build_llm, options)
             self.build, self.token = b, token
             self._plan_loop = self._build_loop = None
@@ -295,7 +301,7 @@ class BuildController:
         def work() -> None:
             # Created on the worker, so a failure (missing key, no CLI)
             # ends the build as failed with its message, via _spawn.
-            self._plan_loop = self.loop_factory(b.plan_llm, "plan")
+            self._plan_loop = self._make_loop(b.plan_llm, "plan")
             _record_resolved_model(b.plan_llm, self._plan_loop)
             outcome = self._plan_loop.start(b, prompts.plan_system(b, getattr(self._plan_loop, "compact", False)), prompts.plan_prompt(b), self._tools(PLANNING))
             self._after_plan_turn(outcome)
@@ -425,12 +431,38 @@ class BuildController:
 
             def work() -> None:
                 b.turn_over = False
-                self._build_loop = self.loop_factory(b.build_llm, "build")
+                self._build_loop = self._make_loop(b.build_llm, "build")
                 _record_resolved_model(b.build_llm, self._build_loop)
+                self._resolve_small_context()
                 outcome = self._build_loop.start(b, prompts.build_system(b, getattr(self._build_loop, "compact", False)), prompts.build_prompt(b), self._tools(BUILDING))
                 self._after_build_turn(outcome)
 
             return work
+
+    def _make_loop(self, choice: LLMChoice, phase: str) -> AgentLoop:
+        """The provider's loop -- wrapped in a GuidedLoop for a guided build
+        (see agent/guided.py), when the provider can answer one question at
+        a time; one that can't builds the usual way."""
+        loop = self.loop_factory(choice, phase)
+        if self.build.options.think_tokens is not None and hasattr(loop, "think_tokens"):
+            loop.think_tokens = self.build.options.think_tokens
+        if not self.build.options.guided:
+            return loop
+        if not guided.can_guide(loop):
+            self.build.log("guided", note=f"{choice.provider} can't run a guided {phase}; building the usual way")
+            return loop
+        return guided.GuidedLoop(loop)
+
+    def _resolve_small_context(self) -> None:
+        """small_context unset: on only for a build LLM with a small context
+        window. A fresh conversation per stage costs a re-read of the graph
+        and the server's prompt cache, which only a small window is worth."""
+        b = self.build
+        if b.options.small_context is not None:
+            return
+        window = getattr(self._build_loop, "context_tokens", None)
+        b.options.small_context = bool(window and window < SMALL_CONTEXT_TOKENS)
+        b.log("small_context", on=b.options.small_context, context_tokens=window)
 
     def _start_stage(self) -> None:
         b = self.build

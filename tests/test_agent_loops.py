@@ -280,6 +280,17 @@ def test_lmstudio_loop_detects_model_and_context_and_sends_no_key(planning_build
     assert "reasoning_content" not in json.dumps(fake.requests[-1][2]["messages"])
 
 
+@pytest.mark.parametrize("n_ctx, cap", [(16384, 6000), (100096, 30028)])
+def test_lmstudio_loop_caps_tool_results_by_its_context_window(planning_build, monkeypatch, n_ctx, cap):
+    monkeypatch.delenv("MODELMAKER_LLM_CONTEXT_TOKENS", raising=False)
+    fake = FakeEndpoint([], models=[{"id": "local-27b.gguf", "meta": {"n_ctx": n_ctx}}])
+    try:
+        loop = make_loop("lmstudio", "local-27b.gguf", api_base_url="", token="", base_url=fake.url + "/v1")
+    finally:
+        fake.close()
+    assert loop.max_result_chars == cap
+
+
 def test_lmstudio_loop_keeps_within_the_context_window(planning_build, monkeypatch):
     monkeypatch.setenv("MODELMAKER_LLM_CONTEXT_TOKENS", "3000")
     b, anchor = planning_build
@@ -367,7 +378,7 @@ def test_start_endpoint_rejects_an_unconfigured_provider_up_front(tmp_path, monk
     assert api.AGENT.build is None
     # Settings key + model make it acceptable (still no network call at start).
     api.LLM_SETTINGS.update(None, None, {"openai": {"api_key": "sk-x", "model": "gpt-x"}})
-    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini", "lmstudio"]
+    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini", "lmstudio", "local"]
 
 
 def test_resume_after_a_terminal_tool_merges_into_the_trailing_user_turn(planning_build):

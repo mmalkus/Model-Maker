@@ -12,6 +12,7 @@ from .packet import ColumnRole
 # blocks for free as long as the drafted code names the parameter this way.
 TARGET_PARAM_NAMES = ("target", "target_col", "actual_col")
 PREDICTED_PARAM_NAMES = ("score_col", "predicted_col")
+DATE_PARAM_NAMES = ("date_col",)
 
 # Which param names, for a given upstream column role, opt a block function
 # into that role's dynamic default (see packet.resolve_role_column). Keyed
@@ -20,6 +21,8 @@ PREDICTED_PARAM_NAMES = ("score_col", "predicted_col")
 ROLE_PARAM_NAMES: dict[ColumnRole, tuple[str, ...]] = {
     ColumnRole.TARGET: TARGET_PARAM_NAMES,
     ColumnRole.PREDICTED: PREDICTED_PARAM_NAMES,
+    # The observation date (time_split, target_trend, ...).
+    ColumnRole.DATE: DATE_PARAM_NAMES,
 }
 
 

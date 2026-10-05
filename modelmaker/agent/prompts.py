@@ -186,8 +186,8 @@ def _anchor_context(build: AgentBuild) -> str:
         block = graph.blocks.get(bid)
         if block is None:
             continue
-        ports = ", ".join(f"{p.name}:{p.type}" for p in block.outputs)
-        lines.append(f"- {block.name} (id {bid}, {block.category}) -> {ports}")
+        ports = ", ".join(f"{p.name} ({p.type})" for p in block.outputs)
+        lines.append(f"- {block.name} (id {bid}, {block.category}) -> output port {ports}")
     return "\n".join(lines) or "- (none)"
 
 
@@ -379,8 +379,8 @@ def block_docs(categories: list[str]) -> str:
     out = []
     for category in categories:
         d = catalogue.describe_block_type(category)
-        ins = ", ".join(f"{p['name']}:{p['type']}" for p in d["inputs"]) or "-"
-        outs = ", ".join(f"{p['name']}:{p['type']}" + (" (statistics table)" if p.get("statistics_table") else "") for p in d["outputs"])
+        ins = ", ".join(f"{p['name']} ({p['type']})" for p in d["inputs"]) or "-"
+        outs = ", ".join(f"{p['name']} ({p['type']}" + (", statistics table)" if p.get("statistics_table") else ")") for p in d["outputs"])
         params = []
         for p in d.get("params") or []:
             item = f"{p['name']}: {p.get('type') or 'any'}"
@@ -391,7 +391,8 @@ def block_docs(categories: list[str]) -> str:
             if p.get("auto_fills_from_role"):
                 item += f" (auto-fills from the {p['auto_fills_from_role']} role)"
             params.append(item)
-        out.append(f"### {category}\n{d['summary']}\nin: {ins} -> out: {outs}\nparams: {'; '.join(params) or '-'}")
+        tip = f"\nbest practice: {d['best_practice']}" if d.get("best_practice") else ""
+        out.append(f"### {category}\n{d['summary']}\nin: {ins} -> out: {outs}\nparams: {'; '.join(params) or '-'}{tip}")
     return "\n\n".join(out)
 
 

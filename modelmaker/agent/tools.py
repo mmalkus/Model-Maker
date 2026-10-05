@@ -64,14 +64,27 @@ def tool(name: str, description: str, properties: dict[str, Any], required: list
 CUSTOM_TOOLS = frozenset({"add_custom_block", "update_custom_block"})
 
 
+# Tools only guided builds use (agent/guided.py); never offered otherwise.
+GUIDED_TOOLS = frozenset({"stage_done"})
+
+
 def tools_for_phase(phase: str, allow_custom: bool = True) -> list[Tool]:
-    return [t for t in TOOLS.values() if phase in t.phases and (allow_custom or t.name not in CUSTOM_TOOLS)]
+    return [
+        t
+        for t in TOOLS.values()
+        if phase in t.phases and (allow_custom or t.name not in CUSTOM_TOOLS) and t.name not in GUIDED_TOOLS
+    ]
 
 
 # ---- shared helpers ----------------------------------------------------------
 
 _STR = {"type": "string"}
-_BLOCK = {"type": "string", "description": "A block id, as returned by get_graph/add_block."}
+_BLOCK = {
+    "type": "string",
+    "description": "A block id, as returned by get_graph/add_block -- or the block's name, if no other block has it.",
+}
+# Arguments with this schema get a block name resolved to its id (AgentBuild.call_tool).
+BLOCK_ARG = _BLOCK
 
 
 def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
@@ -360,10 +373,12 @@ def _block_brief(b: AgentBuild, bid: str) -> dict[str, Any]:
         "lane": block.lane,
         "status": status,
         "params": block.params,
-        "inputs": [f"{p.name}:{p.type}" for p in block.inputs],
-        "outputs": [f"{p.name}:{p.type}" for p in block.outputs],
-        "owned_by_this_build": b.is_owned(bid),
+        # Port names only: a "name:type" pair gets copied back as a port name.
+        "inputs": [p.name for p in block.inputs],
+        "outputs": [p.name for p in block.outputs],
     }
+    if b.is_owned(bid):
+        out["owned_by_this_build"] = True
     if bid in b.anchors:
         out["anchor"] = True
     if bid in b.approved_changes:
@@ -415,8 +430,9 @@ def describe_block_type(b: AgentBuild, category: str) -> dict[str, Any]:
 
 @tool(
     "get_graph",
-    "The current graph: lanes, every block (id, name, category, lane, status, params, ports, whether this "
-    "build created it, errors) and every wire. Anchors are the blocks the user asked you to build from.",
+    "The current graph: lanes, every block (id, name, category, lane, status, params, port names, errors; "
+    "owned_by_this_build when this build created it) and every wire (invalid ones marked valid: false). "
+    "Anchors are the blocks the user asked you to build from.",
     {},
     [],
     READ,
@@ -429,17 +445,18 @@ def get_graph(b: AgentBuild) -> dict[str, Any]:
             for lid, l in sorted(graph.lanes.items(), key=lambda kv: kv[1].order)
         ],
         "blocks": [_block_brief(b, bid) for bid in graph.topo_order()],
-        "wires": [
-            {
-                "id": wid,
-                "from": f"{w.from_block}.{w.from_port}",
-                "to": f"{w.to_block}.{w.to_port}",
-                "valid": wire_is_valid(graph, w),
-                "owned_by_this_build": wid in b.owned_wires,
-            }
-            for wid, w in graph.wires.items()
-        ],
+        "wires": [_wire_brief(b, wid, w) for wid, w in graph.wires.items()],
     }
+
+
+def _wire_brief(b: AgentBuild, wid: str, w) -> dict[str, Any]:
+    # Flags only when they say something: the graph is re-read often.
+    out: dict[str, Any] = {"id": wid, "from": f"{w.from_block}.{w.from_port}", "to": f"{w.to_block}.{w.to_port}"}
+    if not wire_is_valid(b.session.graph, w):
+        out["valid"] = False
+    if wid in b.owned_wires:
+        out["owned_by_this_build"] = True
+    return out
 
 
 @tool(
@@ -551,7 +568,7 @@ _STEP_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "port": _STR,
-                    "from": {"type": "string", "description": "A step ref of this stage or an existing block id."},
+                    "from": {"type": "string", "description": "A step ref of this stage, or an existing block's id (or its name, if no other block has it)."},
                     "from_port": _STR,
                 },
                 "required": ["port", "from", "from_port"],
@@ -644,9 +661,23 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
         lane = step.get("lane")
         if lane not in stage_keys and lane not in graph.lanes:
             errors.append(f"{where}: lane {lane!r} is neither a stage key nor an existing lane id")
+        if cat != "custom":
+            missing = [
+                p["name"]
+                for p in catalogue.block_params(BLOCK_REGISTRY[cat])
+                if p.get("required") and not p.get("auto_fills_from_role") and p["name"] not in (step.get("params") or {})
+            ]
+            if missing:
+                errors.append(f"{where}: {cat} needs params {missing} -- see its docs (describe_block_type)")
         in_ports, _ = _step_ports(step)
         for inp in step.get("inputs") or []:
             src = inp.get("from")
+            if src not in refs:
+                try:
+                    src = inp["from"] = b.resolve_block(src)
+                except ToolError as e:
+                    errors.append(f"{where}: {e}")
+                    continue
             if src in refs:
                 src_step = refs[src]
                 valid_src = src_step.get("category") == "custom" or src_step.get("category") in BLOCK_REGISTRY
@@ -657,7 +688,7 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
                 errors.append(f"{where}: {src!r} is an earlier stage's step -- wire from the block it built (by block id)")
                 continue
             else:
-                errors.append(f"{where}: input from {src!r} is neither an earlier step ref nor an existing block id")
+                errors.append(f"{where}: input from {src!r} is neither an earlier step ref nor an existing block id or name")
                 continue
             if src_out is not None and inp.get("from_port") not in src_out:
                 errors.append(f"{where}: {src!r} has no output port {inp.get('from_port')!r} (has {sorted(src_out)})")
@@ -948,6 +979,26 @@ def complete_stage(b: AgentBuild, summary: str) -> dict[str, Any]:
     return {"ok": True, "message": "Stage complete. End your turn now -- you'll be resumed for the next stage."}
 
 
+@tool(
+    "stage_done",
+    "Guided builds: the current stage is built -- complete it (the last stage finishes the build).",
+    {"summary": _STR},
+    ["summary"],
+    WRITE,
+)
+def stage_done(b: AgentBuild, summary: str) -> dict[str, Any]:
+    stage = _require_active_stage(b)
+    built = _step_blocks(b)
+    steps = (stage.get("plan") or {}).get("steps") or []
+    # The app's own steps (date parsing) count only if the stage planned that block.
+    mine = [s for s in steps if not s.get("by_app") or s.get("category") in (stage.get("blocks") or [])]
+    if not any(b.session.runner.status(built[s["ref"]]) == "green" for s in mine if s["ref"] in built):
+        raise ToolError("this stage has no blocks yet -- place its first block")
+    if b.is_last_stage():
+        return finish(b, report=summary or f"Built the {len(b.stages)} stages of the plan.")
+    return complete_stage(b, summary)
+
+
 # ---- building ------------------------------------------------------------------
 
 
@@ -957,8 +1008,8 @@ def _finish_add(b: AgentBuild, block, plan_step: str | None) -> dict[str, Any]:
     return {
         "block": block.id,
         "name": block.name,
-        "inputs": [f"{p.name}:{p.type}" for p in block.inputs],
-        "outputs": [f"{p.name}:{p.type}" for p in block.outputs],
+        "inputs": [p.name for p in block.inputs],
+        "outputs": [p.name for p in block.outputs],
         "next": "connect its inputs, then run_to it",
     }
 
@@ -1330,7 +1381,7 @@ def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"block": _STR, "port": _STR, "label": _STR},
+                "properties": {"block": _BLOCK, "port": _STR, "label": _STR},
                 "required": ["block"],
             },
         },
@@ -1351,6 +1402,7 @@ def finish(
             "user agreed to drop them, pass dropped_stages_reason."
         )
     for k in key_outputs or []:
+        k["block"] = b.resolve_block(k["block"])
         b.require_block(k["block"])
     if stage is not None:
         stage["status"] = STAGE_DONE

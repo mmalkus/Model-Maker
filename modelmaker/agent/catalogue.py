@@ -115,6 +115,15 @@ def _summary_line(doc: str) -> str:
     return " ".join(first.split())
 
 
+def best_practice(doc: str) -> str | None:
+    """A docstring's "Best practice:" paragraph, as one line: how to use the
+    block well, shown with its docs to AI builds (and to anyone reading)."""
+    for para in doc.strip().split("\n\n"):
+        if para.lstrip().startswith("Best practice:"):
+            return " ".join(para.split())[len("Best practice:"):].strip()
+    return None
+
+
 def _first_sentence(summary: str, limit: int = 220) -> str:
     """The first sentence of a summary line, for tag listings -- the whole
     first paragraph runs to ~1k chars on some blocks."""
@@ -189,6 +198,8 @@ def catalogue_entry(spec: BlockSpec, detail: bool = False) -> dict[str, Any]:
     if detail:
         entry["doc"] = doc
         entry["params"] = block_params(spec)
+        if tip := best_practice(doc):
+            entry["best_practice"] = tip
     return entry
 
 
@@ -201,6 +212,43 @@ def list_block_types(group: str | None = None, include_disallowed: bool = False)
         if group is not None and (spec.group or spec.block_type) != group:
             continue
         out.append(catalogue_entry(spec))
+    return out
+
+
+# Tags for one kind of risk model, listed in a goal's catalogue only when the
+# goal names them (word match, case-insensitive) -- a PD build has no use for
+# the capital-simulation blocks. Every other tag is always listed.
+SPECIALIST_TAGS: dict[str, tuple[str, ...]] = {
+    "pd": ("pd", "probability of default", "default"),
+    "lgd": ("lgd", "loss given default", "recovery", "recoveries"),
+    "ccf_ead": ("ccf", "ead", "exposure", "conversion factor"),
+    "capital_simulation": ("capital", "monte carlo", "simulation", "var", "tvar", "asrf"),
+    "distributions": ("distribution", "distributions", "simulation", "monte carlo"),
+    "proxy_models": ("proxy", "surrogate"),
+}
+
+
+def goal_catalogue(goal: str, summary_chars: int = 120) -> list[tuple[str, list[dict[str, Any]]]]:
+    """The registry as one goal needs it, built from the live registry: each
+    tag (specialist ones only when the goal names them) with its blocks and
+    a summary of at most `summary_chars` each, every block under the first
+    tag that lists it."""
+    ensure_blocks_registered()
+    text = goal.casefold()
+    seen: set[str] = set()
+    out = []
+    for tag in TAGS:
+        words = SPECIALIST_TAGS.get(tag)
+        if words and not any(re.search(rf"\b{re.escape(w)}\b", text) for w in words):
+            continue
+        blocks = [
+            {**b, "summary": _first_sentence(b["summary"], summary_chars)}
+            for b in list_blocks_for_tag(tag)
+            if b["category"] not in seen
+        ]
+        seen.update(b["category"] for b in blocks)
+        if blocks:
+            out.append((tag, blocks))
     return out
 
 

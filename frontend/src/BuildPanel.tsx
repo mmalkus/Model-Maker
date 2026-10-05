@@ -318,6 +318,7 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.options.allow_custom_blocks === false ? ' · registry blocks only' : ''}
         {build.options.small_context ? ' · small context' : ''}
         {build.options.decision_hints ? ' · decision hints' : ''}
+        {build.options.guided ? ' · guided' : ''}
       </div>
     </div>
   )

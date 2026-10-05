@@ -32,9 +32,15 @@ class LLMSettingsStore:
     agent_build: dict[str, Any] = field(default_factory=dict)
     # The AI builder's small-context mode (BuildOptions.small_context): a
     # fresh conversation per stage, for models with a small context window.
-    agent_small_context: bool = False
+    # None = automatic, from the build LLM's window.
+    agent_small_context: bool | None = None
     # The AI builder's decision hints (BuildOptions.decision_hints).
     agent_decision_hints: bool = False
+    # The AI builder's guided mode (BuildOptions.guided). None = automatic:
+    # on for local (lmstudio) build LLMs.
+    agent_guided: bool | None = None
+    # Guided answers' thinking budget for local models (BuildOptions.think_tokens).
+    agent_think_tokens: int | None = None
 
     def for_provider(self, name: str) -> dict[str, Any]:
         return self.per_provider.get(name, {})
@@ -46,10 +52,23 @@ class LLMSettingsStore:
         settings: dict[str, dict[str, Any]] | None,
         agent_plan: dict[str, Any] | None = None,
         agent_build: dict[str, Any] | None = None,
-        agent_small_context: bool | None = None,
+        agent_small_context: bool | str | None = None,
         agent_decision_hints: bool | None = None,
+        agent_guided: bool | str | None = None,
+        agent_think_tokens: int | str | None = None,
     ) -> None:
-        if agent_small_context is not None:
+        # None leaves it as is; "default" (or a negative number) clears it.
+        if agent_think_tokens is not None:
+            value = None if agent_think_tokens == "default" else int(agent_think_tokens)
+            self.agent_think_tokens = value if value is None or value >= 0 else None
+        if agent_guided == "auto":
+            self.agent_guided = None
+        elif agent_guided is not None:
+            self.agent_guided = agent_guided
+        # None leaves it as is; "auto" goes back to deciding per build.
+        if agent_small_context == "auto":
+            self.agent_small_context = None
+        elif agent_small_context is not None:
             self.agent_small_context = agent_small_context
         if agent_decision_hints is not None:
             self.agent_decision_hints = agent_decision_hints

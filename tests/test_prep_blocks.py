@@ -13,9 +13,11 @@ from modelmaker.blocks.feature_analysis import characteristic_stability, target_
 from modelmaker.blocks.library import (
     _derive_columns_meta,
     _one_hot_meta,
+    _parse_dates_meta,
     derive_columns,
     groupby_agg,
     one_hot_encode,
+    parse_dates,
     time_split,
     train_test_split,
 )
@@ -125,3 +127,41 @@ def test_target_trend_by_quarter():
     assert out["target_mean"].to_list() == [0.5, 0.0, 1.0]
     assert out["x_mean"].to_list() == [2.0, 5.0, None]
     assert out["s_null_share"].to_list() == [0.5, 0.0, 0.0]
+
+
+def test_parse_dates_detects_each_columns_format_and_leaves_the_rest():
+    df = pl.DataFrame({
+        "iso": ["2024-03-31", None, "2023-12-01"],
+        "eu": ["31/03/2024", None, "01/12/2023"],  # day-first wins where both would parse
+        "us": ["03/31/2024", None, "12/01/2023"],  # 31 can't be a month: month-first
+        "compact": ["20240331", None, "20231201"],
+        "stamp": ["2024-03-31 10:00:00", None, "2023-12-01 00:00:00"],
+        "text": ["a", None, "b"],
+        "ids": ["10000001", None, "10000002"],  # 8 digits, but no valid date
+    })
+    out = parse_dates(df)
+    for c in ("iso", "eu", "us", "compact"):
+        assert out[c].to_list() == [date(2024, 3, 31), None, date(2023, 12, 1)], c
+    assert out.schema["stamp"] == pl.Datetime
+    assert out.schema["text"] == pl.String and out.schema["ids"] == pl.String
+
+
+def test_parse_dates_with_named_formats_is_strict():
+    df = pl.DataFrame({"d": ["01/02/2024", "13/02/2024"]})
+    assert parse_dates(df, {"d": "%d/%m/%Y"})["d"].to_list() == [date(2024, 2, 1), date(2024, 2, 13)]
+    with pytest.raises(Exception):
+        parse_dates(df, {"d": "%m/%d/%Y"})  # 13 isn't a month
+
+
+def test_parse_dates_keeps_roles_and_compiles_standalone():
+    df = pl.DataFrame({"d": ["2024-01-31"], "y": [1]})
+    out = parse_dates(df)
+    meta = _parse_dates_meta({"df": {"d": ColumnMeta("String", ColumnRole.FEATURE), "y": ColumnMeta("Int64", ColumnRole.TARGET)}},
+                             {"out": out}, {})["out"]
+    assert meta["d"].dtype == "Date" and meta["d"].role == ColumnRole.FEATURE and meta["y"].role == ColumnRole.TARGET
+    # The compiler inlines the function's own source: it must need nothing else.
+    import inspect
+
+    ns = {"pl": pl}
+    exec(inspect.getsource(parse_dates), ns)
+    assert ns["parse_dates"](df)["d"].to_list() == [date(2024, 1, 31)]

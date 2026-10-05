@@ -69,7 +69,12 @@ def fit_binning(
         adjusted, so a higher-is-safer feature isn't reported as a negative
         Gini), Spearman correlation of the raw feature (numeric) and
         explained variance of the binned feature (continuous target), fill
-        rate, bin count, and whether the binned target rate is monotonic."""
+        rate, bin count, and whether the binned target rate is monotonic.
+
+    Best practice: fit it on the development (train) sample only and list
+    the candidate `features` explicitly -- never id, excluded or date
+    columns -- then apply_binning to every sample. IV below 0.02 means no
+    signal; 0.5 or more is suspicious (likely leakage)."""
     import math
 
     import numpy as np
@@ -379,7 +384,11 @@ def apply_binning(df: pl.DataFrame, binning: dict, output: str = "woe", features
       - "bin": `<feature>_bin`, the bin label only.
       - "both": the WoE (or target-mean) column plus the bin label.
     Nulls map to the feature's missing bin; a category unseen at fit time
-    maps to the "__other__" bin. Original columns are kept."""
+    maps to the "__other__" bin. Original columns are kept.
+
+    Best practice: apply the one fitted binning to each sample --
+    development and every holdout -- with output "woe", and give the model
+    the `<feature>_woe` columns."""
     import numpy as np
 
     if binning.get("kind") != "binning":
@@ -461,7 +470,12 @@ def scorecard_table(model: dict, binning: dict, base_score: float = 600.0, base_
     the odds -- with the intercept spread evenly over the features, so an
     applicant's score is just the sum of their bins' points.
     points = -(coef * WoE + intercept / n) * pdo/ln(2) + offset / n,
-    offset = base_score - pdo/ln(2) * ln(base_odds)."""
+    offset = base_score - pdo/ln(2) * ln(base_odds).
+
+    Best practice: wire the logistic_regression model fitted on WoE columns
+    and the fit_binning `binning` it came from; keep the default scaling
+    (600 points at 50:1 odds, 20 points to double the odds) unless the user
+    asked for another."""
     import math
 
     if model.get("kind") != "logistic_regression":

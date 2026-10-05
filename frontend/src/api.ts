@@ -10,6 +10,7 @@ import type {
   BuildStateOut,
   DraftOut,
   EnvVarStatus,
+  LocalModelStatus,
   GitStatusOut,
   GraphOut,
   InputSchemaOut,
@@ -34,6 +35,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   registry: () => request<RegistryEntry[]>('/registry'),
+  // The built-in local model (llm/local_model.py): status, one-click download.
+  localModel: () => request<LocalModelStatus>('/local-model/'),
+  localModelDownload: () => request<LocalModelStatus>('/local-model/download', { method: 'POST' }),
+  localModelCancel: () => request<LocalModelStatus>('/local-model/cancel', { method: 'POST' }),
   registryTags: () => request<BlockTag[]>('/registry/tags'),
   graph: () => request<GraphOut>('/graph'),
 
@@ -167,8 +172,10 @@ export const api = {
     settings?: Record<string, { model?: string | null; base_url?: string | null; api_key?: string | null }>
     agent_plan?: { provider?: string | null; model?: string | null }
     agent_build?: { provider?: string | null; model?: string | null }
-    agent_small_context?: boolean
+    agent_small_context?: boolean | 'auto'
     agent_decision_hints?: boolean
+    agent_guided?: boolean | 'auto'
+    agent_think_tokens?: number | 'default'
   }) => request<LLMSettingsOut>('/llm/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   // AI model builder -- see agent-builder-proposal.md. One build at a time;
@@ -184,6 +191,7 @@ export const api = {
     allow_custom_blocks?: boolean
     small_context?: boolean | null
     decision_hints?: boolean | null
+    guided?: boolean | null
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
   agentBuildLog: (buildId: string) => request<Record<string, unknown>>(`/agent/builds/${buildId}/log`),
   agentCurrent: (cursor = 0) => request<BuildStateOut>(`/agent/builds/current?cursor=${cursor}`),

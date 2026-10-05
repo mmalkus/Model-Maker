@@ -25,7 +25,11 @@ def iv_table(df: pl.DataFrame, target: str, features: list[str] | None = None, b
     categories otherwise), then sums each bin's (%good - %bad) * WoE.
     A quick screen only: for the per-bin table, monotonicity, univariate
     Gini/KS, a missing bin, and bins you can reuse on test data, use
-    fit_binning ("Univariate analysis & binning")."""
+    fit_binning ("Univariate analysis & binning").
+
+    Best practice: a quick screen; fit_binning already reports IV per
+    feature on the bins the model will use, so prefer it when you bin
+    anyway."""
 
     def _iv_band(iv: float) -> str:
         # Standard Information Value interpretation bands.
