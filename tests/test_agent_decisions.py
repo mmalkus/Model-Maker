@@ -34,6 +34,9 @@ def _run(scen, name, backend=None):
     return ws, decider, plan(ws, decider)
 
 
+MODEL_PATH = ["binning", "iv_screen", "woe", "correlation", "stability", "stepwise", "fit", "evaluate"]
+
+
 def _path(result):
     return [s["option"] for s in result.steps]
 
@@ -94,9 +97,11 @@ def _path(result):
     ],
 )
 def test_rule_policy_paths(scen, name, path):
+    """`path` is phases 1-2 (data prep, target & sampling), which vary with
+    the data; phases 3-5 (binning, selection, fit) follow the same way."""
     _, decider, result = _run(scen, name)
     assert result.model_type == "pd"
-    assert _path(result) == path
+    assert _path(result) == path + MODEL_PATH
     assert not any(s.get("error") for s in result.steps)
     assert all(r.agrees and not r.needs_user for r in decider.records)
 
@@ -199,10 +204,14 @@ class Scripted:
 def test_done_only_once_nothing_required_is_left(scen):
     # Picks DONE whenever it's offered, else the last option (out of order).
     _, decider, result = _run(scen, "snapshot", Scripted(menu=DONE))
-    assert _path(result) == ["profile", "screen", "missing", "dq_rules", DONE, "train_test", "trend", DONE]
+    path = _path(result)
+    assert path[:8] == ["profile", "screen", "missing", "dq_rules", DONE, "train_test", "trend", DONE]
     # Phase 2 ended with the optional immature-period check skipped, and the
     # out-of-time split was gone once train/test had run.
-    assert result.steps[-1]["skipped"] == ["drop_immature"]
+    assert result.steps[7]["skipped"] == ["drop_immature"]
+    # Out of the usual order but within the prerequisites: stability before
+    # the (required) correlation check, so no DONE was on offer to skip it.
+    assert path[8:] == ["binning", "iv_screen", "woe", "stability", "correlation", "stepwise", "fit", "evaluate"]
     for r in decider.records:
         if r.qid == "next" and DONE in r.question["criteria"]:
             assert all("(optional)" in v for k, v in r.question["criteria"].items() if k != DONE)
@@ -232,3 +241,36 @@ def test_fit_drops_low_priority_keys_then_refuses():
     assert "bulky" not in fitted and tokens <= 512
     with pytest.raises(ContextBudgetError):
         fit(state, q, 512, [])
+
+
+# ---- the model -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["snapshot", "messy"])
+def test_fitted_model_is_sound(scen, name):
+    ws, _, result = _run(scen, name)
+    stats = ws.artifacts["model"]["statistics"]
+    feats = ws.artifacts["woe_features"]
+    assert feats and set(stats) - {"intercept"} == set(feats)
+    for f in feats:  # WoE: every coefficient negative, and significant
+        assert stats[f]["estimate"] < 0 and stats[f]["p_value"] < 0.05
+    ev = result.steps[-1]["result"]
+    assert ev["gini_test"] > 0.5 and ev["verdict"] in ("good", "overfit")
+    # Validation samples got the same WoE transform as training.
+    assert all(f in ws.artifacts["test"].columns for f in feats)
+
+
+def test_unstable_features_are_dropped_before_stepwise(scen):
+    _, _, result = _run(scen, "snapshot")
+    step = next(s for s in result.steps if s["option"] == "stability")
+    assert "purpose_woe" in step["result"]["dropped"]  # PSI ~0.66 out of time
+    selected = next(s for s in result.steps if s["option"] == "stepwise")["result"]["selected"]
+    assert "purpose_woe" not in selected
+
+
+def test_refit_drops_wrong_signs():
+    from modelmaker.agent.decisions.modelling_phases import coef_rule
+
+    assert coef_rule({"coef": 0.4, "p_value": 0.001}) == "drop_wrong_sign"
+    assert coef_rule({"coef": -0.4, "p_value": 0.2}) == "drop_insignificant"
+    assert coef_rule({"coef": -0.4, "p_value": 0.001}) == "keep"

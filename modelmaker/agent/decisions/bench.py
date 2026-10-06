@@ -90,6 +90,17 @@ def scenarios() -> dict[str, tuple[pl.DataFrame, dict[str, str]]]:
     }
 
 
+def model_line(result) -> str:
+    """The fitted model in one line: features and Gini per sample."""
+    fit = next((s for s in result.steps if s["option"] == "fit" and "params" in s), None)
+    ev = next((s for s in result.steps if s["option"] == "evaluate" and "result" in s), None)
+    if not fit or not ev:
+        return "(no model)"
+    ginis = ", ".join(f"{k[5:]} {v:.2f}" for k, v in ev["result"].items() if k.startswith("gini_"))
+    feats = [f.removesuffix("_woe") for f in fit["params"]["features"]]
+    return f"{len(feats)} features [{', '.join(feats)}]; Gini {ginis}; verdict {ev['result']['verdict']}"
+
+
 def kind(name: str) -> str:
     """Decision family for the report: 'screen:age' -> 'screen'."""
     return name.split(":", 1)[0]
@@ -137,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"  differs  {r.name:34s} {r.qid:13s} got={r.answer.value!s:22s} rules={r.rule_answer!s:22s} conf={r.answer.confidence:.2f}"
                 )
+        print(f"model: {model_line(result)}")
+        if rule_result is not result:
+            print(f"rules: {model_line(rule_result)}")
         for s in result.steps:
             if s.get("error"):
                 print(f"  ERROR in {s['option']}: {s['error']}")

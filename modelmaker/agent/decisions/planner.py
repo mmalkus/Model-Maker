@@ -56,7 +56,7 @@ def plan(ws: Workspace, decider: Decider) -> PlanResult:
     model_type = decider.ask("model_type", facts, {"type": MODEL_TYPE_Q}, {"type": model_type_rule})["type"]
     ws.model_type = model_type
     result = PlanResult(model_type)
-    phases = PHASES.get(model_type)
+    phases = PHASES[model_type]() if model_type in PHASES else None
     if phases is None:
         result.stopped = f"phases for {model_type} aren't built yet"
         return result

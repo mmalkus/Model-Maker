@@ -48,11 +48,11 @@ class Phase:
     extra_facts: Callable[[Workspace], dict[str, Any]] = lambda ws: {}
 
 
-def run_block(category: str, df: pl.DataFrame, **params: Any) -> Any:
+def run_block(category: str, *inputs: Any, **params: Any) -> Any:
     from ..catalogue import ensure_blocks_registered
 
     ensure_blocks_registered()
-    return BLOCK_REGISTRY[category].fn(df, **params)
+    return BLOCK_REGISTRY[category].fn(*inputs, **params)
 
 
 def _done(ws: Workspace, key: str) -> bool:
@@ -700,4 +700,11 @@ PHASE2 = Phase(
     phase2_facts,
 )
 
-PHASES = {"pd": [PHASE1, PHASE2]}
+
+def _pd_phases() -> list[Phase]:
+    from .modelling_phases import PHASE3, PHASE4, PHASE5
+
+    return [PHASE1, PHASE2, PHASE3, PHASE4, PHASE5]
+
+
+PHASES = {"pd": _pd_phases}
