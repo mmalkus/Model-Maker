@@ -105,6 +105,8 @@ def column_facts(ws: Workspace, col: str) -> dict[str, Any]:
     }
     if non_null.len():
         facts["top_value_share"] = int(non_null.value_counts(sort=True)["count"][0]) / non_null.len()
+    if _binary(s):
+        facts["binary"] = True
     if _looks_like_date(s):
         facts["date_like"] = True
     target = ws.col("target")

@@ -30,8 +30,9 @@ class PlanResult:
 
 
 def menu_question(phase: Phase, offered: list) -> dict[str, Any]:
-    criteria = {o.key: o.describe for o in offered}
-    criteria[DONE] = f"move to the next phase: {phase.done_describe}"
+    criteria = {o.key: o.describe + ("" if o.required else " (optional)") for o in offered}
+    if not any(o.required for o in offered):
+        criteria[DONE] = f"move to the next phase: {phase.done_describe}"
     return choice(
         f"Credit-risk PD build, phase '{phase.title}'. Which block comes next? Follow the usual credit-risk order "
         "and don't skip a check the facts call for.",
@@ -65,6 +66,7 @@ def plan(ws: Workspace, decider: Decider) -> PlanResult:
             offered = [o for o in phase.options if o.offered(ws)]
             if not offered:
                 break  # nothing left to do here: DONE without asking
+            # DONE is on the menu only once nothing required is left (menu_question).
             q = menu_question(phase, offered)
             first = offered[0].key
             pick = decider.ask(
@@ -75,14 +77,13 @@ def plan(ws: Workspace, decider: Decider) -> PlanResult:
                 drop_order=["done_in_phase"],
             )["next"]
             if pick == DONE:
-                if offered:
-                    result.steps.append(
-                        {
-                            "phase": phase.key,
-                            "option": DONE,
-                            "skipped": [o.key for o in offered],
-                        }
-                    )
+                result.steps.append(
+                    {
+                        "phase": phase.key,
+                        "option": DONE,
+                        "skipped": [o.key for o in offered],
+                    }
+                )
                 break
             option = next(o for o in offered if o.key == pick)
             try:

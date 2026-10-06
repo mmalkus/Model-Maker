@@ -170,7 +170,8 @@ def test_screen_rule_order():
 
 class Scripted:
     """Answers every question with its first label, except the menu, where
-    it says DONE; `conf` sets how sure it is."""
+    it says DONE when that's on offer and otherwise picks the last option
+    (out of the usual order); `conf` sets how sure it is."""
 
     name = "scripted"
 
@@ -184,8 +185,7 @@ class Scripted:
             for qid, q in questions.items():
                 if qid == "next":
                     answers[qid] = Answer(
-                        self.menu if self.menu in q["criteria"] else next(iter(q["criteria"])),
-                        self.conf,
+                        self.menu if self.menu in q["criteria"] else list(q["criteria"])[-1], self.conf
                     )
                 elif q["type"] == "noul":
                     answers[qid] = Answer(True, self.conf)
@@ -196,16 +196,20 @@ class Scripted:
         return out
 
 
-def test_done_ends_a_phase_and_records_what_it_skipped(scen):
+def test_done_only_once_nothing_required_is_left(scen):
+    # Picks DONE whenever it's offered, else the last option (out of order).
     _, decider, result = _run(scen, "snapshot", Scripted(menu=DONE))
-    assert [s["option"] for s in result.steps] == [DONE, DONE]
-    assert result.steps[0]["skipped"] == ["profile"]
-    menu = [r for r in decider.records if r.qid == "next"]
-    assert not any(r.agrees for r in menu)
+    assert _path(result) == ["profile", "screen", "missing", "dq_rules", DONE, "train_test", "trend", DONE]
+    # Phase 2 ended with the optional immature-period check skipped, and the
+    # out-of-time split was gone once train/test had run.
+    assert result.steps[-1]["skipped"] == ["drop_immature"]
+    for r in decider.records:
+        if r.qid == "next" and DONE in r.question["criteria"]:
+            assert all("(optional)" in v for k, v in r.question["criteria"].items() if k != DONE)
 
 
 def test_low_confidence_goes_to_the_person(scen):
-    _, decider, _ = _run(scen, "no_dates", Scripted(conf=0.5, menu="__first__"))
+    _, decider, _ = _run(scen, "no_dates", Scripted(conf=0.5, menu="__none__"))
     assert decider.records and all(r.needs_user for r in decider.records)
 
 

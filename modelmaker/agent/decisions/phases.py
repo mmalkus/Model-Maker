@@ -34,6 +34,9 @@ class Option:
     describe: str  # the menu criterion for this option, one line
     offered: Callable[[Workspace], bool]
     run: Callable[[Workspace, Decider], dict[str, Any]]  # -> {"block", "params", ...}
+    # Required options must run before the phase may end: DONE isn't on
+    # the menu while one is on offer. Optional ones are judgement calls.
+    required: bool = True
 
 
 @dataclass
@@ -152,13 +155,14 @@ def run_dq_rules(ws: Workspace, d: Decider) -> dict[str, Any]:
             {
                 k: v
                 for k, v in column_facts(ws, c).items()
-                if k in ("column", "dtype", "min", "max", "negative_share", "distinct_share")
+                if k in ("column", "dtype", "min", "max", "negative_share", "distinct_share", "binary")
             },
             {"non_negative": NON_NEGATIVE_Q, "unit_interval": UNIT_Q},
             # A few negatives (under 5%) are bad values, not a signed column.
             {
                 "non_negative": lambda f: f.get("negative_share", 0) < 0.05,
-                "unit_interval": lambda f: f.get("min", -1) >= 0 and f.get("max", 2) <= 1,
+                # A 0/1 flag is in [0,1] but isn't a share.
+                "unit_interval": lambda f: f.get("min", -1) >= 0 and f.get("max", 2) <= 1 and not f.get("binary"),
             },
         )
         for c in numeric
@@ -337,6 +341,7 @@ PHASE1 = Phase(
             "apply_exclusions: drop invalid rows (missing target, out-of-range values) with a waterfall",
             lambda ws: _done(ws, "screen") and not _done(ws, "exclusions") and bool(exclusion_templates(ws)),
             run_exclusions,
+            required=False,
         ),
         Option(
             "missing",
@@ -668,17 +673,22 @@ PHASE2 = Phase(
                 and immature_tail(ws) is not None
             ),
             run_drop_immature,
+            required=False,
         ),
         Option(
             "time_split",
-            "time_split: hold back the latest period as out-of-time validation (needs 50+ defaults in it)",
+            "time_split: hold back the latest period as out-of-time validation, before any train/test split",
             lambda ws: (
                 _has_target(ws)
                 and bool(ws.col("date"))
                 and not _done(ws, "time_split")
+                # Out-of-time comes off first: after a train/test split it
+                # would only cut the training sample.
+                and not _done(ws, "train_test")
                 and any(w["events"] >= h.MIN_EVENTS and w["share_of_rows"] <= 0.4 for w in oot_windows(ws).values())
             ),
             run_time_split,
+            required=False,
         ),
         Option(
             "train_test",
