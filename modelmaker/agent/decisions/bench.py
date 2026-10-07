@@ -93,12 +93,18 @@ def scenarios() -> dict[str, tuple[pl.DataFrame, dict[str, str]]]:
 def model_line(result) -> str:
     """The fitted model in one line: features and Gini per sample."""
     fit = next((s for s in result.steps if s["option"] == "fit" and "params" in s), None)
-    ev = next((s for s in result.steps if s["option"] == "evaluate" and "result" in s), None)
-    if not fit or not ev:
+    ev = next((s for s in result.steps if s["option"] == "discrimination" and "result" in s), None)
+    sign = next((s for s in result.steps if s["option"] == "sign_off" and "result" in s), None)
+    if not fit:
         return "(no model)"
-    ginis = ", ".join(f"{k[5:]} {v:.2f}" for k, v in ev["result"].items() if k.startswith("gini_"))
     feats = [f.removesuffix("_woe") for f in fit["params"]["features"]]
-    return f"{len(feats)} features [{', '.join(feats)}]; Gini {ginis}; verdict {ev['result']['verdict']}"
+    line = f"{len(feats)} features [{', '.join(feats)}]"
+    if ev:
+        line += "; Gini " + ", ".join(f"{k[5:]} {v:.2f}" for k, v in ev["result"].items() if k.startswith("gini_"))
+    if sign:
+        verdicts = {k: v for k, v in sign["result"].items() if k != "verdict"}
+        line += f"; {verdicts}; SIGN-OFF {sign['result']['verdict']}"
+    return line
 
 
 def kind(name: str) -> str:

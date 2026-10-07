@@ -703,8 +703,9 @@ PHASE2 = Phase(
 
 def _pd_phases() -> list[Phase]:
     from .modelling_phases import PHASE3, PHASE4, PHASE5
+    from .validation_phases import PHASE6, PHASE7
 
-    return [PHASE1, PHASE2, PHASE3, PHASE4, PHASE5]
+    return [PHASE1, PHASE2, PHASE3, PHASE4, PHASE5, PHASE6, PHASE7]
 
 
 PHASES = {"pd": _pd_phases}

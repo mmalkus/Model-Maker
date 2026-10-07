@@ -34,7 +34,13 @@ def _run(scen, name, backend=None):
     return ws, decider, plan(ws, decider)
 
 
-MODEL_PATH = ["binning", "iv_screen", "woe", "correlation", "stability", "stepwise", "fit", "evaluate"]
+MODEL_PATH = ["binning", "iv_screen", "woe", "correlation", "stability", "stepwise", "fit"]
+VALIDATION = ["calibrate", "master_scale", "discrimination", "calibration_test", "backtest"]
+
+
+def _tail(oot):
+    """Phases 6-7: score stability only when there's an out-of-time sample."""
+    return VALIDATION + (["score_stability"] if oot else []) + ["sign_off"]
 
 
 def _path(result):
@@ -101,7 +107,7 @@ def test_rule_policy_paths(scen, name, path):
     the data; phases 3-5 (binning, selection, fit) follow the same way."""
     _, decider, result = _run(scen, name)
     assert result.model_type == "pd"
-    assert _path(result) == path + MODEL_PATH
+    assert _path(result) == path + MODEL_PATH + _tail("time_split" in path)
     assert not any(s.get("error") for s in result.steps)
     assert all(r.agrees and not r.needs_user for r in decider.records)
 
@@ -211,7 +217,11 @@ def test_done_only_once_nothing_required_is_left(scen):
     assert result.steps[7]["skipped"] == ["drop_immature"]
     # Out of the usual order but within the prerequisites: stability before
     # the (required) correlation check, so no DONE was on offer to skip it.
-    assert path[8:] == ["binning", "iv_screen", "woe", "stability", "correlation", "stepwise", "fit", "evaluate"]
+    # Sign-off stays gated until the three checks have run.
+    assert path[8:] == [
+        "binning", "iv_screen", "woe", "stability", "correlation", "stepwise", "fit",
+        "calibrate", "master_scale", "backtest", "calibration_test", "discrimination", "sign_off",
+    ]  # fmt: skip
     for r in decider.records:
         if r.qid == "next" and DONE in r.question["criteria"]:
             assert all("(optional)" in v for k, v in r.question["criteria"].items() if k != DONE)
@@ -254,7 +264,7 @@ def test_fitted_model_is_sound(scen, name):
     assert feats and set(stats) - {"intercept"} == set(feats)
     for f in feats:  # WoE: every coefficient negative, and significant
         assert stats[f]["estimate"] < 0 and stats[f]["p_value"] < 0.05
-    ev = result.steps[-1]["result"]
+    ev = next(s for s in result.steps if s["option"] == "discrimination")["result"]
     assert ev["gini_test"] > 0.5 and ev["verdict"] in ("good", "overfit")
     # Validation samples got the same WoE transform as training.
     assert all(f in ws.artifacts["test"].columns for f in feats)
@@ -274,3 +284,56 @@ def test_refit_drops_wrong_signs():
     assert coef_rule({"coef": 0.4, "p_value": 0.001}) == "drop_wrong_sign"
     assert coef_rule({"coef": -0.4, "p_value": 0.2}) == "drop_insignificant"
     assert coef_rule({"coef": -0.4, "p_value": 0.001}) == "keep"
+
+
+# ---- on the canvas ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def anchored(tmp_path):
+    """The demo data block, run, with id / date / target tagged."""
+    from modelmaker.session import ProjectSession
+
+    session = ProjectSession(recovery_path=tmp_path / "recovery.json")
+    with session.edit():
+        block = session.add_block("demo_credit_data", name="Demo data")
+    assert session.runner.run_block(block.id) == "green"
+    with session.edit():
+        for col, role in {"application_id": "id", "application_date": "date", "default_flag": "target"}.items():
+            session.set_column_role(block.id, col, role)
+    assert session.runner.run_block(block.id) == "green"
+    return session, block.id
+
+
+def test_decision_build_lays_out_a_runnable_graph(anchored):
+    from modelmaker.agent.decisions.run import decision_build
+
+    session, anchor = anchored
+    before = len(session.graph.blocks)
+    out = decision_build(session, anchor, "rules")
+    assert out["failed"] == []
+    assert out["sign_off"] in ("accept", "accept_with_findings")
+    assert out["steps"][-1] == "sign_off"
+    new = [b for b in session.graph.blocks.values() if b.id != anchor]
+    assert len(new) == out["blocks"] == len(session.graph.blocks) - before
+    assert all(b.provenance and b.provenance["build_id"] == out["build_id"] for b in new)
+    assert {b.category for b in new} >= {
+        "fit_binning", "apply_binning", "logistic_regression", "calibrate_model", "fit_master_scale", "grade_backtest",
+    }  # fmt: skip
+    assert all(
+        session.runner.state[b.id].last_error is None and session.runner.state[b.id].last_successful_key for b in new
+    )
+    assert len({b.lane for b in new}) == 7  # a lane per phase
+    report = session.graph.artifacts[f"art_build_report_{out['build_id']}"]
+    assert "Sign-off" in report.document
+
+
+def test_one_undo_removes_the_whole_decision_build(anchored):
+    from modelmaker.agent.decisions.run import decision_build
+
+    session, anchor = anchored
+    blocks, lanes = set(session.graph.blocks), set(session.graph.lanes)
+    decision_build(session, anchor, "rules", run=False)
+    assert session.undo()
+    assert set(session.graph.blocks) == blocks and set(session.graph.lanes) == lanes
+    assert not session.graph.artifacts

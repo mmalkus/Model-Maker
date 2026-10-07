@@ -432,19 +432,13 @@ def run_evaluate(ws: Workspace, d: Decider) -> dict[str, Any]:
 PHASE5 = Phase(
     "fit",
     "Model fit",
-    "the logistic model is fitted with every coefficient sound, and its discrimination is judged on each sample",
+    "the logistic model is fitted with every coefficient sound",
     [
         Option(
             "fit",
             "logistic_regression: fit, then drop wrong-sign / insignificant coefficients and refit",
             lambda ws: _done(ws, "stepwise") and not _done(ws, "fit"),
             run_fit,
-        ),
-        Option(
-            "evaluate",
-            "auc_gini: Gini on train, test and out-of-time (needs the fit)",
-            lambda ws: _done(ws, "fit") and not _done(ws, "evaluate"),
-            run_evaluate,
         ),
     ],
     lambda ws: {"model_features": len(_woe(ws)), "fitted": _done(ws, "fit")},
