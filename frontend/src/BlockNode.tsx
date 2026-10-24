@@ -205,7 +205,9 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           <span
             title={
               block.definition_info.update_available
-                ? `Library block (${block.definition_info.file}) -- v${block.definition_info.latest_version} is available`
+                ? block.definition_info.library_older
+                  ? `Library block (${block.definition_info.file}) -- the library has an older v${block.definition_info.latest_version}`
+                  : `Library block (${block.definition_info.file}) -- v${block.definition_info.latest_version} is available`
                 : `Library block from ${block.definition_info.file ?? 'an embedded copy'}, v${block.definition_info.version}`
             }
             style={{
@@ -219,7 +221,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
               flexShrink: 0,
             }}
           >
-            LIB{block.definition_info.update_available ? ' ↑' : ''}
+            LIB{block.definition_info.update_available ? (block.definition_info.library_older ? ' ↓' : ' ↑') : ''}
           </span>
         )}
         {block.definition_info?.source === 'builtin' && block.definition_info.changed_since_saved && (

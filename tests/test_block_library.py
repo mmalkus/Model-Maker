@@ -94,7 +94,77 @@ def test_parsing_and_listing_never_run_the_file(block_library_dir):
     assert [d.id for d in parsed.definitions] == ["double_it", "halve_it"]  # no exception: nothing ran
     store.save_file("x.py", source)
     preview = store.import_preview([("x.py", source)])
-    assert preview[0]["blocks"][0]["errors"] == []  # literal checks only
+    assert preview[0]["blocks"][0]["errors"] == []
+
+
+def test_listing_checking_and_importing_never_execute_block_code(block_library_dir, tmp_path):
+    # Code a block reaches at definition time -- a helper constant used as
+    # a default, a decorator -- must not run until the block itself runs.
+    marker = tmp_path / "ran"
+    source = GOOD.replace(
+        "_FACTOR = 2",
+        f"_FACTOR = open({str(marker)!r}, 'a').write('x') and 2\n\n\ndef _deco(f):\n    open({str(marker)!r}, 'a').write('d')\n    return f",
+    ).replace("def double_it(df, col: str = \"a\"):", "@_deco\ndef double_it(df, col: str = \"a\", n: int = _FACTOR):")
+    store.import_commit([("x.py", source)], {})
+    files = store.list_files(force=True)
+    assert files[0].parsed.errors == {"double_it": [], "halve_it": []}
+    bl.validate(bl.parse_source(source, "y.py"))
+    store.import_preview([("y.py", source)])
+    client = TestClient(api_module.app)
+    assert client.get("/api/library").status_code == 200
+    assert client.post("/api/library/check", json={"source": source, "name": "x.py"}).json()["ok"] is True
+    assert not marker.exists()
+
+
+def test_signature_stub_keeps_literal_defaults_only():
+    code = (
+        "_N = 5\n"
+        "_COLS = ['a', 'b']\n\n\n"
+        "@some_decorator(1)\n"
+        "def blk(df, k: int = 3, n: int = _N, cols: list = _COLS, f=pl.col('x'), *, flag: bool = -1 < 0, req: str):\n"
+        "    raise SystemExit\n"
+    )
+    import inspect
+
+    params = inspect.signature(bl.signature_stub("blk", code)).parameters
+    assert {k: p.default for k, p in params.items() if p.default is not inspect.Parameter.empty} == {
+        "k": 3, "n": 5, "cols": ["a", "b"], "f": None, "flag": None,
+    }
+    assert params["req"].default is inspect.Parameter.empty
+    assert params["k"].annotation == "int"
+    with pytest.raises(ValueError, match="doesn't define"):
+        bl.signature_stub("other", code)
+
+
+def test_compiled_functions_are_cached_with_a_bound():
+    assert bl.compile_fn.cache_info().maxsize is not None
+    assert bl.signature_stub.cache_info().maxsize is not None
+
+
+def test_requires_must_be_a_whole_pip_requirement():
+    ok = ["scikit-learn", "scikit-learn>=1.3", "numpy>=1.20,<3", "xgboost[cuda]==2.0.3", "pyarrow; python_version>='3.9'"]
+    for req in ok:
+        assert not [e for e in bl.validate_definition(_definition({"requires": [req]})) if "requires" in e], req
+    for req in ["numpy && rm -rf /", "numpy>=", "-e git+https://x"]:
+        assert any("requires" in e for e in bl.validate_definition(_definition({"requires": [req]}))), req
+
+
+def _definition(extra_meta):
+    from modelmaker.blocks.base import BlockDefinition
+
+    code = "def blk(df):\n    return df\n"
+    meta = {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}], **extra_meta}
+    return BlockDefinition(id="blk", meta=meta, code=code, source="library", origin="t.py", sha=bl._sha(meta, code))
+
+
+def test_an_embedded_definition_is_keyed_on_its_actual_code():
+    from types import SimpleNamespace
+
+    meta = {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}]}
+    one = {"id": "blk", "meta": meta, "code": "def blk(df):\n    return 1\n", "sha": "samesha"}
+    two = {**one, "code": "def blk(df):\n    return 2\n"}  # hand-edited, sha left stale
+    assert bl.definition_for(SimpleNamespace(definition=one)).fn(None) == 1
+    assert bl.definition_for(SimpleNamespace(definition=two)).fn(None) == 2
 
 
 @pytest.mark.parametrize(
@@ -236,6 +306,8 @@ def test_change_detection_comes_from_path_fields(tmp_path):
 def test_probe_query_is_never_passed_to_the_function(tmp_path, monkeypatch):
     import sqlite3
 
+    pytest.importorskip("connectorx", reason="read_sql needs the optional connectorx package")
+
     db = tmp_path / "x.db"
     con = sqlite3.connect(db)
     con.execute("create table t (a int)")
@@ -282,6 +354,55 @@ def test_files_changing_on_disk_are_picked_up(block_library_dir):
     (block_library_dir / "a.py").write_text(GOOD.replace('"version": 2', '"version": 3'))
     store.reload()
     assert store.find("a.py", "double_it").version == 3 and store.generation > gen
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        'BLOCKS = {\n    "a": {"display_name": "A"}  # note\n}',
+        'BLOCKS = {\n    "a": {"display_name": "A"},  # note\n}',
+        'BLOCKS = {"a": {"display_name": "A"}}',
+        'BLOCKS = {\n    "a": {"display_name": "A"}\n    # trailing, comment\n}',
+        "BLOCKS = {}",
+    ],
+)
+def test_upsert_adds_an_entry_whatever_the_last_one_looks_like(blocks):
+    import ast
+
+    source = f'"""d"""\n\nimport polars as pl\n\n{blocks}\n\n\ndef a(df):\n    return df\n'
+    if blocks == "BLOCKS = {}":
+        source = source.replace("\n\n\ndef a(df):\n    return df\n", "\n")
+    out = store.upsert_block(source, "b", {"display_name": "B"}, "def b(df):\n    return df\n")
+    literal = ast.literal_eval(next(n for n in ast.parse(out).body if isinstance(n, ast.Assign)).value)
+    assert list(literal)[-1] == "b"
+    if "# note" in blocks:
+        assert "# note\n" in out
+
+
+def test_remove_block_needs_a_blocks_dict():
+    with pytest.raises(store.LibraryError, match="no BLOCKS"):
+        store.remove_block("def a(df):\n    return df\n", "a")
+
+
+def test_renaming_matches_whole_names_only():
+    code = "def bin(df):\n    return woe_bin(df) + bin(df) + x.bin(df)\n\n\ndef _example_bin():\n    bin(None)\n"
+    assert store._rename_calls(code, "bin", "bin_2") == (
+        "def bin_2(df):\n    return woe_bin(df) + bin_2(df) + x.bin(df)\n\n\ndef _example_bin_2():\n    bin_2(None)\n"
+    )
+
+
+def test_keeping_a_draft_restores_it_when_the_destination_fails(block_library_dir):
+    store.add_block("drafts/b1.py", GOOD_ENTRY, "triple_it", TRIPLE_CODE)
+    before = store.get_file("drafts/b1.py").source
+    (block_library_dir / "Bad.py").write_text("this is not python (")
+    store.reload()
+    with pytest.raises(SyntaxError):
+        store.move_block("drafts/b1.py", "triple_it", "Bad.py")
+    assert store.get_file("drafts/b1.py").source == before
+
+
+GOOD_ENTRY = {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}]}
+TRIPLE_CODE = "def triple_it(df):\n    return df\n"
 
 
 def test_upsert_rewrites_only_that_block_and_keeps_comments(block_library_dir):
@@ -352,6 +473,22 @@ def test_import_refuses_zip_paths(name):
 def test_import_limits():
     with pytest.raises(store.LibraryError, match="over 1 MB"):
         store.read_upload("big.py", b"#" * (store.MAX_FILE_BYTES + 1))
+    # Each entry under the per-file limit, but far too much once unpacked.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in range(store.MAX_UNPACKED_BYTES // store.MAX_FILE_BYTES + 1):
+            zf.writestr(f"f{i}.py", "#" * (store.MAX_FILE_BYTES - 1))
+    assert len(buf.getvalue()) < store.MAX_UPLOAD_BYTES
+    with pytest.raises(store.LibraryError, match="uncompressed"):
+        store.read_upload("x.zip", buf.getvalue())
+    with pytest.raises(store.LibraryError, match="entries"):
+        store.read_upload("x.zip", _zip({f"f{i}.py": "" for i in range(store.MAX_ZIP_ENTRIES + 1)}))
+
+
+def test_import_skips_blocks_with_errors_unless_asked(block_library_dir):
+    broken = GOOD.replace('"halve_it": {', '"halve_it": {"bogus_key": 1, ')
+    assert store.import_commit([("pd.py", broken)], {}) == ["double_it"]
+    assert store.import_commit([("pd2.py", broken.replace("double_it", "quad_it"))], {"pd2.py:halve_it": "rename"}) == ["quad_it", "halve_it_2"]
     with pytest.raises(store.LibraryError, match=".py file or a .zip"):
         store.read_upload("x.txt", b"")
 
@@ -461,7 +598,8 @@ def test_library_api_round_trip(client, block_library_dir):
 
     block = client.post("/api/blocks", json={"library": {"file": "pd.py", "id": "double_it"}}).json()
     assert block["definition_info"] == {"source": "library", "file": "pd.py", "version": 2, "sha": double["sha"],
-                                        "in_library": True, "update_available": False, "latest_version": 2}
+                                        "in_library": True, "update_available": False, "library_older": False,
+                                        "latest_version": 2}
     assert client.get("/api/library").json()["usage"]["double_it"] == [block["id"]]
 
     exported = client.get("/api/library/export", params={"file": "pd.py", "blocks": "halve_it"})
@@ -479,7 +617,10 @@ def test_library_api_round_trip(client, block_library_dir):
     assert updated["block"]["definition_info"]["version"] == 3
 
     assert client.delete("/api/library/files/pd.py/blocks/halve_it").json()["blocks"][0]["id"] == "double_it"
-    assert client.delete("/api/library/files/halve_it.py").status_code == 200
+    assert client.delete("/api/library/files/halve_it.py").status_code == 422  # expected_sha is required
+    sha = client.get("/api/library/files/halve_it.py").json()["sha"]
+    assert client.delete("/api/library/files/halve_it.py", params={"expected_sha": "stale"}).status_code == 409
+    assert client.delete("/api/library/files/halve_it.py", params={"expected_sha": sha}).status_code == 200
 
 
 def test_try_a_block_on_a_canvas_blocks_output(client, tmp_path):

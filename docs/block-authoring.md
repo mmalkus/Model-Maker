@@ -89,6 +89,13 @@ The rules, all checked by the validator:
    returns one value per output port, as a tuple when there are several.
 6. **No key takes a function.** If a block seems to need one, that's a
    missing piece of the app, not of the block.
+7. **Defaults are literals.** Forms, validation and the catalogue read
+   the function's signature from the source without running it, so they
+   see a default only when it's a literal (`k: int = 3`) or a top-level
+   literal constant (`n: int = _DEFAULT_N`). Any other default
+   (`f=pl.col("x")`) still works when the block runs, but shows as empty
+   in the params form. Code in the file runs only when a block runs or
+   you press **Try it**.
 
 ## Keys
 

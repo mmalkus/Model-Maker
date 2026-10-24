@@ -234,6 +234,8 @@ export type DefinitionInfo =
       sha: string
       in_library: boolean
       update_available: boolean
+      // The library's version is older than the embedded one (rolled back).
+      library_older?: boolean
       latest_version?: number
     }
 

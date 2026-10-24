@@ -328,7 +328,7 @@ def compile_graph(
     for bid in order:
         block = graph.blocks[bid]
         definition = block.resolve()
-        fn = definition.fn
+        fn = definition.signature_fn
         wants_output_dir[bid] = accepts_param(fn, "output_dir")
         wants_block_id[bid] = accepts_param(fn, "block_id")
         wants_role_params[bid] = {

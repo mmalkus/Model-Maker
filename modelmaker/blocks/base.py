@@ -174,13 +174,26 @@ class BlockDefinition:
             self._fn = compile_fn(self.id, self.code)
         return self._fn
 
+    @property
+    def signature_fn(self) -> BlockFn:
+        """A function with the block's signature, for everything that only
+        inspects parameters (forms, validation, catalogue, planning). For a
+        library block it's a stub built from the source (see
+        block_library.signature_stub), so listing, checking or placing a
+        block never executes its code -- only running it does."""
+        if self.source == "builtin" or self._fn is not None:
+            return self.fn
+        from ..block_library import signature_stub
+
+        return signature_stub(self.id, self.code)
+
     def param_defaults(self) -> dict[str, Any]:
         """Every parameter's signature default (ports and required params
         left out) -- what the declarative metadata rules see for a param the
         user hasn't set."""
         return {
             name: p.default
-            for name, p in inspect.signature(self.fn).parameters.items()
+            for name, p in inspect.signature(self.signature_fn).parameters.items()
             if p.default is not inspect.Parameter.empty
         }
 

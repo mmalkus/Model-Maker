@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import __future__
 import ast
+import functools
 import hashlib
 import importlib
 import inspect
@@ -64,6 +65,14 @@ ROLE_RULE_KEYS = {"column", "column_param", "column_suffix", "fallback", "role",
 # Params the engine fills in itself (see runner.run_block) -- never part of a
 # params form, and allowed in a signature without a form field.
 INJECTED_PARAMS = frozenset({"output_dir", "block_id", "_iteration_index"})
+
+# A pip requirement as `requires` accepts it: a name, optional extras,
+# optional version specifiers and an optional environment marker.
+_REQUIREMENT = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._\-]*(\[[A-Za-z0-9._,\- ]*\])?"
+    r"( *(==|!=|<=|>=|~=|===|<|>) *[A-Za-z0-9.*+!\-]+( *, *(==|!=|<=|>=|~=|===|<|>) *[A-Za-z0-9.*+!\-]+)*)?"
+    r"( *;.+)?$"
+)
 
 
 @dataclass
@@ -187,24 +196,66 @@ def parse_source(source: str, origin: str, kind: str = "library") -> ParsedFile:
     return parsed
 
 
-_COMPILED: dict[tuple[str, str], Any] = {}
-
-
+@functools.lru_cache(maxsize=256)
 def compile_fn(block_id: str, code: str):
-    """Define (never call) a definition's function from its code. Cached by
-    (id, code) so a status poll never re-executes anything."""
-    key = (block_id, code)
-    if key not in _COMPILED:
-        import polars as pl
+    """Define (never call) a definition's function from its code -- this
+    executes the code's top level, so it's only for running a block (see
+    signature_stub for everything else). Cached by (id, code), bounded so a
+    long session of edits doesn't keep every version alive."""
+    import polars as pl
 
-        ns: dict[str, Any] = {"pl": pl, "__name__": f"modelmaker_block_{block_id}"}
-        flags = __future__.annotations.compiler_flag
-        exec(compile(code, f"<block {block_id}>", "exec", flags=flags, dont_inherit=True), ns)  # trusted block code
-        fn = ns.get(block_id)
-        if not callable(fn):
-            raise ValueError(f"block code doesn't define {block_id}()")
-        _COMPILED[key] = fn
-    return _COMPILED[key]
+    ns: dict[str, Any] = {"pl": pl, "__name__": f"modelmaker_block_{block_id}"}
+    flags = __future__.annotations.compiler_flag
+    exec(compile(code, f"<block {block_id}>", "exec", flags=flags, dont_inherit=True), ns)  # trusted block code
+    fn = ns.get(block_id)
+    if not callable(fn):
+        raise ValueError(f"block code doesn't define {block_id}()")
+    return fn
+
+
+def _literal_default(node: ast.expr, consts: dict[str, ast.expr]) -> ast.expr:
+    """A default as the stub keeps it: the literal itself, a top-level
+    constant it names (`n: int = _DEFAULT_N`), else None."""
+    if isinstance(node, ast.Name) and node.id in consts:
+        node = consts[node.id]
+    try:
+        ast.literal_eval(node)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return ast.Constant(None)
+    return node
+
+
+@functools.lru_cache(maxsize=256)
+def signature_stub(block_id: str, code: str):
+    """A function with the block's signature and none of its behaviour:
+    no body, no decorators, annotations kept as strings, and only literal
+    defaults (a top-level literal constant it names is inlined; any other
+    expression becomes None). Defining it runs nothing from the file, so
+    forms, validation and the catalogue can inspect a library block that
+    hasn't been trusted to run yet."""
+    tree = ast.parse(code)
+    consts = {
+        node.targets[0].id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+    }
+    fn_node = next(
+        (n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == block_id), None
+    )
+    if fn_node is None:
+        raise ValueError(f"block code doesn't define {block_id}()")
+    args = fn_node.args
+    args.defaults = [_literal_default(d, consts) for d in args.defaults]
+    args.kw_defaults = [None if d is None else _literal_default(d, consts) for d in args.kw_defaults]
+    fn_node.decorator_list = []
+    fn_node.body = [ast.Pass()]
+    if hasattr(fn_node, "type_params"):
+        fn_node.type_params = []
+    module = ast.fix_missing_locations(ast.Module(body=[fn_node], type_ignores=[]))
+    ns: dict[str, Any] = {"__name__": f"modelmaker_signature_{block_id}"}
+    flags = __future__.annotations.compiler_flag
+    exec(compile(module, f"<signature {block_id}>", "exec", flags=flags, dont_inherit=True), ns)  # a bare def, literals only
+    return ns[block_id]
 
 
 def _known_tags() -> set[str]:
@@ -219,10 +270,10 @@ def _known_hint_rules() -> set[str]:
     return set(RULES)
 
 
-def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]:
-    """Every problem with one definition, as short messages. `define`
-    executes the function *definition* (not a call) to check the form
-    against its real signature; off, only the literal is checked."""
+def validate_definition(d: BlockDefinition) -> list[str]:
+    """Every problem with one definition, as short messages. The form is
+    checked against the function's signature, read from a stub (see
+    signature_stub) -- validating never executes the block's code."""
     from .packet import ColumnRole
 
     errors: list[str] = []
@@ -279,15 +330,12 @@ def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]
         if sum(k in rule for k in ("column", "column_param", "column_suffix")) != 1:
             errors.append("meta.roles: each rule needs exactly one of column / column_param / column_suffix")
     for req in m.get("requires", ()):
-        if not isinstance(req, str) or not re.match(r"^[A-Za-z0-9_.\-]+", req):
+        if not isinstance(req, str) or not _REQUIREMENT.match(req):
             errors.append(f"requires: {req!r} isn't a pip requirement")
-    if not define:
-        return errors
     try:
-        fn = d.fn
+        params = inspect.signature(d.signature_fn).parameters
     except Exception as e:  # noqa: BLE001 -- reported as a validation error
-        return errors + [f"code doesn't define: {type(e).__name__}: {e}"]
-    params = inspect.signature(fn).parameters
+        return errors + [f"can't read {d.id}()'s signature: {type(e).__name__}: {e}"]
     port_names = {p.name for p in d.inputs}
     for f in d.form:
         if f.key not in params:
@@ -303,7 +351,7 @@ def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]
     return errors
 
 
-def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset(), *, define: bool = True) -> ParsedFile:
+def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset()) -> ParsedFile:
     """Fill in `parsed.errors` for every definition (in place; returns it).
     `taken_ids` are ids already claimed elsewhere (built-ins, other files)."""
     seen: set[str] = set()
@@ -312,7 +360,7 @@ def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset(), *, define: b
         if d.id in taken_ids or d.id in seen:
             errs.append(f"block id {d.id!r} is already taken")
         seen.add(d.id)
-        errs.extend(validate_definition(d, define=define))
+        errs.extend(validate_definition(d))
     return parsed
 
 
@@ -381,12 +429,12 @@ def definition_from_embedded(raw: dict[str, Any], origin: str | None = None) -> 
         code=raw["code"],
         source="library",
         origin=origin,
-        sha=raw.get("sha") or _sha(raw["meta"], raw["code"]),
+        sha=_sha(raw["meta"], raw["code"]),
         description=raw.get("description", ""),
     )
 
 
-_EMBEDDED: dict[str, BlockDefinition] = {}
+_EMBEDDED: dict[tuple[str, str], BlockDefinition] = {}
 
 
 def definition_for(block) -> BlockDefinition:
@@ -394,9 +442,11 @@ def definition_for(block) -> BlockDefinition:
     block), else the built-in of its category."""
     raw = getattr(block, "definition", None)
     if raw:
-        key = raw.get("sha") or _sha(raw["meta"], raw["code"])
+        # Keyed on the sha of what's actually embedded -- never the "sha"
+        # stored beside it, which a hand edit of the code leaves stale.
+        key = (raw["id"], _sha(raw["meta"], raw["code"]))
         d = _EMBEDDED.get(key)
-        if d is None or d.id != raw["id"]:
+        if d is None:
             d = _EMBEDDED[key] = definition_from_embedded(raw)
         return d
     try:

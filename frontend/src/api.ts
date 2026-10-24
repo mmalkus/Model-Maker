@@ -225,7 +225,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ source, expected_sha: opts.expected_sha ?? null, create: opts.create ?? false }),
     }),
-  libraryDeleteFile: (name: string) => request<{ deleted: string }>(`/library/files/${name}`, { method: 'DELETE' }),
+  libraryDeleteFile: (name: string, expectedSha: string) =>
+    request<{ deleted: string }>(`/library/files/${name}?expected_sha=${encodeURIComponent(expectedSha)}`, { method: 'DELETE' }),
   libraryDeleteBlock: (name: string, id: string) => request<LibraryFile>(`/library/files/${name}/blocks/${id}`, { method: 'DELETE' }),
   libraryTry: (
     name: string,

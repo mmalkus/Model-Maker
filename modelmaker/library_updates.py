@@ -34,7 +34,11 @@ def status_for(block: BlockInstance) -> dict[str, Any] | None:
         "version": embedded.version,
         "sha": embedded.sha,
         "in_library": False,
+        # The library's copy differs from the embedded one; `library_older`
+        # says it's an older version (the file was rolled back), so the UI
+        # offers a switch back rather than an "update".
         "update_available": False,
+        "library_older": False,
     }
     try:
         found = library_store.find(ref["file"], ref.get("id", block.category)) if ref.get("file") else None
@@ -49,6 +53,7 @@ def status_for(block: BlockInstance) -> dict[str, Any] | None:
         info["in_library"] = True
         info["latest_version"] = found.version
         info["update_available"] = found.sha != embedded.sha
+        info["library_older"] = info["update_available"] and found.version < embedded.version
     return info
 
 
@@ -69,7 +74,7 @@ def _required_params(d: BlockDefinition) -> set[str]:
     ports = {p.name for p in d.inputs}
     return {
         n
-        for n, p in inspect.signature(d.fn).parameters.items()
+        for n, p in inspect.signature(d.signature_fn).parameters.items()
         if p.default is inspect.Parameter.empty
         and n not in ports
         and n not in bl.INJECTED_PARAMS
@@ -78,7 +83,7 @@ def _required_params(d: BlockDefinition) -> set[str]:
 
 
 def _param_names(d: BlockDefinition) -> set[str]:
-    return set(inspect.signature(d.fn).parameters) - {p.name for p in d.inputs}
+    return set(inspect.signature(d.signature_fn).parameters) - {p.name for p in d.inputs}
 
 
 def migrate_params(params: dict[str, Any], new: BlockDefinition) -> tuple[dict[str, Any], dict[str, str], list[str]]:
