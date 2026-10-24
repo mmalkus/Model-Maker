@@ -20,6 +20,11 @@ export interface PortSpec {
   name: string
   type: PortType
   required: boolean
+  // Input: the function also works on a LazyFrame (streaming runs may fuse
+  // it). Output: the function returns a LazyFrame (the engine collects it).
+  lazy?: boolean
+  // Output: a statistics table (one row per feature/bin/grade/...).
+  aggregate?: boolean
 }
 
 // One params form field, as the API serves it (see modelmaker/forms.py:
@@ -28,7 +33,7 @@ export interface PortSpec {
 export interface FormField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'column' | 'columns' | 'checkbox'
+  kind: 'text' | 'number' | 'select' | 'column' | 'columns' | 'checkbox' | 'path' | 'sql' | 'env'
   placeholder: string
   step: number | null
   options: string[]
@@ -51,9 +56,14 @@ export interface BlockForm {
 export interface RegistryEntry {
   category: string
   block_type: BlockType
+  summary: string
+  // The built-in block file it comes from (e.g. modelmaker/blocks/library.py)
+  origin: string | null
+  version: number
+  sha: string
   group: string
-  // What the block does and which risk model it's for (BlockSpec.tags) --
-  // the palette filters on these
+  // What the block does and which risk model it's for (its BLOCKS "tags")
+  // -- the palette filters on these
   tags: string[]
   display_name: string
   inputs: PortSpec[]
@@ -69,19 +79,19 @@ export interface BlockTag {
 export interface BlockOut {
   id: string
   block_type: BlockType
-  is_custom: boolean
   category: string
   name: string
   lane: string | null
   position: { x: number; y: number }
   code_version: number
   params: Record<string, unknown>
-  code: string | null
+  // The code the block runs (its function plus any helpers), read-only --
+  // code is written in the block library, never on a placed block.
   source: string | null
-  // The params form for a registry block; null for a custom block (the
-  // inspector derives its `_col` pickers from its params instead).
   form: BlockForm | null
-  metadata_transform: Record<string, unknown> | null
+  // Where the block's definition came from and whether it's current (see
+  // library_updates.status_for).
+  definition_info: DefinitionInfo | null
   inputs: PortSpec[]
   outputs: PortSpec[]
   port_names: Record<string, string>
@@ -211,10 +221,139 @@ export interface BrowseOut {
 }
 
 export interface DraftOut {
-  code: string
-  metadata_transform: Record<string, unknown>
   params: Record<string, unknown>
   explanation: string
+}
+
+export type DefinitionInfo =
+  | { source: 'builtin'; sha?: string; changed_since_saved?: boolean; missing?: boolean }
+  | {
+      source: 'library'
+      file: string | null
+      version: number
+      sha: string
+      in_library: boolean
+      update_available: boolean
+      latest_version?: number
+    }
+
+// What the architecture does for a block, derived from what it declares
+// (see library_api.architecture).
+export interface BlockArchitecture {
+  change_detection: string[]
+  streaming: string | null
+  hints: string | null
+  statistics_tables: string[]
+  sampling: boolean
+}
+
+export interface LibraryBlock {
+  id: string
+  display_name: string
+  summary: string
+  description: string
+  version: number
+  sha: string
+  block_type: BlockType
+  group: string
+  tags: string[]
+  requires: string[]
+  inputs: PortSpec[]
+  outputs: PortSpec[]
+  errors: string[]
+  unmet_requirements: string[]
+  architecture: BlockArchitecture
+  source: 'builtin' | 'library'
+  origin: string | null
+  form?: BlockForm | null
+}
+
+export interface LibraryFile {
+  name: string
+  doc: string
+  sha: string
+  is_draft: boolean
+  file_errors: string[]
+  examples: string[]
+  blocks: LibraryBlock[]
+  source?: string
+}
+
+export interface LibraryOut {
+  dir: string
+  generation: number
+  files: LibraryFile[]
+  builtin_files: { name: string; blocks: LibraryBlock[] }[]
+  usage: Record<string, string[]>
+}
+
+export interface LibraryCheck {
+  file_errors: string[]
+  blocks: LibraryBlock[]
+  examples: string[]
+  ok: boolean
+}
+
+export interface ExampleResult {
+  ok: boolean | null
+  error: string | null
+  line?: number | null
+}
+
+export interface TryValue {
+  type: 'dataframe' | 'image' | 'value'
+  rows?: number
+  columns?: { name: string; dtype: string }[]
+  head?: Record<string, unknown>[]
+  bytes?: number
+  value?: unknown
+}
+
+export type TryOut =
+  | { examples: Record<string, ExampleResult> }
+  | { ok: true; outputs: Record<string, TryValue> }
+  | { ok: false; error: string }
+
+export interface AIDraftOut {
+  file: string
+  block: string
+  source: string
+  base_sha: string | null
+  explanation: string
+  check: { ok: boolean; file_errors: string[]; errors: string[]; has_example: boolean }
+  diff: string
+  code: string
+  entry: Record<string, unknown>
+}
+
+export interface UpdatePreview {
+  block: string
+  from_version: number
+  to_version: number
+  code_diff: string
+  meta_changed: boolean
+  params_carried: string[]
+  params_renamed: Record<string, string>
+  params_dropped: string[]
+  params_newly_required: string[]
+  wires_kept: string[]
+  wires_renamed: Record<string, string>
+  wires_disconnected: { wire: string; side: string; port: string; reason: string }[]
+}
+
+export interface ImportPreviewBlock {
+  id: string
+  display_name: string
+  version: number
+  summary: string
+  errors: string[]
+  unmet_requirements: string[]
+  clash: null | { kind: 'builtin' } | { kind: 'library'; file: string; version: number }
+  code: string
+}
+
+export interface ImportPreview {
+  files: { file: string; file_errors: string[]; blocks: ImportPreviewBlock[] }[]
 }
 
 export interface AnalyzeDataOut {
@@ -376,7 +515,7 @@ export interface BuildOut {
   ended_at: string | null
   plan_llm: { provider: string | null; model: string | null }
   build_llm: { provider: string | null; model: string | null }
-  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_custom_blocks: boolean; small_context?: boolean; decision_hints?: boolean }
+  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_new_blocks: boolean; small_context?: boolean; decision_hints?: boolean }
   // Where the build's full log is saved (see AgentBuild.save_log).
   log_path: string | null
   preflight: { blocking: PreflightIssue[]; warnings: PreflightIssue[]; max_rows?: number | null }

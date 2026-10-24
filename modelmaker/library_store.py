@@ -389,6 +389,23 @@ def move_block(src_file: str, block_id: str, dst_file: str) -> LibraryFile:
         return out
 
 
+def duplicate(source_def: BlockDefinition, new_id: str, dst_file: str, example: str | None = None) -> LibraryFile:
+    """Copy a block (a built-in, or a library block) into a library file
+    under a new id, as version 1 -- "Duplicate to library", the way to
+    change a built-in."""
+    if not new_id.isidentifier() or new_id.startswith("_"):
+        raise LibraryError(f"{new_id!r} isn't a valid block id")
+    taken = set(BLOCK_REGISTRY) | {d.id for f in list_files() for d in f.parsed.definitions}
+    if new_id in taken:
+        raise LibraryError(f"block id {new_id!r} is already taken")
+    code = re.sub(rf"\bdef {re.escape(source_def.id)}\(", f"def {new_id}(", source_def.code, count=1)
+    meta = {**source_def.meta, "version": 1}
+    meta["display_name"] = f"{source_def.display_name} (copy)"
+    if example:
+        code += "\n\n" + example.replace(f"_example_{source_def.id}", f"_example_{new_id}").replace(f"{source_def.id}(", f"{new_id}(")
+    return add_block(dst_file, meta, new_id, code)
+
+
 def _example_source(source: str, block_id: str) -> str | None:
     tree = ast.parse(source)
     node = _top_level(tree).get(f"_example_{block_id}")

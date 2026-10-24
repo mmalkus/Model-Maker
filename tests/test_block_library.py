@@ -580,3 +580,10 @@ def test_edit_with_ai_bumps_the_version_and_keeps_the_rest_of_the_file(ai_client
 def test_fix_with_ai_needs_a_red_library_block(ai_client, tmp_path):
     filt = ai_client.post("/api/blocks", json={"category": "filter", "params": {"expr": "x"}}).json()
     assert ai_client.post("/api/library/ai/draft", json={"instruction": "", "fix_block": filt["id"]}).status_code == 400
+
+
+def test_duplicate_a_builtin_into_the_library(client):
+    out = client.post("/api/library/duplicate", json={"id": "filter", "new_id": "my_filter", "to": "mine.py"}).json()
+    block = out["blocks"][0]
+    assert block["id"] == "my_filter" and block["version"] == 1 and block["display_name"] == "Filter (copy)" and not block["errors"]
+    assert client.post("/api/library/duplicate", json={"id": "filter", "new_id": "my_filter", "to": "mine.py"}).status_code == 400

@@ -2,37 +2,31 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
-import { EnvVarField } from './EnvVarField'
 import { FileBrowser } from './FileBrowser'
-import { ParamsForm, deriveColumnFieldSpecs } from './ParamsForm'
+import { ParamsForm } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
-
-// File-based input blocks that read a single `path` param off disk (see
-// modelmaker/blocks/library.py) -- each gets the same "Browse..." file
-// picker in the inspector, filtered to its own extension.
-const FILE_INPUT_BLOCKS: Record<string, { label: string; ext: string }> = {
-  read_csv: { label: 'CSV file', ext: '.csv' },
-  read_parquet: { label: 'Parquet file', ext: '.parquet' },
-  read_json: { label: 'JSON file', ext: '.json' },
-  read_excel: { label: 'Excel file', ext: '.xlsx' },
-}
 
 export function Inspector({
   block,
   onChanged,
   provider,
+  onOpenUpdate,
+  onFixWithAI,
+  onOpenInLibrary,
 }: {
   block: BlockOut | null
   onChanged: () => void
   // Which LLM provider to draft with -- picked in the Settings menu (see
   // Toolbar), not here; the inspector just uses whatever App hands it.
   provider: string | null
+  // Update a library block to its newer version / accept a changed built-in.
+  onOpenUpdate: (block: BlockOut) => void
+  // Fix a red library block's code with AI (in the block library).
+  onFixWithAI: (block: BlockOut) => void
+  onOpenInLibrary: (file: string | null, id: string) => void
 }) {
   const [paramsText, setParamsText] = useState('')
   const [paramsError, setParamsError] = useState<string | null>(null)
-  const [codeText, setCodeText] = useState('')
-  const [metaText, setMetaText] = useState('')
-  const [metaError, setMetaError] = useState<string | null>(null)
   const [preview, setPreview] = useState<PreviewOut | null>(null)
   const [showData, setShowData] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -40,7 +34,8 @@ export function Inspector({
   const [draftExplanation, setDraftExplanation] = useState<string | null>(null)
   const [nameText, setNameText] = useState('')
   const [editingName, setEditingName] = useState(false)
-  const [showBrowser, setShowBrowser] = useState(false)
+  // The `path` field a Browse... was opened for, and its extension filter.
+  const [showBrowser, setShowBrowser] = useState<{ key: string; ext: string } | null>(null)
   const [inputColumns, setInputColumns] = useState<SchemaColumn[]>([])
   const [drafting, setDrafting] = useState(false)
   const [draftElapsed, setDraftElapsed] = useState(0)
@@ -124,26 +119,16 @@ export function Inspector({
   useEffect(() => {
     setParamsText(block ? JSON.stringify(block.params, null, 2) : '')
     setParamsError(null)
-    setCodeText(block?.code ?? '')
-    setMetaText(block ? JSON.stringify(block.metadata_transform ?? { kind: 'passthrough' }, null, 2) : '')
-    setMetaError(null)
     setPreview(null)
     setShowData(false)
     setDraftExplanation(null)
     setInstruction('')
     setNameText(block?.name ?? '')
     setEditingName(false)
-    setShowBrowser(false)
+    setShowBrowser(null)
     setDrafting(false)
     setGroupBy(block?.group_by ?? '')
     setMaxWorkers(block?.max_workers != null ? String(block.max_workers) : '')
-
-    // A block that's never been touched (still v1, still the default
-    // scaffold body) is almost certainly one the user just created to hand
-    // straight to AI -- put the cursor where they'll type next.
-    if (block?.is_custom && block.code_version === 1) {
-      requestAnimationFrame(() => instructionRef.current?.focus())
-    }
   }, [block?.id])
 
   if (!block) {
@@ -196,15 +181,9 @@ export function Inspector({
 
   const dataframePort = block.outputs.find((p) => p.type === 'dataframe' || dynamicDataframePorts.has(p.name))?.name
 
-  let currentParams: Record<string, unknown> = {}
-  try {
-    currentParams = JSON.parse(paramsText || '{}')
-  } catch {
-    currentParams = {}
-  }
-  // A registry block's form comes with it; a custom block gets a picker per
-  // `_col` param. The JSON box stays for whatever no field covers.
-  const formFields = block.form ? block.form.fields : block.is_custom ? deriveColumnFieldSpecs(currentParams) : []
+  // The block's form comes with it; the JSON box stays for whatever no
+  // field covers.
+  const formFields = block.form ? block.form.fields : []
   const showParamsJson = !block.form || block.form.fields.length === 0 || block.form.other_params.length > 0
 
   const viewData = () =>
@@ -214,11 +193,6 @@ export function Inspector({
     })
 
   const applyDraft = (draft: DraftOut) => {
-    if (block.is_custom) {
-      setCodeText(draft.code)
-      setMetaText(JSON.stringify(draft.metadata_transform, null, 2))
-      setMetaError(null)
-    }
     if (draft.params && Object.keys(draft.params).length > 0) {
       let merged: Record<string, unknown> = draft.params
       try {
@@ -233,14 +207,15 @@ export function Inspector({
   }
 
   const pickPath = (path: string) => {
-    setShowBrowser(false)
+    const key = showBrowser?.key ?? 'path'
+    setShowBrowser(null)
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(paramsText || '{}')
     } catch {
       parsed = { ...block.params }
     }
-    const merged = { ...parsed, path }
+    const merged = { ...parsed, [key]: path }
     setParamsText(JSON.stringify(merged, null, 2))
     setParamsError(null)
     run(() => api.updateBlock(block.id, { params: merged }))
@@ -290,18 +265,6 @@ export function Inspector({
         max_workers: parsedWorkers != null && Number.isFinite(parsedWorkers) && parsedWorkers > 0 ? Math.floor(parsedWorkers) : null,
       }),
     )
-  }
-
-  const saveCode = () => run(() => api.updateBlock(block.id, { code: codeText }))
-
-  const saveMeta = () => {
-    try {
-      const parsed = JSON.parse(metaText || '{}')
-      setMetaError(null)
-      run(() => api.updateBlock(block.id, { metadata_transform: parsed }))
-    } catch {
-      setMetaError('invalid JSON')
-    }
   }
 
   return (
@@ -361,6 +324,13 @@ export function Inspector({
           ))}
         </div>
       )}
+
+      <DefinitionBanner
+        block={block}
+        onOpenUpdate={() => onOpenUpdate(block)}
+        onFixWithAI={() => onFixWithAI(block)}
+        onOpenInLibrary={onOpenInLibrary}
+      />
 
       {block.status === 'orange' && block.stale_reason && (
         <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
@@ -443,25 +413,6 @@ export function Inspector({
         <MetricView key={name} name={name} value={value} />
       ))}
 
-      {FILE_INPUT_BLOCKS[block.category] && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{FILE_INPUT_BLOCKS[block.category].label}</div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <input
-              readOnly
-              value={(block.params.path as string) ?? ''}
-              placeholder="(no file selected)"
-              style={{ flex: 1, fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
-            />
-            <button disabled={busy} onClick={() => setShowBrowser(true)}>
-              Browse...
-            </button>
-          </div>
-        </div>
-      )}
-
-      {block.category === 'read_sql' && <EnvVarField name={(block.params.connection_env as string) ?? ''} />}
-
       {block.category !== 'display_table' && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Params</div>
@@ -472,6 +423,7 @@ export function Inspector({
               setParamsText={setParamsText}
               columns={inputColumns}
               disabled={busy}
+              onBrowse={(key, ext) => setShowBrowser({ key, ext })}
             />
           )}
           {showParamsJson && (
@@ -551,11 +503,7 @@ export function Inspector({
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
           rows={3}
-          placeholder={
-            block.is_custom
-              ? 'Describe what this block should do...'
-              : "Describe what to set, e.g. \"only keep rows where credit_score > 700\"..."
-          }
+          placeholder={"Describe what to set, e.g. \"only keep rows where credit_score > 700\"..."}
           style={{ width: '100%', fontSize: 11, boxSizing: 'border-box' }}
         />
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
@@ -585,61 +533,28 @@ export function Inspector({
                 : `Still waiting (${draftElapsed}s)...`}
           </div>
         )}
-        {!block.is_custom && (
-          <div style={{ color: '#9ca3af', marginTop: 4 }}>
-            This block's code is fixed -- AI can only choose values for its params, shown above.
-          </div>
-        )}
+        <div style={{ color: '#9ca3af', marginTop: 4 }}>
+          AI chooses values for this block's params here. To change its code, use the block library
+          {block.definition_info?.source === 'library' ? ' (Fix / Edit with AI)' : ' (Duplicate to library)'}.
+        </div>
         {draftExplanation && (
           <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftExplanation}
-            <div style={{ color: '#9ca3af', marginTop: 2 }}>
-              {block.is_custom
-                ? 'Draft filled into Code/Params/Metadata transform below -- review, then Save to apply.'
-                : 'Draft filled into Params above -- review, then Save params to apply.'}
-            </div>
+            <div style={{ color: '#9ca3af', marginTop: 2 }}>Draft filled into Params above -- review, then Save params to apply.</div>
           </div>
         )}
       </div>
 
-      {block.is_custom ? (
-        <>
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Code (v{block.code_version})</div>
-            <CodeEditor value={codeText} onChange={setCodeText} onSave={saveCode} />
-            <button disabled={busy} onClick={saveCode} style={{ marginTop: 4 }}>
-              Save code
-            </button>
-            <div style={{ color: '#9ca3af', marginTop: 2 }}>
-              Ctrl/Cmd-S saves too. Saving edits bumps the code version and cascades this block and its downstream
-              to grey/orange.
-            </div>
+      {block.source && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Code</div>
+          <CodeEditor value={block.source} readOnly />
+          <div style={{ color: '#9ca3af', marginTop: 2 }}>
+            {block.definition_info?.source === 'library'
+              ? "This block's own copy of its library code. Edit it in the library, then Update the block."
+              : 'Built-in code -- configure this block via its params above, or duplicate it to your library to change it.'}
           </div>
-
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Metadata transform</div>
-            <textarea
-              value={metaText}
-              onChange={(e) => setMetaText(e.target.value)}
-              rows={4}
-              style={{ width: '100%', fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
-            />
-            {metaError && <div style={{ color: '#b91c1c' }}>{metaError}</div>}
-            <button disabled={busy} onClick={saveMeta} style={{ marginTop: 4 }}>
-              Save metadata transform
-            </button>
-          </div>
-        </>
-      ) : (
-        block.source && (
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Code</div>
-            <CodeEditor value={block.source} readOnly />
-            <div style={{ color: '#9ca3af', marginTop: 2 }}>
-              Fixed code from the block library -- not editable. Configure this block via its params above.
-            </div>
-          </div>
-        )
+        </div>
       )}
 
       {showData && preview && (
@@ -652,8 +567,72 @@ export function Inspector({
         />
       )}
 
-      {showBrowser && (
-        <FileBrowser ext={FILE_INPUT_BLOCKS[block.category]?.ext ?? '.csv'} onPick={pickPath} onClose={() => setShowBrowser(false)} />
+      {showBrowser && <FileBrowser ext={showBrowser.ext || undefined} onPick={pickPath} onClose={() => setShowBrowser(null)} />}
+    </div>
+  )
+}
+
+// Where a placed block's code comes from, and the actions that follow from
+// it: a library block shows its file and version and offers Update when
+// the library has moved on (and Fix with AI when it's red); a built-in an
+// upgrade changed since the model was saved offers Accept.
+function DefinitionBanner({
+  block,
+  onOpenUpdate,
+  onFixWithAI,
+  onOpenInLibrary,
+}: {
+  block: BlockOut
+  onOpenUpdate: () => void
+  onFixWithAI: () => void
+  onOpenInLibrary: (file: string | null, id: string) => void
+}) {
+  const info = block.definition_info
+  if (!info) return null
+  if (info.source === 'builtin') {
+    if (!info.changed_since_saved) return null
+    return (
+      <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+        <strong>Built-in changed since this model was saved.</strong> It runs the installed version.{' '}
+        <button style={{ fontSize: 11 }} onClick={onOpenUpdate}>
+          Review &amp; accept
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div style={{ background: 'var(--brand-light)', border: '1px solid var(--brand-border)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--brand)' }}>LIB</span>
+        <span>
+          From library:{' '}
+          {info.in_library && info.file ? (
+            <button
+              style={{ fontSize: 11, padding: '0 4px', fontFamily: 'monospace' }}
+              onClick={() => onOpenInLibrary(info.file, block.category)}
+            >
+              {info.file}
+            </button>
+          ) : (
+            <em>not in your library</em>
+          )}{' '}
+          v{info.version}
+        </span>
+        {info.update_available && (
+          <button className="brand-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={onOpenUpdate}>
+            Update to v{info.latest_version}
+          </button>
+        )}
+        {block.status === 'red' && (
+          <button style={{ fontSize: 11 }} onClick={onFixWithAI}>
+            ✦ Fix with AI
+          </button>
+        )}
+      </div>
+      {!info.in_library && (
+        <div style={{ color: '#6b7280', marginTop: 2 }}>
+          It runs its own embedded copy, so the model still works; its library file was moved or deleted.
+        </div>
       )}
     </div>
   )

@@ -1,10 +1,10 @@
 import type {
+  AIDraftOut,
   AnalyzeDataOut,
   Artifact,
   ArtifactSummary,
   BlockOut,
   BlockTag,
-  BlockType,
   BrowseOut,
   BuildOut,
   BuildStateOut,
@@ -12,12 +12,18 @@ import type {
   EnvVarStatus,
   GitStatusOut,
   GraphOut,
+  ImportPreview,
   InputSchemaOut,
+  LibraryCheck,
+  LibraryFile,
+  LibraryOut,
   LLMSettingsOut,
   PreviewOut,
   RecoveryInfo,
   RegistryEntry,
   SuggestNamesOut,
+  TryOut,
+  UpdatePreview,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -38,17 +44,14 @@ export const api = {
   graph: () => request<GraphOut>('/graph'),
 
   createBlock: (body: {
-    category: string
-    block_type?: BlockType
+    category?: string
+    // Place a library block (it embeds a copy of its definition).
+    library?: { file: string; id: string }
     name?: string
     lane?: string | null
     x?: number
     y?: number
     params?: Record<string, unknown>
-    code?: string
-    inputs?: { name: string; type: string }[]
-    outputs?: { name: string; type: string }[]
-    metadata_transform?: Record<string, unknown>
   }) => request<BlockOut>('/blocks', { method: 'POST', body: JSON.stringify(body) }),
 
   updateBlock: (
@@ -58,8 +61,6 @@ export const api = {
       lane: string | null
       position: { x: number; y: number }
       params: Record<string, unknown>
-      code: string
-      metadata_transform: Record<string, unknown>
       group_by: string | null
       max_workers: number | null
     }>,
@@ -181,7 +182,7 @@ export const api = {
     final_full_run?: boolean
     sample_rows?: number | null
     auto_build?: boolean
-    allow_custom_blocks?: boolean
+    allow_new_blocks?: boolean
     small_context?: boolean | null
     decision_hints?: boolean | null
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
@@ -210,6 +211,56 @@ export const api = {
     }),
   suggestNames: (id: string, provider?: string) =>
     request<SuggestNamesOut>(`/blocks/${id}/suggest_names`, { method: 'POST', body: JSON.stringify({ provider }) }),
+
+  // Block library -- see library_api.py.
+  library: (refresh = false) => request<LibraryOut>(`/library${refresh ? '?refresh=true' : ''}`),
+  libraryTemplate: () => request<{ source: string }>('/library/template'),
+  libraryReload: () => request<{ generation: number }>('/library/reload', { method: 'POST' }),
+  libraryFile: (name: string) => request<LibraryFile>(`/library/files/${name}`),
+  libraryCheck: (source: string, name: string) =>
+    request<LibraryCheck>('/library/check', { method: 'POST', body: JSON.stringify({ source, name }) }),
+  librarySave: (name: string, source: string, opts: { expected_sha?: string | null; create?: boolean } = {}) =>
+    request<LibraryFile>(`/library/files/${name}`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, expected_sha: opts.expected_sha ?? null, create: opts.create ?? false }),
+    }),
+  libraryDeleteFile: (name: string) => request<{ deleted: string }>(`/library/files/${name}`, { method: 'DELETE' }),
+  libraryDeleteBlock: (name: string, id: string) => request<LibraryFile>(`/library/files/${name}/blocks/${id}`, { method: 'DELETE' }),
+  libraryTry: (
+    name: string,
+    body: { blocks?: string[]; block?: string; input_block?: string; input_port?: string; params?: Record<string, unknown>; source?: string },
+  ) => request<TryOut>(`/library/files/${name}/try`, { method: 'POST', body: JSON.stringify(body) }),
+  libraryExportUrl: (q: { file?: string; blocks?: string[]; files?: string[] }) => {
+    const p = new URLSearchParams()
+    if (q.file) p.set('file', q.file)
+    if (q.blocks?.length) p.set('blocks', q.blocks.join(','))
+    if (q.files?.length) p.set('files', q.files.join(','))
+    const qs = p.toString()
+    return `/api/library/export${qs ? `?${qs}` : ''}`
+  },
+  libraryImportPreview: (filename: string, content_base64: string) =>
+    request<ImportPreview>('/library/import/preview', { method: 'POST', body: JSON.stringify({ filename, content_base64 }) }),
+  libraryImport: (filename: string, content_base64: string, actions: Record<string, string>) =>
+    request<{ imported: string[] }>('/library/import', { method: 'POST', body: JSON.stringify({ filename, content_base64, actions }) }),
+  libraryKeepDraft: (file: string, block: string, to: string) =>
+    request<LibraryFile>('/library/drafts/keep', { method: 'POST', body: JSON.stringify({ file, block, to }) }),
+  libraryDuplicate: (body: { id: string; file?: string | null; new_id: string; to: string }) =>
+    request<LibraryFile>('/library/duplicate', { method: 'POST', body: JSON.stringify(body) }),
+  libraryDiscardDraft: (file: string) =>
+    request<{ deleted: string }>('/library/drafts/discard', { method: 'POST', body: JSON.stringify({ file }) }),
+  libraryAIDraft: (body: {
+    instruction: string
+    provider?: string
+    file?: string
+    block?: string
+    context_block?: string
+    context_port?: string
+    fix_block?: string
+    previous_code?: string
+    previous_block?: Record<string, unknown>
+  }) => request<AIDraftOut>('/library/ai/draft', { method: 'POST', body: JSON.stringify(body) }),
+  updatePreview: (blockId: string) => request<UpdatePreview>(`/blocks/${blockId}/update_preview`),
+  applyUpdate: (blockId: string) => request<{ applied: UpdatePreview; block: BlockOut }>(`/blocks/${blockId}/update`, { method: 'POST' }),
 
   listArtifacts: () => request<ArtifactSummary[]>('/artifacts'),
   getArtifact: (id: string) => request<Artifact>(`/artifacts/${id}`),

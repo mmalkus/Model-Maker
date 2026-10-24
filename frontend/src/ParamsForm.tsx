@@ -1,40 +1,10 @@
 import type { CSSProperties } from 'react'
+import { EnvVarField } from './EnvVarField'
 import type { FormField, SchemaColumn } from './types'
 
-// A registry block's fields come from the API with the block (block.form,
-// built from its BlockSpec and signature -- see modelmaker/forms.py), so
+// A block's fields come from the API with the block (block.form, built from
+// its BLOCKS "form" and its signature -- see modelmaker/forms.py), so
 // there's no per-block list to keep here.
-
-function prettifyColumnParamLabel(key: string): string {
-  const base = key.replace(/_col$/, '').replace(/_/g, ' ')
-  return `${base.charAt(0).toUpperCase()}${base.slice(1)} column`
-}
-
-// AI-drafted (custom) blocks name every existing input column they read as a
-// `<name>_col` string parameter defaulting to that column's real name (see
-// llm/prompts.CONTRACT) instead of hardcoding it into the function body --
-// that's what lets a block get re-pointed at a differently-named upstream
-// column without touching generated code. Turn each such param into a
-// `column` field (a dropdown of the block's real input columns) instead of
-// leaving it in the raw JSON textarea, so re-wiring it is a pick from a list
-// rather than free-text guesswork -- and a stale value (e.g. after an
-// upstream rename) shows up as an extra, clearly-off option rather than
-// silently failing at run time.
-export function deriveColumnFieldSpecs(params: Record<string, unknown>): FormField[] {
-  return Object.keys(params)
-    .filter((key) => key.endsWith('_col') && (params[key] === null || typeof params[key] === 'string'))
-    .sort()
-    .map((key) => ({
-      key,
-      label: prettifyColumnParamLabel(key),
-      kind: 'column' as const,
-      placeholder: '',
-      step: null,
-      options: [],
-      auto_role: null,
-      default: null,
-    }))
-}
 
 export function ParamsForm({
   spec,
@@ -42,12 +12,16 @@ export function ParamsForm({
   setParamsText,
   columns,
   disabled,
+  onBrowse,
 }: {
   spec: FormField[]
   paramsText: string
   setParamsText: (text: string) => void
   columns: SchemaColumn[]
   disabled: boolean
+  // A `path` field's Browse... button: pick a file (filtered to the field's
+  // extensions) and set it as the param.
+  onBrowse?: (key: string, ext: string) => void
 }) {
   let params: Record<string, unknown> = {}
   try {
@@ -79,6 +53,44 @@ export function ParamsForm({
         return (
           <div key={f.key}>
             <div style={{ color: '#374151', marginBottom: 2 }}>{f.label}</div>
+            {f.kind === 'path' && (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  disabled={disabled}
+                  value={typeof value === 'string' ? value : ''}
+                  placeholder={f.placeholder || '(no file selected)'}
+                  onChange={(e) => update(f.key, e.target.value)}
+                  style={{ ...fieldStyle, fontFamily: 'monospace' }}
+                />
+                {onBrowse && (
+                  <button disabled={disabled} onClick={() => onBrowse(f.key, f.options[0] ?? '')}>
+                    Browse...
+                  </button>
+                )}
+              </div>
+            )}
+            {f.kind === 'sql' && (
+              <textarea
+                disabled={disabled}
+                rows={4}
+                value={typeof value === 'string' ? value : ''}
+                placeholder={f.placeholder}
+                onChange={(e) => update(f.key, e.target.value)}
+                style={{ ...fieldStyle, fontFamily: 'monospace' }}
+              />
+            )}
+            {f.kind === 'env' && (
+              <>
+                <input
+                  disabled={disabled}
+                  value={typeof value === 'string' ? value : ''}
+                  placeholder={f.placeholder}
+                  onChange={(e) => update(f.key, e.target.value)}
+                  style={{ ...fieldStyle, fontFamily: 'monospace' }}
+                />
+                {typeof value === 'string' && value && <EnvVarField name={value} />}
+              </>
+            )}
             {f.kind === 'text' && (
               <input
                 disabled={disabled}

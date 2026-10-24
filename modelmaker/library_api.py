@@ -352,6 +352,35 @@ def keep_draft(req: KeepRequest) -> dict[str, Any]:
     return file_summary(f)
 
 
+class DuplicateRequest(BaseModel):
+    # The block to copy: a built-in (no file) or a library block.
+    id: str
+    file: str | None = None
+    new_id: str
+    to: str
+
+
+@router.post("/api/library/duplicate")
+def duplicate_block(req: DuplicateRequest) -> dict[str, Any]:
+    """Copy a block into a library file under a new id (version 1) -- how a
+    built-in gets changed: duplicate it, then edit the copy."""
+    try:
+        if req.file is None:
+            source_def = BLOCK_REGISTRY.get(req.id)
+            if source_def is None:
+                raise store.LibraryError(f"no built-in block {req.id!r}")
+            example = None
+        else:
+            f = store.get_file(req.file)
+            source_def = f.definition(req.id)
+            if source_def is None:
+                raise store.LibraryError(f"{req.file} has no block {req.id!r}")
+            example = store._example_source(f.source, req.id)
+        return file_summary(store.duplicate(source_def, req.new_id, req.to, example))
+    except store.LibraryError as e:
+        raise _fail(e)
+
+
 class DiscardRequest(BaseModel):
     file: str
 

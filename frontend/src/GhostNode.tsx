@@ -32,7 +32,7 @@ export function GhostNode({ data }: NodeProps<GhostFlowNode>) {
         <span style={{ fontSize: 10, opacity: 0.7 }}>{step.ref}</span>
         <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{step.name}</strong>
       </div>
-      <div style={{ opacity: 0.8 }}>{step.category === 'custom' ? 'custom code' : step.category}</div>
+      <div style={{ opacity: 0.8 }}>{step.category === 'custom' ? 'new block (AI writes it)' : step.category}</div>
       <Handle id={GHOST_IN} type="target" position={Position.Top} isConnectable={false} style={{ background: '#a78bfa' }} />
       <Handle id={GHOST_OUT} type="source" position={Position.Bottom} isConnectable={false} style={{ background: '#a78bfa' }} />
     </div>
