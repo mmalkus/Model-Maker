@@ -1,8 +1,9 @@
 # Model-Maker
 
 A visual pipeline builder for financial model development in Python, with
-both a web GUI and a terminal UI, and an embedded, pluggable AI provider
-that can draft and fix blocks for you. Blocks contain functional Python
+both a web GUI and a terminal UI, a block library you can extend (by hand or
+with AI), and an embedded, pluggable AI provider that can draft and fix
+blocks for you. Blocks contain functional Python
 code, are wired together via Polars DataFrames carrying metadata,
 organized visually into phase-labelled swimlanes, and compile down to a
 single, human-readable, self-contained Python script.
@@ -11,7 +12,7 @@ See [`modelmaker-v2-plan.md`](modelmaker-v2-plan.md) for the full design.
 
 The project has two parts:
 
-- **`modelmaker/`** — the Python backend: block registry, graph/session
+- **`modelmaker/`** — the Python backend: block files and the block library, graph/session
   model, execution runner, single-file compiler, pluggable AI-assisted
   block drafting, a FastAPI HTTP API, and a Textual-based terminal UI
   (`modelmaker-tui`, see [Terminal UI](#terminal-ui)).
@@ -55,8 +56,8 @@ it. It creates a `.venv` next to itself if missing, installs/upgrades
 
 A project is a folder, not a file: **Save**/**Load** browse for a folder
 rather than a filename, and a folder is a project once it holds a
-`model.json` (everything else in it -- `files/`, a `.gitignore`, custom
-block code sidecars -- is the project's own working area, versioned
+`model.json` (everything else in it -- `files/`, a `.gitignore`, the code
+of the library blocks it uses in `blocks/` -- is the project's own working area, versioned
 alongside it). Saving for the first time scaffolds that folder (see
 [The demo project](#the-demo-project) for an example) and git-inits it, so
 it's ready to commit and push right away from the **Git** panel.
@@ -129,9 +130,14 @@ A few things worth knowing beyond the canvas itself.
   it started, so you can keep editing (or undo, or toggle sample mode) while
   a long sweep executes. The run finishes against its own version; anything
   you changed in the meantime simply shows as stale afterwards, saying so.
-- **Editing block code** — custom/AI-authored blocks use a real code editor
-  (syntax highlighting, line numbers, bracket matching, `Ctrl-F` search);
-  `Ctrl`/`Cmd-S` saves.
+- **Block library** — **Library** in the palette opens your own blocks
+  (`~/.modelmaker/blocks/`, or `MODELMAKER_BLOCK_LIBRARY`): plain `.py`
+  files, one or more blocks each. Browse, edit (a real code editor with a
+  live validity check and **Try it**), import and export them, or
+  **✦ Create with AI** from a description. Placed blocks keep their own
+  copy and offer **Update** when the library moves on. See
+  [docs/block-authoring.md](docs/block-authoring.md); `modelmaker
+  check-blocks` validates a library and runs its self-checks (for CI).
 
 ## Terminal UI
 
@@ -262,7 +268,10 @@ Guardrails are enforced by the tools, not just the prompt:
   the plan listed and you approved.
 - **Excluded means excluded.** Columns tagged `excluded` are refused as
   features.
-- **Limits.** Tool calls, custom blocks, repeated failures and wall time
+- **New blocks go to your library.** When no built-in block does the
+  job, the build writes one to `drafts/` in your block library, where you
+  keep or discard it.
+- **Limits.** Tool calls, new blocks, repeated failures and wall time
   are all capped.
 
 Builds run on `claude_cli` (your existing Claude login, via a small MCP
@@ -311,7 +320,12 @@ Two **Settings → AI builder** switches help small models:
 ```
 modelmaker/
   api.py              FastAPI app and HTTP routes
-  blocks/             Block registry (standard library, modelling, stat tests)
+  blocks/             Built-in block files (data, modelling, stat tests, ...) and the new-block template
+  block_library.py    Parses and validates block files (BLOCKS literal + functions)
+  library_store.py    The user's block library folder: list, save, import/export, AI drafts
+  library_ai.py       Create with AI: drafts a library block through the validator
+  sources.py          Change detection for input blocks, from their form fields
+  metadata_transforms.py  Column roles for every block, from its declared "meta" rules
   llm/                Pluggable LLM providers for AI-assisted drafting
   agent/              AI model builder: tools, guards, build lifecycle, loops, MCP bridge
   graph.py            Graph/block/wire data model

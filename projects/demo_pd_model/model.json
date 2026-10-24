@@ -1,16 +1,16 @@
 {
+  "artifacts": {},
   "blocks": {
     "b_clean": {
       "block_type": "standard",
+      "builtin_sha": "a62dd7c86e43",
       "category": "filter",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_data_prep",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "Drop implausible records",
       "params": {
         "expr": "annual_income > 0 AND dti >= 0 AND credit_score > 0"
@@ -19,6 +19,8 @@
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": true,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -26,6 +28,8 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "out",
             "required": true,
             "type": "dataframe"
@@ -39,15 +43,14 @@
     },
     "b_fit": {
       "block_type": "standard",
+      "builtin_sha": "2fa0994538db",
       "category": "logistic_regression",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_estimation",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "PD model",
       "params": {
         "features": [
@@ -63,6 +66,8 @@
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -70,11 +75,15 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "predictions",
             "required": true,
             "type": "dataframe"
           },
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "model",
             "required": false,
             "type": "model"
@@ -88,21 +97,22 @@
     },
     "b_gini": {
       "block_type": "output",
+      "builtin_sha": "97964c255b62",
       "category": "auc_gini",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_validation",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "AUC / Gini (train)",
       "params": {},
       "port_names": {},
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -110,6 +120,8 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "metric",
             "required": true,
             "type": "scalar_metric"
@@ -123,21 +135,22 @@
     },
     "b_ks": {
       "block_type": "output",
+      "builtin_sha": "992a0aa1de7c",
       "category": "ks_test",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_validation",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "KS (train)",
       "params": {},
       "port_names": {},
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -145,6 +158,8 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "metric",
             "required": true,
             "type": "scalar_metric"
@@ -158,19 +173,18 @@
     },
     "b_load": {
       "block_type": "input",
+      "builtin_sha": "445d91a56a15",
       "category": "demo_credit_data",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {
         "application_date": "date",
         "application_id": "id",
         "default_flag": "target"
       },
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_data_prep",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "Load demo credit data",
       "params": {
         "n_rows": 5000,
@@ -183,6 +197,8 @@
         "inputs": [],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "out",
             "required": true,
             "type": "dataframe"
@@ -196,15 +212,14 @@
     },
     "b_psi": {
       "block_type": "output",
+      "builtin_sha": "9b79da5d40d9",
       "category": "psi_test",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_validation",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "PSI: credit score, train vs test",
       "params": {
         "bins": 10,
@@ -214,11 +229,15 @@
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "expected",
             "required": true,
             "type": "dataframe"
           },
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "actual",
             "required": true,
             "type": "dataframe"
@@ -226,6 +245,8 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "metric",
             "required": true,
             "type": "scalar_metric"
@@ -239,15 +260,14 @@
     },
     "b_split": {
       "block_type": "standard",
+      "builtin_sha": "dc3bd080bc19",
       "category": "train_test_split",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_feature_eng",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "Train / test split",
       "params": {
         "seed": 42,
@@ -257,6 +277,8 @@
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -264,11 +286,15 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "train",
             "required": true,
             "type": "dataframe"
           },
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "test",
             "required": true,
             "type": "dataframe"
@@ -282,15 +308,14 @@
     },
     "b_woe": {
       "block_type": "standard",
+      "builtin_sha": "b2acdfbf3e69",
       "category": "woe_transform",
-      "code_ref": null,
       "code_version": 1,
       "column_role_overrides": {},
+      "column_tags": {},
       "group_by": null,
-      "is_custom": false,
       "lane": "lane_feature_eng",
       "max_workers": null,
-      "metadata_transform": null,
       "name": "WoE: revolving utilization",
       "params": {
         "bins": 8,
@@ -300,6 +325,8 @@
       "ports": {
         "inputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "df",
             "required": true,
             "type": "dataframe"
@@ -307,6 +334,8 @@
         ],
         "outputs": [
           {
+            "aggregate": false,
+            "lazy": false,
             "name": "out",
             "required": true,
             "type": "dataframe"
@@ -341,7 +370,7 @@
       "order": 3
     }
   },
-  "modelmaker_version": 1,
+  "modelmaker_version": 2,
   "project_name": "demo_pd_model",
   "wires": {
     "w_01": {

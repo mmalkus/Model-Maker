@@ -119,6 +119,9 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
             block.inputs = [replace(p) for p in resolved.inputs]
             block.outputs = [replace(p) for p in resolved.outputs]
             block.block_type = resolved.block_type
+            if block.definition is None and block.builtin_sha is None:
+                # Saved before built-ins were pinned: pin to the installed one.
+                block.builtin_sha = resolved.sha
         blocks[bid] = block
 
     wires = {

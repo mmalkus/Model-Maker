@@ -4,6 +4,34 @@ A user-owned library of reusable blocks: browse it in the UI, create blocks
 (by hand or with AI), and import/export them as files. The goal is to make
 Model-Maker customizable without touching the package source.
 
+> **Status: implemented** (phases 1–7). The author's guide is
+> [docs/block-authoring.md](docs/block-authoring.md). The implementation
+> differs from this proposal in a few places:
+>
+> - **Hints** are named per block (`"hints": "auc_gini"`), not per output
+>   (`measures`/`table`). The rules moved, unchanged, into a table in
+>   `modelmaker/agent/hint_rules.py`, and each rule reads a specific output
+>   shape.
+> - **Metadata** uses one `"meta"` key: `inherit` (`all`/`none`/a
+>   port/a list param), `new_role`, and `roles` rules (`column` /
+>   `column_param` + `fallback` / `column_suffix`, with `if_taken` and
+>   `displaced` for unique roles). All ~70 transforms were expressed this
+>   way. The only loss is the `missing_treatment:<method>` column tag,
+>   which nothing read.
+> - **Breaking change, no legacy loading.** Projects with old canvas-only
+>   custom blocks are refused on load with a clear message. Project files
+>   are format 2: a placed library block's code is stored in
+>   `blocks/<block id>.py` next to `model.json`.
+> - **`aggregate`** is honored for built-ins only. Library blocks show the
+>   flag, but there is no "trusted library block" marking yet.
+> - **Change detection for SQL** reads the block instance's `probe_query`
+>   setting, which is never passed to the function.
+> - **Decisions on the open questions:** the library lives in
+>   `~/.modelmaker/blocks/` (`MODELMAKER_BLOCK_LIBRARY` overrides it); AI
+>   drafts stay until the user keeps or discards them; agent builds don't
+>   *use* library blocks yet; there are no project-local block files.
+> - **Not done yet (phase 8):** a TUI library view, several search paths.
+
 **Design rules**
 
 1. **A block file describes the block's core function and nothing else:**
@@ -40,7 +68,7 @@ the block only *describes* its way into:
 | `probe=` (`_probe_path_mtime`, `_probe_sql`) | 5 | **Change detection** is picked from the *param kinds*. A field of kind `path` gets an mtime/size fingerprint, and kind `sql` (+ connection) gets the shared SQL fingerprint. |
 | `lazy_fn=` (read_csv/read_parquet twins + 5 identical reuses) | 7 | An input port marked `"lazy": true` means "this function works on a `LazyFrame`", and the **fusion** pass uses that. Input readers return `pl.scan_*(...)` and the runner collects at checkpoints. Twin functions disappear. |
 | `lazy_sink_fn=` (write_csv) | 1 | The same port flag on an output block: when fused, it receives a `LazyFrame`, and `df.lazy().sink_csv(path)` works in both cases. |
-| `hints=` (`_auc_gini_hints`, `_psi_test_hints`, …) | 31 | **A hint rule table** in `agent/hints.py`, keyed by *what a value measures*. Outputs declare `"measures": {"gini": "gini"}` or a table kind (`"table": "iv"`). Thresholds already live in `hints.py`, so this is mostly a move. |
+| `hints=` (`_auc_gini_hints`, `_psi_test_hints`, …) | 31 | **A hint rule table** in `agent/hint_rules.py`, keyed by rule name; a block names its rule (`"hints": "auc_gini"`). Thresholds stay in `hints.py`. *(Proposed: keyed per output by `measures`/`table`.)* |
 | `aggregate_outputs=` | 11 | A port flag `"aggregate": true`. The architecture decides whether to honor it, based on the block's source (§10). |
 | `metadata_transform=` (20 `infer_dtypes`, 9 generic, ~40 bespoke) | ~70 | The default is **automatic schema-diff inheritance** (upstream columns keep their metadata, new ones are inferred), plus declarative role annotations (`"roles": [{"column_param": "pd_column", "role": "predicted"}]`). Each bespoke transform is audited during migration (§12). |
 | `group_by`, caching, column-role overrides | n/a | Already architecture. Unchanged. |
@@ -64,9 +92,10 @@ BLOCKS = {
         "requires": ["scipy>=1.11"],
         "inputs": [{"name": "in", "type": "dataframe", "lazy": False}],
         "outputs": [
-            {"name": "table", "type": "dataframe", "aggregate": True, "table": "grade_backtest"},
-            {"name": "metric", "type": "scalar_metric", "measures": {"share_failed": "grade_failures"}},
+            {"name": "table", "type": "dataframe", "aggregate": True},
+            {"name": "metric", "type": "scalar_metric"},
         ],
+        "hints": "grade_backtest",
         "form": [
             {"key": "grade", "label": "Grade column", "kind": "column"},
             {"key": "pd_column", "label": "PD column", "kind": "column", "auto_role": "predicted"},
