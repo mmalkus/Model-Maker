@@ -18,10 +18,13 @@ Model-Maker customizable without touching the package source.
 3. **Built-in blocks use the same format.** With the extras moved into the
    architecture, nothing is left that only a built-in can express, so there
    is one loader, one validator and one code path.
-4. **Every block on the canvas comes from a block file.** Free-standing AI
-   blocks with code that lives only on the canvas go away. AI writes
-   *library blocks*: **Create with AI** in the block library (§7). A block's
-   code therefore always has a name, a version, a description and a home.
+4. **Custom blocks are created first, then used.** Custom blocks (hand-written
+   or AI-written) stay, but a custom block is always *created* in the block
+   library (by hand, or with **Create with AI**, §7) and saved there before
+   it is placed on the canvas. What goes away is code that lives only
+   inside one canvas node. A block's code therefore always has a name, a
+   version, a description and a home, and every custom block is reusable
+   in other models from the moment it exists.
 
 ---
 
@@ -41,7 +44,7 @@ the block only *describes* its way into:
 | `aggregate_outputs=` | 11 | A port flag `"aggregate": true`. The architecture decides whether to honor it, based on the block's source (§10). |
 | `metadata_transform=` (20 `infer_dtypes`, 9 generic, ~40 bespoke) | ~70 | The default is **automatic schema-diff inheritance** (upstream columns keep their metadata, new ones are inferred), plus declarative role annotations (`"roles": [{"column_param": "pd_column", "role": "predicted"}]`). Each bespoke transform is audited during migration (§12). |
 | `group_by`, caching, column-role overrides | n/a | Already architecture. Unchanged. |
-| `is_custom` blocks + `add_custom_block` agent tool | n/a | Removed. Replaced by library blocks created with AI (§7). |
+| `is_custom` blocks (code stored on the canvas node) + `add_custom_block` agent tool | n/a | Custom blocks become library blocks: create (by hand or with AI, §7) → saved in the library → placed. The canvas-only code path is removed. |
 
 ## 2. The file format
 
@@ -306,9 +309,11 @@ the library is still flat there, and the palette and canvas still show AI blocks
 
 ## 7. Create with AI
 
-This replaces today's AI blocks and the canvas-level draft/fix flow. AI
-always produces a **library block file entry**, through the same validator
-as hand-written ones.
+This is how AI-written custom blocks are made from now on, replacing today's
+canvas-level AI blocks and draft/fix flow. The order is always **create →
+save to library → use**: AI produces a **library block file entry**, through
+the same validator as hand-written ones, and only a saved block can be
+placed.
 
 **Flow** (a side panel in the library, also reachable from the palette and
 from a red block's *Fix with AI*):
