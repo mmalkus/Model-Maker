@@ -1,53 +1,54 @@
 # Block Library — proposal
 
-A user-owned library of reusable blocks: browse it in the UI, add blocks to
-it (from scratch or from a block on the canvas), and import/export them as
-files. The goal is to make Model-Maker customizable without touching the
-package source.
+A user-owned library of reusable blocks: browse it in the UI, create blocks
+(by hand or with AI), and import/export them as files. The goal is to make
+Model-Maker customizable without touching the package source.
 
 **Design rules**
 
 1. **A block file describes the block's core function and nothing else:**
-   what it computes (a plain function), its interface (ports and params form)
-   and what its outputs *are* (e.g. "this table is aggregate", "this value is a
-   Gini"). Sampling, change detection, streaming, sinks, AI decision hints,
-   privacy of outputs, caching and grouping are **architecture**, applied
-   to every block the same way, built-in or not.
+   what it computes (a plain function), its interface (ports and params
+   form), what its outputs *are* (e.g. "this table is aggregate", "this value
+   is a Gini") and what it needs (packages). Sampling, change detection,
+   streaming, sinks, AI decision hints, privacy of outputs, caching and
+   grouping are **architecture**, applied to every block the same way.
 2. **Blocks live in plain `.py` files, one or more blocks per file.** Group
    related blocks together (e.g. all PD backtests in `pd_backtests.py`). No
-   manifest, no registry database, no sidecar JSON. Copying a file exports
-   its blocks, and dropping a file into the folder imports them.
-3. **Built-in blocks use the same format.** With the extras moved into
-   the architecture, nothing is left that only a built-in can express, so
-   `modelmaker/blocks/*.py` becomes ordinary block files that ship with the
-   package. There is one loader, one validator and one code path.
+   manifest, no registry database, no sidecar JSON.
+3. **Built-in blocks use the same format.** With the extras moved into the
+   architecture, nothing is left that only a built-in can express, so there
+   is one loader, one validator and one code path.
+4. **Every block on the canvas comes from a block file.** Free-standing AI
+   blocks with code that lives only on the canvas go away. AI writes
+   *library blocks*: **Create with AI** in the block library (§7). A block's
+   code therefore always has a name, a version, a description and a home.
 
 ---
 
 ## 1. Today vs. proposed
 
 Today a registry block is a function plus a `BlockSpec` carrying
-block-specific Python extras. Each of them maps to a piece of shared
-architecture that the block only *describes* its way into:
+block-specific Python extras. Each maps to a piece of shared architecture
+the block only *describes* its way into:
 
 | Today (per block, Python) | Count | Proposed (architecture, driven by the block's description) |
 |---|---|---|
 | `sample_rows` param on input blocks | ~10 | The **runner** applies sampling: it calls `.head(n)` on the input block's output, and that pushes down for free when the function returns a `LazyFrame`. Blocks never see `sample_rows`. |
-| `probe=` (`_probe_path_mtime`, `_probe_sql`) | 5 | **Change detection** is picked from the *param kinds*. A form field of kind `path` gets an mtime/size fingerprint, and kind `sql` (+ connection) gets the shared SQL fingerprint. The block only says "this param is a file path". |
-| `lazy_fn=` (read_csv/read_parquet twins + 5 identical reuses) | 7 | An input port marked `"lazy": true` means "this function works on a `LazyFrame`". The **fusion** pass treats a block whose dataframe inputs are all lazy as fusable. Input readers just return `pl.scan_*(...)` and the runner collects at checkpoints, so separate twin functions go away. |
-| `lazy_sink_fn=` (write_csv) | 1 | The same port flag on an output block: when fused, it receives a `LazyFrame`. A writer written as `df.lazy().sink_csv(path)` works in both cases. |
-| `hints=` (`_auc_gini_hints`, `_psi_test_hints`, …) | 31 | **Decision hints become a rule table** in `agent/hints.py`, keyed by *what a value measures*, not by block. An output declares `"measures": {"gini": "gini"}` or a table kind (`"table": "iv"`), and every block emitting a Gini gets the Gini rules. The rule bodies already live mostly in `hints.py` (the thresholds) and are keyed off metric names (`gini`, `ks_statistic`, `psi`, `p_value`), so this is mostly a move. |
-| `aggregate_outputs=` | 11 | A port flag `"aggregate": true`. The **architecture** decides whether to honor it, based on the block's source (see §8), so an imported file can't opt its rows into reaching an LLM. |
-| `metadata_transform=` (20 `infer_dtypes`, 9 generic, ~40 bespoke `_x_meta`/lambdas) | ~70 | The default is **automatic schema-diff inheritance**. Output columns that exist upstream keep their metadata, new ones are inferred, and dropped ones disappear. On top of that, declarative role annotations (`"roles": [{"column_param": "pd_column", "role": "predicted"}]`) cover the "tag the column this param names" pattern most bespoke transforms implement. Migration audits each bespoke transform (see §9). |
+| `probe=` (`_probe_path_mtime`, `_probe_sql`) | 5 | **Change detection** is picked from the *param kinds*. A field of kind `path` gets an mtime/size fingerprint, and kind `sql` (+ connection) gets the shared SQL fingerprint. |
+| `lazy_fn=` (read_csv/read_parquet twins + 5 identical reuses) | 7 | An input port marked `"lazy": true` means "this function works on a `LazyFrame`", and the **fusion** pass uses that. Input readers return `pl.scan_*(...)` and the runner collects at checkpoints. Twin functions disappear. |
+| `lazy_sink_fn=` (write_csv) | 1 | The same port flag on an output block: when fused, it receives a `LazyFrame`, and `df.lazy().sink_csv(path)` works in both cases. |
+| `hints=` (`_auc_gini_hints`, `_psi_test_hints`, …) | 31 | **A hint rule table** in `agent/hints.py`, keyed by *what a value measures*. Outputs declare `"measures": {"gini": "gini"}` or a table kind (`"table": "iv"`). Thresholds already live in `hints.py`, so this is mostly a move. |
+| `aggregate_outputs=` | 11 | A port flag `"aggregate": true`. The architecture decides whether to honor it, based on the block's source (§10). |
+| `metadata_transform=` (20 `infer_dtypes`, 9 generic, ~40 bespoke) | ~70 | The default is **automatic schema-diff inheritance** (upstream columns keep their metadata, new ones are inferred), plus declarative role annotations (`"roles": [{"column_param": "pd_column", "role": "predicted"}]`). Each bespoke transform is audited during migration (§12). |
 | `group_by`, caching, column-role overrides | n/a | Already architecture. Unchanged. |
+| `is_custom` blocks + `add_custom_block` agent tool | n/a | Removed. Replaced by library blocks created with AI (§7). |
 
 ## 2. The file format
 
 ```python
 """PD backtests: tests that compare predicted PDs with observed defaults.
 
-The module docstring describes the file as a whole (shown as the group
-heading in the library panel).
+The module docstring describes the file (the group heading in the panel).
 """
 
 BLOCKS = {
@@ -57,6 +58,7 @@ BLOCKS = {
         "block_type": "output",
         "group": "tests",
         "tags": ["pd", "validation"],
+        "requires": ["scipy>=1.11"],
         "inputs": [{"name": "in", "type": "dataframe", "lazy": False}],
         "outputs": [
             {"name": "table", "type": "dataframe", "aggregate": True, "table": "grade_backtest"},
@@ -67,6 +69,8 @@ BLOCKS = {
             {"key": "pd_column", "label": "PD column", "kind": "column", "auto_role": "predicted"},
             {"key": "alpha", "label": "Significance", "kind": "number", "step": 0.01},
         ],
+        # v1 called it "confidence"; Update carries old values across
+        "renamed": {"confidence": "alpha"},
     },
     "jeffreys_test": {
         "display_name": "Jeffreys test per grade",
@@ -85,44 +89,55 @@ def binomial_test(df: pl.DataFrame, grade: str, pd_column: str, default_flag: st
 
 
 def jeffreys_test(df: pl.DataFrame, grade: str, pd_column: str, default_flag: str, alpha: float = 0.05):
-    """Per-grade Jeffreys (beta posterior) test, the ECB's preferred variant."""
-    from scipy.stats import beta
-
-    rows = _per_grade(df, grade, pd_column, default_flag)
+    """Per-grade Jeffreys (beta posterior) test."""
     ...
 
 
 def _per_grade(df, grade, pd_column, default_flag):
     # shared helper: private (leading underscore), not a block
     return df.group_by(grade).agg(...)
+
+
+def _example_binomial_test():
+    # optional self-check: tiny input -> call -> assert; run by "Try it" and `modelmaker check-blocks`
+    df = pl.DataFrame({"grade": ["A", "A", "B"], "pd": [0.01, 0.01, 0.2], "default_flag": [0, 0, 1]})
+    table, metric = binomial_test(df, "grade", "pd", "default_flag")
+    assert table.height == 2
 ```
 
 Rules (all checked by one `validate()` function):
 
 1. **`BLOCKS` is a pure literal**, read with `ast.literal_eval` and never
    executed. Listing the library or previewing an import runs **no code**.
-2. **Every key in `BLOCKS` names a public top-level function in the file,
-   and every public top-level function has a key.** Functions starting with
-   `_` are shared helpers, not blocks.
+2. **Every key in `BLOCKS` names a public top-level function, and every
+   public top-level function has a key.** `_`-prefixed functions are
+   helpers. `_example_<id>` functions are that block's self-checks.
 3. **Each block function's docstring is its description** (first line =
-   summary). The module docstring describes the file and heads its group in
-   the panel.
-4. **Block ids are function names and must be unique across everything
-   loaded** (built-ins + library). The validator rejects a clash. Built-in
-   ids stay what they are today (`auc_gini`, `read_csv`, …), so existing
-   `model.json` files keep working unchanged.
-5. **Only `pl` at module level; other imports go inside functions.** This
-   is today's built-in and custom-block convention. The compiler emits each
-   used block function **plus the helpers it references** (found
-   transitively from the function's AST names), and nothing else from the
-   file. The compiled script stays a single self-contained file.
-6. Every `form[].key` must be a parameter of its function (the same check
-   `register_block` does today). Port types must be in `PortType`.
-   `measures`/`table` names must be known to the hint table; an unknown one
-   is kept but flagged (it gets no hints until a rule exists).
-7. **No executable extras.** There is no key that takes a function. If a
-   block seems to need one, that's a missing piece of architecture: add it
-   there, for every block.
+   summary). The module docstring describes the file.
+4. **Block ids are function names, unique across everything loaded.** A
+   new library block can't take a built-in's id. If a *later package
+   version* adds a built-in with an existing library block's id, the
+   built-in wins in the palette and the library block is flagged
+   *"shadowed by built-in `x` — rename"* with a one-click rename. Models are
+   unaffected, because placed library blocks embed their definition (§4).
+5. **Only `pl` at module level; other imports go inside functions** (the
+   current convention). The compiler emits each used block function plus
+   the helpers it references (found transitively from AST names). Examples
+   are never emitted. The compiled script stays one self-contained file.
+6. **`requires`** lists pip requirement strings. The loader checks
+   them with `importlib.metadata`, without importing anything. A block with
+   unmet requirements lists with a "needs scipy>=1.11" badge, can't be
+   placed, and the import dialog shows it. The compiled script header lists
+   the combined requirements of the blocks it uses.
+7. **`renamed`** maps old param names to new ones, so *Update* carries
+   values over (§4). Ports may be renamed the same way
+   (`"renamed_ports": {"in": "sample"}`) to keep wires connected.
+8. Every `form[].key` must be a parameter of its function. Port types must
+   be in `PortType`. `measures`/`table` names must be known to the hint
+   table (unknown ones are kept but flagged). Tags must be in the tag
+   vocabulary (§11).
+9. **No executable extras.** There is no key that takes a function. If a
+   block seems to need one, that's a missing piece of architecture.
 
 ## 3. Where block files live
 
@@ -134,10 +149,8 @@ modelmaker/blocks/               # built-in, shipped with the package, read-only
     preprocessing.py
 ```
 
-- Both are scanned by the same loader. Each block carries its source: `builtin`
-  or `library` (plus the file path).
-- The library folder can be a git repo or a shared/network drive, so team
-  sharing needs nothing extra. *(Later:* several search paths.)*
+The same loader scans both. The library folder can be a git repo or a
+shared drive. *(Later:* several search paths.)*
 
 ## 4. How a block reaches a model
 
@@ -149,26 +162,48 @@ class BlockDefinition:
     id: str                 # function name
     meta: dict[str, Any]    # its BLOCKS entry
     code: str               # the function + the helpers it references
-    source: Literal["builtin", "library", "custom"]
-    origin: str | None      # file path for builtin/library
+    source: Literal["builtin", "library"]
+    origin: str | None      # file path
     sha: str                # hash of meta + code
 ```
 
-- **Built-in block** on the canvas: the instance references the id, as today.
-  The package version defines it.
+- **Built-in block** on the canvas: the instance references the id, **and
+  records the definition's `sha`** in `model.json`. On load, if the
+  installed package's definition differs (an upgrade changed it), the block
+  shows *"built-in changed since this model was saved"* with a diff and an
+  *Accept* action. The `sha` is part of the cache key, so a changed built-in
+  never serves a stale cached result. Built-ins can change behaviour after
+  an upgrade, but never silently.
 - **Library block** on the canvas: the instance **embeds a copy** of the
-  definition (meta + code) and records `library_ref = {file, id, version, sha}`.
-  Because a project keeps the code in its sidecar, it runs on a machine
-  without that library. Editing the library never silently changes a
-  validated model, and the UI shows *Update to vN* with a diff instead.
-- **AI/custom block:** an embedded definition with `source="custom"`. This
-  merges today's `is_custom` path into the same type: a custom block is just
-  a definition that isn't in any file yet, and *Save to library* writes it
-  into one.
+  definition and records `library_ref = {file, id, version, sha}`. The
+  project runs on a machine without that library, and edits to the library
+  never silently change a model. When the library has a newer version, the
+  block shows *Update to vN*.
+- **Update dialog** (library blocks, and *Accept* for built-ins): shows the
+  code diff **and the structural impact**: params carried over (incl.
+  `renamed`), params dropped, new required params, wires that stay
+  (incl. `renamed_ports`), and wires that would be disconnected because a
+  port was removed or changed type. You confirm with that information in
+  front of you.
+- **Legacy custom blocks** (existing `is_custom` instances in old
+  projects) still load. Each becomes an embedded definition with
+  `source="library"` and no `library_ref`, flagged *"not in a library — Save
+  to library"*. That action asks for a file and a name and writes it out.
+  New ones can't be created.
 
-The runner, compiler, forms, hints and fusion all consume `BlockDefinition`,
-and none of them branch on where the block came from (except §8's
-trust rule for `aggregate`).
+The runner, compiler, forms, hints and fusion all consume `BlockDefinition`
+and never branch on its source (except §10's trust rule for `aggregate`).
+
+**Provenance in the compiled script.** Each emitted function gets a header
+line naming its origin:
+
+```python
+# === binomial_test | library pd_backtests.py v2 | sha 3f9c1a2 ===
+# === logistic_regression | built-in modelmaker 0.14.2 | sha 81bd0e4 ===
+```
+
+The script header lists the requirements and the Model-Maker version it was
+compiled with.
 
 ## 5. Backend
 
@@ -176,131 +211,238 @@ trust rule for `aggregate`).
 
 ```python
 def parse_file(source: str, origin: str) -> list[BlockDefinition]  # ast only, never exec
-def validate(defs: list[BlockDefinition], taken_ids: set[str]) -> dict[str, list[str]]  # id -> errors
-def load_builtin() -> list[BlockDefinition]       # replaces register_block() at import time
-def list_library() -> list[LibraryFile]           # file -> its blocks + per-block errors
-def save_file(name: str, source: str, *, overwrite=False) -> LibraryFile
-def add_block(file: str | None, definition) -> LibraryFile  # "save to library": new file or append to one
-def extract(file: str, ids: list[str]) -> str     # one file holding just these blocks + their helpers
-def delete_file(name: str) / delete_block(file: str, id: str)
+def validate(defs, taken_ids) -> dict[str, list[str]]       # id -> errors (rules in §2)
+def check_requirements(defs) -> dict[str, list[str]]        # id -> unmet requirements
+def run_examples(file, ids=None) -> dict[str, ExampleResult]  # in a worker, with a timeout
+def load_builtin() -> list[BlockDefinition]                 # replaces register_block() at import
+def list_library() -> list[LibraryFile]
+def save_file(name, source, *, expected_sha=None) -> LibraryFile
+def add_block(file: str | None, definition) -> LibraryFile  # new file, or append to one
+def extract(file, ids) -> str                               # just these blocks + their helpers
+def delete_file(name) / delete_block(file, id)
+def reload() -> None                                        # rescan; bumps a library generation
 ```
 
-`validate` runs code in exactly one place: it defines the functions without
-calling them (the same as `_compile_code_to_fn` today). That happens on save
-and on import, after the user has seen the code. Editing a file with several
-blocks rewrites only that block's `BLOCKS` entry and function, using
-`ast` positions, so comments and the rest of the file stay untouched.
+- `validate` runs code in exactly one place: it *defines* the functions
+  without calling them. `run_examples` calls code, but only when the user
+  asks (*Try it*) or runs the CLI.
+- Editing one block in a multi-block file rewrites only that block's
+  `BLOCKS` entry and function, using `ast` positions. Comments and the rest
+  of the file stay untouched.
+- **Safe writes**: write a temp file and then `os.replace`. A save
+  carries the `expected_sha` the editor opened, and a mismatch (someone else
+  saved meanwhile, e.g. on a shared drive) is refused. The editor then
+  offers *reload & re-apply* instead of the last writer winning.
 
 ### Architecture modules that take over the extras
 
-- `runner.py`: sampling via `.head(n)`; fusion eligibility from `lazy` port flags.
-- `sources.py` (new, small): change-detection strategies by param kind
-  (`path` → mtime/size, `sql` → the existing SQL fingerprint). Replaces `probe`.
-- `agent/hints.py`: rules keyed by `measures`/`table`, replacing the
-  31 per-block hint functions.
-- `metadata_transforms.py`: `schema_diff` as the default, plus declarative
-  `roles`.
+- `runner.py`: sampling via `.head(n)`, fusion eligibility from `lazy` port flags.
+- `sources.py` (new): change-detection strategies by param kind. Replaces `probe`.
+- `agent/hints.py`: rules keyed by `measures`/`table`. Replaces 31 per-block functions.
+- `metadata_transforms.py`: `schema_diff` default + declarative `roles`.
+- `worker_pool.py` / `run_worker.py` / `catalogue.ensure_blocks_registered`:
+  use the loader instead of hard-coded module lists. Each task carries the
+  library generation, so a worker started before a reload re-imports
+  before it runs anything.
 
 ### API
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/library` | files → blocks (id, display_name, summary, group, tags, ports, version, sha, errors) |
-| `GET /api/library/files/{file}` | full file source + parsed blocks |
-| `PUT /api/library/files/{file}` | save a whole file from the editor |
-| `POST /api/library/from_block/{block_id}` | *Save to library*: `{file?: existing or new, id, display_name, group}` |
-| `DELETE /api/library/files/{file}` · `DELETE /api/library/files/{file}/blocks/{id}` | delete a file or one block from it |
-| `GET /api/library/export?files=a,b` · `?blocks=x,y` | download a `.py` (one file) or `.zip`. Exporting single blocks uses `extract()` |
-| `POST /api/library/import/preview` | upload `.py`/`.zip` → per-block validation + id clashes. **Runs no code.** |
+| `GET /api/library` | files → blocks (id, display_name, summary, group, tags, ports, version, sha, errors, unmet requirements, shadowed) |
+| `GET /api/library/files/{file}` | full source + parsed blocks + sha |
+| `PUT /api/library/files/{file}` | save a whole file (`expected_sha` required for an existing file) |
+| `DELETE /api/library/files/{file}` · `…/blocks/{id}` | delete a file or one block |
+| `POST /api/library/reload` | rescan the folder (also offered automatically when file mtimes change) |
+| `POST /api/library/files/{file}/try` | run `_example_*` checks (or one block's on a chosen canvas input) |
+| `GET /api/library/export?files=…` · `?blocks=…` | `.py` (one file) or `.zip`. Single blocks use `extract()` |
+| `POST /api/library/import/preview` | upload → per-block validation, requirements, id clashes. **Runs no code** |
 | `POST /api/library/import` | commit, choosing per clash: overwrite / rename / skip |
+| `POST /api/library/ai/draft` | Create/edit with AI (§7): instruction (+ optional file, block, canvas input) → proposed file source |
 | `POST /api/blocks` (existing) | gains `library: {file, id}` → embedded definition + `library_ref` |
-| `POST /api/blocks/{id}/update_from_library` | swap in the current definition, keep params that still exist |
+| `POST /api/blocks/{id}/update_preview` · `…/update` | structural impact + diff, then apply (library *Update*, built-in *Accept*) |
+| `POST /api/blocks/{id}/save_to_library` | legacy custom blocks only |
 
-`GET /api/registry` keeps its shape but also lists library blocks (with
-`source` and `file`), so the palette needs one fetch.
+**Removed:** creating custom blocks (`POST /api/blocks` with `code`),
+`PATCH` of a block's `code`/`metadata_transform`, and `/draft` for code.
+`/draft` stays for *suggesting param values* on any block. `/suggest_fix`
+moves to the library (§7).
+
+### CLI
+
+`modelmaker check-blocks [DIR]`: validates every file, checks requirements
+and runs every `_example_*`, with exit status 1 on any failure. A team
+library repo can run it in CI.
 
 ## 6. Frontend
 
-Mock: https://claude.ai/artifact/QGEp3iNJeBWGfSStogzAU3 (the library list
-there is still flat; per-file grouping is the change below).
+Mock: https://claude.ai/artifact/QGEp3iNJeBWGfSStogzAU3 (to be updated:
+the library is still flat there, and the palette and canvas still show AI blocks).
 
-1. **Palette**: a *Library* section, grouped by file (the file's docstring
-   first line as the heading), with LIB badges. Broken blocks are greyed
-   out with the error as a tooltip.
-2. **Library panel**: a list grouped by file, then block. Search and tag
+1. **Palette**: the *+ AI input / standard / output block* buttons go away.
+   A *Library* section is grouped by file, with LIB badges, and its header
+   has a **✦ Create with AI** button that opens §7 directly. Blocks that are
+   broken, have unmet requirements or are shadowed are greyed out with the
+   reason as a tooltip.
+2. **Library panel**: grouped by file, then block, with search and a tag
    filter. Built-ins are shown read-only under their own files. Block detail
-   shows description, ports, form, *measures* (which hints it gets),
-   change detection and streaming (both derived, shown so the user can see
-   what the architecture will do), and usage in this project. Actions are
-   per block (*Edit*, *Duplicate*, *Export block*, *Delete*) and per file
-   (*Export file*, *New block in this file*).
+   shows description, ports, form, requirements, *measures* (which hints it
+   gets), change detection and streaming (derived, so the user can see what
+   the architecture will do), example status and usage in this project.
+   Actions per block: *Edit*, *Edit with AI*, *Try it*, *Duplicate*,
+   *Export block*, *Delete*. Per file: *Export file*, *New block in this file*.
+   Header actions: *✦ Create with AI*, *New block*, *Import…*, *Export all*, *Reload*.
 3. **Editor**: edits a whole file in `CodeEditor.tsx`, with a live per-block
-   checklist and errors on the exact line. Opening one block scrolls to it.
-4. **Inspector**: *Save to library…* on custom blocks, asking for a new file
-   or an existing file to add the block to. *From library: X v2 → Update to v3*
-   with a diff on library-derived blocks.
-5. **Import dialog**: one row per *block*, grouped by file, with validation
-   status, clash state (*overwrite / rename / skip*) and expandable code.
-6. **Built-in → library**: *Duplicate to library* copies a built-in (plus its
-   helpers) into a library file. No extras are lost now, because extras are
-   architecture.
+   checklist and errors on the exact line, plus a *Try it* pane. *New block*
+   starts from a commented template (§11).
+4. **Inspector**: library blocks show *From library: X v2* and *Update to
+   v3* (opens the update dialog). A red library block shows *Fix with AI*,
+   which opens §7 with the error. Built-ins show *changed since saved* when
+   applicable. Legacy custom blocks show *Save to library*.
+5. **Update dialog**: the code diff plus the structural impact (§4), with
+   wires that would break highlighted on a mini version of the graph.
+6. **Import dialog**: one row per block, grouped by file, with validation,
+   requirements, clash state and expandable code.
 
-## 7. Phasing
+## 7. Create with AI
+
+This replaces today's AI blocks and the canvas-level draft/fix flow. AI
+always produces a **library block file entry**, through the same validator
+as hand-written ones.
+
+**Flow** (a side panel in the library, also reachable from the palette and
+from a red block's *Fix with AI*):
+
+1. **Describe it.** Free text ("PSI per segment between a reference and a
+   current sample, flag segments above 0.25"). Optional settings:
+   - **Context:** pick a block on the canvas whose output becomes the
+     example input. The AI sees its **schema and column roles only**, the
+     same leakage rules as today (`agent/leakage.py`). Rows are never sent.
+   - **Where:** a new file, or *add to an existing file*. Then the AI also
+     sees that file's other blocks and helpers, reuses helpers and matches
+     the file's style.
+   - **Edit / fix mode:** start from an existing block (*Edit with AI*), or
+     from a red block's code + error + input schema (*Fix with AI*).
+2. **Draft.** The AI returns a full `BLOCKS` entry (ports, form, `measures`,
+   `requires`, `roles`), the function and an `_example_<id>`. The prompt
+   carries the file-format rules and the known `measures`/`table` names, so
+   drafts get hints and a self-check from the start.
+3. **Review.** The panel shows the drafted code in the editor (editable),
+   the live checklist, a preview of the node and params form, and the
+   diff when it is added to an existing file or edits a block.
+4. **Try it.** Runs the example and, if a canvas block was picked as
+   context, a real run on that block's (sampled) output. The result is
+   shown, but nothing is sent back to the AI unless the user clicks *Refine*.
+5. **Refine.** Follow-up instructions ("make alpha a param", "also return a
+   chart") iterate on the draft. A failed *Try it* offers *Fix with AI* with
+   the error filled in.
+6. **Save.** Writes to the library (version 1, or +1 when editing), with an
+   *Add to canvas* checkbox (default on when started from the palette or
+   a red block). For *Fix with AI* on a placed block, saving also runs that
+   block's *Update* step, showing the update dialog when the structure changed.
+
+**Agent builds.** `add_custom_block`/`update_custom_block` are replaced by
+`create_library_block`/`update_library_block`, which call the same draft
+pipeline and validator. To avoid every build filling the user's library,
+an agent build writes into a per-build file `~/.modelmaker/blocks/drafts/<build>.py`.
+The library panel shows that file under *AI drafts* with *Keep* (move to a
+chosen file) and *Discard*. Blocks placed by the build embed their
+definition as usual, so discarding a draft file never breaks the model.
+`BuildOptions.allow_custom_blocks` is renamed `allow_new_blocks`, and the
+`custom_blocks` limit carries over.
+
+## 8. Phasing
 
 | Phase | Scope | Size |
 |---|---|---|
-| **1. Architecture for the extras** | Runner-side sampling, `lazy` port flags in fusion, `sources.py` change detection, hint rule table, `schema_diff` + declarative roles. Built-ins still use `BlockSpec`, but each extra is switched to the new mechanism one at a time, and the existing tests stay green at every step. | L |
-| **2. File format + loader** | `BlockDefinition`, `parse_file`/`validate`, helper-aware compiler emission. Migrate built-ins module by module from `register_block(BlockSpec(...))` to `BLOCKS = {...}`. The goal is an identical registry and identical compiled scripts (checked by snapshot tests on the demo project). | L |
-| **3. Library backend** | Library folder, embedded definitions + `library_ref`, the custom-block merge, API endpoints. | M |
-| **4. UI: browse & add** | Palette section, library panel (read-only), drag to canvas. | M |
-| **5. Authoring** | Editor, *Save to library*, *Duplicate to library*. | M |
-| **6. Import / export + updates** | Preview-then-commit import, file/block export, outdated badge + *Update*. | M |
-| **7. Extras** | TUI, several search paths, library blocks in the AI catalogue (§10). | S each |
+| **1. Architecture for the extras** | Runner-side sampling, `lazy` port flags in fusion, `sources.py`, hint rule table, `schema_diff` + declarative roles. Built-ins still use `BlockSpec`, and each extra is switched over one at a time with the tests green at every step. | L |
+| **2. File format + loader** | `BlockDefinition`, parse/validate, `requires`, helper-aware compiler emission + provenance headers, built-in `sha` pinning. Migrate built-ins module by module, aiming for an identical registry and identical compiled scripts apart from the new header lines (snapshot tests on the demo project). | L |
+| **3. Library backend** | Library folder, embedded definitions + `library_ref`, safe writes, reload, update preview/apply with `renamed`, legacy custom-block loading, CLI `check-blocks`. | M |
+| **4. UI: browse, add, update** | Palette section, library panel, drag to canvas, update dialog, built-in *changed since saved*. | M |
+| **5. Authoring** | Editor + template, *Try it*, *Duplicate to library*, *Save to library* for legacy blocks. | M |
+| **6. Create with AI** | Draft endpoint + prompts, the AI panel, *Edit/Fix with AI*, agent tools moved to library drafts. **Then** remove canvas AI blocks (palette buttons, custom-code create/patch). | M |
+| **7. Import / export** | Preview-then-commit import with hardening (§9), file/block export. | S |
+| **8. Extras** | TUI, several search paths, library blocks in the AI catalogue (§13). | S each |
 
-Phases 1–2 are a refactor of existing code with no user-visible change, and
-they can ship on their own. They are also where most of the risk is, so they
-come first.
+Canvas AI blocks are removed only at the end of phase 6, once Create with
+AI covers everything they did, so there is never a release without a
+way to have AI write a block.
 
-## 8. Risks and decisions
+## 9. Operational details
 
-- **Imported files are code.** Opening someone's project today already
-  means trusting their code. Preview never executes, the import dialog
-  shows the code, and validation only *defines* functions.
+- **Files changing on disk.** A `git pull` in the library folder or a
+  colleague saving on a shared drive changes files under a running server.
+  `GET /api/library` compares directory mtimes and the panel shows *Library
+  changed on disk — Reload*. Reload bumps the library generation, and
+  workers re-import before their next task. Placed blocks are unaffected
+  (they embed their definition) apart from new *Update* badges.
+- **Concurrent edits** are handled by `expected_sha` + atomic replace (§5).
+  Two people saving the same file get a refusal plus a re-apply, never a
+  silent overwrite.
+- **Import hardening.** Only `.py` (or `.zip` of `.py`), max 1 MB per file
+  and 10 MB per upload. Zip entries must be plain names with no directories,
+  `..` or absolute paths (no zip-slip). At most 200 blocks per import.
+  `ast.parse` runs on the size-limited text, and a file that fails to parse
+  is listed as an error, never executed.
+- **Examples run sandboxed by process, not by permission.** *Try it* and
+  `check-blocks` run examples in a worker with a timeout (30 s default),
+  so a hanging example can't freeze the server. They are still trusted code.
+
+## 10. Risks and decisions
+
+- **Imported files are code.** Preview never executes, the import dialog
+  shows the code, validation only *defines* functions, and examples run only
+  on request.
 - **Trust for `aggregate`.** That flag decides which tables an AI build may
-  read row by row. The architecture honors it for `builtin` blocks and for
-  library blocks the user has marked trusted in the panel. Imported blocks
-  arrive untrusted, so their outputs reach the AI as schema + summary
-  statistics only until the user opts in.
-- **Edits never propagate silently** to models (§4). The cost is an
-  explicit *Update* per model.
-- **Id uniqueness across files.** Two files can't both define `psi_test`.
-  This keeps `model.json` references simple (just the id, as today), at the
-  cost of an occasional rename on import.
+  read row by row. It is honored for built-ins and for library blocks the
+  user has marked trusted. Imported blocks, and AI-drafted blocks until they
+  are kept, are untrusted: their outputs reach the AI as schema + summary
+  statistics only.
+- **Nothing changes a model silently:** library edits need *Update*, and
+  built-in changes need *Accept* (§4).
+- **Removing canvas AI blocks** gives up a quick "just make me a block here"
+  flow. *Create with AI* from the palette with *Add to canvas* on is meant to
+  be just as quick: describe it, review, save, and it's on the canvas.
 
-## 9. Migration notes (phase 1–2)
+## 11. Authoring support
+
+- **Template.** *New block* (and a new file) starts from a commented
+  template covering the docstring, a `BLOCKS` entry with every key
+  explained inline, the function and an `_example_`. The template is a
+  built-in file, so it also serves as reference documentation.
+- **Guide.** `docs/block-authoring.md` covers the file rules, port flags
+  (`lazy`, `aggregate`), `measures`/`table` names and what each triggers,
+  `roles`, `requires`, `renamed`, examples and the CLI.
+- **Tag vocabulary.** Tags stay a fixed list (`agent/catalogue.py`'s `TAGS`)
+  so the palette filter and AI catalogue stay coherent. A library folder may
+  add its own in an optional `tags.json`. Unknown tags are flagged, not
+  dropped.
+
+## 12. Migration notes (phases 1–2)
 
 - **Bespoke metadata transforms (~40)** are the biggest unknown. The
-  assumption is that most are "inherit + tag the column a param names with
-  role R" or "add these columns", which `schema_diff` + `roles` cover.
-  Each one gets audited, and any that doesn't fit becomes a new *generic*
-  declarative kind (never a per-block function). If one genuinely can't be
-  expressed, that's a signal to stop and redesign, not to add an escape hatch.
+  assumption is that most are "inherit + tag the column a param names" or
+  "add these columns", which `schema_diff` + `roles` cover. Each one gets
+  audited, and any that doesn't fit becomes a new *generic* declarative kind,
+  never a per-block function. If one genuinely can't be expressed, stop and
+  redesign rather than add an escape hatch.
 - **Hints with structure** (IV tables, data profile, stepwise selection)
-  become `table` kinds with their rules in `hints.py`. The thresholds there
-  stay as they are.
+  become `table` kinds with their rules in `hints.py`.
 - `library.py` (804 lines, mixed I/O and transforms) splits into `io.py` and
   `transforms.py`. The other modules keep their names.
-- `worker_pool.BASE_PRELOAD`, `run_worker` and `catalogue.ensure_blocks_registered`
-  replace their hard-coded module lists with the loader.
+- The agent's custom-block code (`agent/tools.py` `add_custom_block`,
+  `_validate_custom`, `prompts._custom_contract`) is reworked into the
+  library draft pipeline in phase 6, and its leakage checks are reused as-is.
 
-## 10. Open questions
+## 13. Open questions
 
-1. **Should the AI build loop see library blocks?** It would let a build use
-   a team's house blocks. Proposal: phase 7, behind a setting, and only for
-   trusted library blocks.
+1. **Should agent builds be able to *use* library blocks** (not just create
+   drafts)? It would let a build use a team's house blocks. Proposal: phase
+   8, behind a setting, trusted library blocks only.
 2. **Library location default:** `~/.modelmaker/blocks/` or next to the
    projects dir?
-3. **Project-local block files** (`<project>/blocks/`, same format), so a
-   project can ship its own block definitions? They aren't needed for
-   portability (instances embed their code), so they're left out unless
-   there's demand.
+3. **Project-local block files** (`<project>/blocks/`)? They aren't needed
+   for portability (instances embed their code), so they're left out
+   unless there's demand.
+4. **AI drafts retention:** auto-delete discarded or never-kept build draft
+   files after N days, or keep them until the user acts?
