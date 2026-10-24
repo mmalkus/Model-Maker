@@ -1,276 +1,306 @@
 # Block Library — proposal
 
 A user-owned library of reusable blocks: browse it in the UI, add blocks to
-it (from scratch or from a block on the canvas), and import/export blocks as
+it (from scratch or from a block on the canvas), and import/export them as
 files. The goal is to make Model-Maker customizable without touching the
 package source.
 
-**Design constraint:** a library block is exactly **one `.py` file**. No
-manifest, no registry database, no sidecar JSON. Copying the file *is*
-exporting the block; dropping a file into the folder *is* importing it.
+**Design rules**
+
+1. **A block file describes the block's core function and nothing else:**
+   what it computes (a plain function), its interface (ports and params form)
+   and what its outputs *are* (e.g. "this table is aggregate", "this value is a
+   Gini"). Sampling, change detection, streaming, sinks, AI decision hints,
+   privacy of outputs, caching and grouping are **architecture**, applied
+   to every block the same way, built-in or not.
+2. **Blocks live in plain `.py` files, one or more blocks per file.** Group
+   related blocks together (e.g. all PD backtests in `pd_backtests.py`). No
+   manifest, no registry database, no sidecar JSON. Copying a file exports
+   its blocks, and dropping a file into the folder imports them.
+3. **Built-in blocks use the same format.** With the extras moved into
+   the architecture, nothing is left that only a built-in can express, so
+   `modelmaker/blocks/*.py` becomes ordinary block files that ship with the
+   package. There is one loader, one validator and one code path.
 
 ---
 
-## 1. What exists today (and what we reuse)
+## 1. Today vs. proposed
 
-- **Registry blocks** (`modelmaker/blocks/*.py`): a plain function plus a
-  `BlockSpec` registered into `BLOCK_REGISTRY` at import time. Fixed code,
-  and they carry Python-only extras (`lazy_fn`, `probe`, `hints`).
-- **Custom blocks** (`BlockInstance.is_custom=True`): the instance carries
-  its own `code` (exactly one top-level function, see
-  `graph._compile_code_to_fn`), its `inputs`/`outputs` ports and a
-  JSON-declared `metadata_transform` (`metadata_transforms.resolve_metadata_transform`).
-  The runner, the worker pool (`run_worker` gets `code` passed in), the
-  compiler (emits `block.code` verbatim) and project save (code sidecar
-  `.py` via `code_ref`) already handle them end to end.
+Today a registry block is a function plus a `BlockSpec` carrying
+block-specific Python extras. Each of them maps to a piece of shared
+architecture that the block only *describes* its way into:
 
-A custom block is already 90% of a library block: code + ports + metadata
-transform. What it lacks is a name/description/group/tags, a params form, and
-somewhere to live outside a single project.
-
-## 2. Core decision: the library is a set of templates, not registry entries
-
-When a library block is dropped on the canvas it becomes a **custom block
-instance**: a copy of the file's code, ports, metadata transform and form,
-plus a `library_ref` that remembers where it came from.
-
-Why this instead of registering library files into `BLOCK_REGISTRY`:
-
-| | Template (proposed) | Registry entry |
+| Today (per block, Python) | Count | Proposed (architecture, driven by the block's description) |
 |---|---|---|
-| Runner / worker pool / compiler changes | none (custom path already works) | workers must load the library dir; registry reload at runtime |
-| Project portability | automatic: the code is saved in the project's sidecar | a project breaks on a machine without that library file |
-| Editing a library block | never silently changes existing models | changes every model that uses it, including validated ones |
-| Updating instances | explicit "Update from library" (diff shown) | implicit |
+| `sample_rows` param on input blocks | ~10 | The **runner** applies sampling: it calls `.head(n)` on the input block's output, and that pushes down for free when the function returns a `LazyFrame`. Blocks never see `sample_rows`. |
+| `probe=` (`_probe_path_mtime`, `_probe_sql`) | 5 | **Change detection** is picked from the *param kinds*. A form field of kind `path` gets an mtime/size fingerprint, and kind `sql` (+ connection) gets the shared SQL fingerprint. The block only says "this param is a file path". |
+| `lazy_fn=` (read_csv/read_parquet twins + 5 identical reuses) | 7 | An input port marked `"lazy": true` means "this function works on a `LazyFrame`". The **fusion** pass treats a block whose dataframe inputs are all lazy as fusable. Input readers just return `pl.scan_*(...)` and the runner collects at checkpoints, so separate twin functions go away. |
+| `lazy_sink_fn=` (write_csv) | 1 | The same port flag on an output block: when fused, it receives a `LazyFrame`. A writer written as `df.lazy().sink_csv(path)` works in both cases. |
+| `hints=` (`_auc_gini_hints`, `_psi_test_hints`, …) | 31 | **Decision hints become a rule table** in `agent/hints.py`, keyed by *what a value measures*, not by block. An output declares `"measures": {"gini": "gini"}` or a table kind (`"table": "iv"`), and every block emitting a Gini gets the Gini rules. The rule bodies already live mostly in `hints.py` (the thresholds) and are keyed off metric names (`gini`, `ks_statistic`, `psi`, `p_value`), so this is mostly a move. |
+| `aggregate_outputs=` | 11 | A port flag `"aggregate": true`. The **architecture** decides whether to honor it, based on the block's source (see §8), so an imported file can't opt its rows into reaching an LLM. |
+| `metadata_transform=` (20 `infer_dtypes`, 9 generic, ~40 bespoke `_x_meta`/lambdas) | ~70 | The default is **automatic schema-diff inheritance**. Output columns that exist upstream keep their metadata, new ones are inferred, and dropped ones disappear. On top of that, declarative role annotations (`"roles": [{"column_param": "pd_column", "role": "predicted"}]`) cover the "tag the column this param names" pattern most bespoke transforms implement. Migration audits each bespoke transform (see §9). |
+| `group_by`, caching, column-role overrides | n/a | Already architecture. Unchanged. |
 
-For model development, the second-to-last row matters: a validated model
-should not change because someone edited a shared block. Updates are
-explicit, which leaves an audit trail.
-
-## 3. The file format
+## 2. The file format
 
 ```python
-"""Winsorize numeric columns at the given quantiles.
+"""PD backtests: tests that compare predicted PDs with observed defaults.
 
-Clips each listed column to its [lower, upper] quantile range, computed on
-the input frame itself. Longer description shown in the library panel.
+The module docstring describes the file as a whole (shown as the group
+heading in the library panel).
 """
 
-BLOCK = {
-    "name": "winsorize",                 # unique id = file stem; [a-z0-9_]+
-    "display_name": "Winsorize",
-    "version": 1,                        # bumped on each save from the UI
-    "block_type": "standard",            # input | standard | output
-    "group": "preprocessing",            # palette group
-    "tags": ["preprocessing"],
-    "inputs": [{"name": "in", "type": "dataframe"}],
-    "outputs": [{"name": "out", "type": "dataframe"}],
-    "metadata_transform": {"kind": "passthrough"},
-    "form": [
-        {"key": "columns", "label": "Columns", "kind": "columns"},
-        {"key": "lower", "label": "Lower quantile", "kind": "number", "step": 0.01},
-    ],
-    "author": "",
+BLOCKS = {
+    "binomial_test": {
+        "display_name": "Binomial test per grade",
+        "version": 2,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["pd", "validation"],
+        "inputs": [{"name": "in", "type": "dataframe", "lazy": False}],
+        "outputs": [
+            {"name": "table", "type": "dataframe", "aggregate": True, "table": "grade_backtest"},
+            {"name": "metric", "type": "scalar_metric", "measures": {"share_failed": "grade_failures"}},
+        ],
+        "form": [
+            {"key": "grade", "label": "Grade column", "kind": "column"},
+            {"key": "pd_column", "label": "PD column", "kind": "column", "auto_role": "predicted"},
+            {"key": "alpha", "label": "Significance", "kind": "number", "step": 0.01},
+        ],
+    },
+    "jeffreys_test": {
+        "display_name": "Jeffreys test per grade",
+        "version": 1,
+        ...
+    },
 }
 
 
-def winsorize(df: pl.DataFrame, columns: list[str], lower: float = 0.01, upper: float = 0.99) -> pl.DataFrame:
-    import numpy as np  # extra imports go inside the function (see below)
+def binomial_test(df: pl.DataFrame, grade: str, pd_column: str, default_flag: str, alpha: float = 0.05):
+    """Per-grade one-sided binomial test of the observed default count."""
+    from scipy.stats import binomtest
 
-    return df.with_columns(
-        pl.col(c).clip(pl.col(c).quantile(lower), pl.col(c).quantile(upper)) for c in columns
-    )
+    rows = _per_grade(df, grade, pd_column, default_flag)
+    ...
+
+
+def jeffreys_test(df: pl.DataFrame, grade: str, pd_column: str, default_flag: str, alpha: float = 0.05):
+    """Per-grade Jeffreys (beta posterior) test, the ECB's preferred variant."""
+    from scipy.stats import beta
+
+    rows = _per_grade(df, grade, pd_column, default_flag)
+    ...
+
+
+def _per_grade(df, grade, pd_column, default_flag):
+    # shared helper: private (leading underscore), not a block
+    return df.group_by(grade).agg(...)
 ```
 
 Rules (all checked by one `validate()` function):
 
-1. **Module docstring:** the first line is the summary and the rest is the
-   long description. This replaces a separate `description` key.
-2. **`BLOCK` is a pure literal**, read with `ast.literal_eval`, never
-   executed. Listing the library or previewing an import therefore runs
-   **no code**.
-3. **Exactly one top-level function**, the same rule as custom blocks
-   today. `pl` is in scope, and any other import goes inside the function.
-   The compiler emits only the function's source, so module-level imports
-   would be lost from the compiled script. This keeps the
-   "compiles to one clean script" property without changing the compiler.
-4. Every `form[].key` must be a parameter of the function (the same check
-   `register_block` does today).
-5. `metadata_transform` must be one of the JSON kinds `resolve_metadata_transform`
-   already accepts.
-6. Port types must be in `PortType`. Unknown tags are kept but flagged
-   (they won't appear in the AI catalogue's tag browse until added to `TAGS`).
+1. **`BLOCKS` is a pure literal**, read with `ast.literal_eval` and never
+   executed. Listing the library or previewing an import runs **no code**.
+2. **Every key in `BLOCKS` names a public top-level function in the file,
+   and every public top-level function has a key.** Functions starting with
+   `_` are shared helpers, not blocks.
+3. **Each block function's docstring is its description** (first line =
+   summary). The module docstring describes the file and heads its group in
+   the panel.
+4. **Block ids are function names and must be unique across everything
+   loaded** (built-ins + library). The validator rejects a clash. Built-in
+   ids stay what they are today (`auc_gini`, `read_csv`, …), so existing
+   `model.json` files keep working unchanged.
+5. **Only `pl` at module level; other imports go inside functions.** This
+   is today's built-in and custom-block convention. The compiler emits each
+   used block function **plus the helpers it references** (found
+   transitively from the function's AST names), and nothing else from the
+   file. The compiled script stays a single self-contained file.
+6. Every `form[].key` must be a parameter of its function (the same check
+   `register_block` does today). Port types must be in `PortType`.
+   `measures`/`table` names must be known to the hint table; an unknown one
+   is kept but flagged (it gets no hints until a rule exists).
+7. **No executable extras.** There is no key that takes a function. If a
+   block seems to need one, that's a missing piece of architecture: add it
+   there, for every block.
 
-No `lazy_fn`, `probe` or `hints`. Those stay a privilege of built-in blocks,
-the same as custom blocks today. No `aggregate_outputs` either (see §8).
-
-## 4. Where library files live
+## 3. Where block files live
 
 ```
-~/.modelmaker/blocks/            # user library (default; override with MODELMAKER_BLOCK_LIBRARY)
-    winsorize.py
-    psi_by_segment.py
+modelmaker/blocks/               # built-in, shipped with the package, read-only
+    io.py  transforms.py  binning.py  stat_tests.py  modelling.py  ...
+~/.modelmaker/blocks/            # user library (override with MODELMAKER_BLOCK_LIBRARY)
+    pd_backtests.py
+    preprocessing.py
 ```
 
-- A single flat folder. The file stem is the block's id, so ids are unique
-  by construction and a name clash on import is a file-exists clash.
-- The folder can be a git repo or a shared/network drive. Team sharing then
-  needs no extra feature.
-- *(Later, optional)* a second read-only search path such as
-  `MODELMAKER_BLOCK_LIBRARY=~/.modelmaker/blocks:/shared/team-blocks`. The
-  first match wins and the panel shows which path a block came from.
+- Both are scanned by the same loader. Each block carries its source: `builtin`
+  or `library` (plus the file path).
+- The library folder can be a git repo or a shared/network drive, so team
+  sharing needs nothing extra. *(Later:* several search paths.)*
 
-## 5. Backend
+## 4. How a block reaches a model
 
-### New module: `modelmaker/block_library.py` (~200 lines, no state)
-
-Everything is read from disk on request. There is no cache, and that is
-fine for tens to hundreds of small files. If it ever isn't, add an
-mtime-keyed cache.
+All blocks resolve to one internal type:
 
 ```python
 @dataclass
-class LibraryBlock:
-    name: str
-    path: Path
-    meta: dict[str, Any]      # the BLOCK literal
-    summary: str
-    description: str
-    code: str                 # the function source only (what an instance gets)
-    source: str               # the whole file (what export returns)
-    sha: str                  # hash of `source`, used for "update available"
-    errors: list[str]         # validation problems; a broken file still lists, flagged
-
-def library_dir() -> Path
-def list_blocks() -> list[LibraryBlock]
-def load(name: str) -> LibraryBlock
-def parse(source: str) -> LibraryBlock          # ast only, never exec
-def validate(block: LibraryBlock) -> list[str]  # rules in §3, plus a trial _compile_code_to_fn
-def render(meta, docstring, code) -> str        # BLOCK dict + fn back into one file (for "save from canvas")
-def save(source: str, *, overwrite: bool = False) -> LibraryBlock
-def delete(name: str) -> None
+class BlockDefinition:
+    id: str                 # function name
+    meta: dict[str, Any]    # its BLOCKS entry
+    code: str               # the function + the helpers it references
+    source: Literal["builtin", "library", "custom"]
+    origin: str | None      # file path for builtin/library
+    sha: str                # hash of meta + code
 ```
 
-`validate` is the only place that runs code: `_compile_code_to_fn(code)`,
-which defines the function without calling it. It runs on save and import,
-after the user has seen the code.
+- **Built-in block** on the canvas: the instance references the id, as today.
+  The package version defines it.
+- **Library block** on the canvas: the instance **embeds a copy** of the
+  definition (meta + code) and records `library_ref = {file, id, version, sha}`.
+  Because a project keeps the code in its sidecar, it runs on a machine
+  without that library. Editing the library never silently changes a
+  validated model, and the UI shows *Update to vN* with a diff instead.
+- **AI/custom block:** an embedded definition with `source="custom"`. This
+  merges today's `is_custom` path into the same type: a custom block is just
+  a definition that isn't in any file yet, and *Save to library* writes it
+  into one.
 
-### Model change: `BlockInstance.library_ref`
+The runner, compiler, forms, hints and fusion all consume `BlockDefinition`,
+and none of them branch on where the block came from (except §8's
+trust rule for `aggregate`).
+
+## 5. Backend
+
+### `modelmaker/block_library.py` (loader + library I/O, no state)
 
 ```python
-# Set when the block was created from a library file: {"name": ..., "version": ..., "sha": ...}.
-# Descriptive only (outside compute_key), like provenance.
-library_ref: dict[str, Any] | None = None
-# Params form for a custom block (FieldSpec dicts); today only library blocks set it.
-form: list[dict[str, Any]] | None = None
+def parse_file(source: str, origin: str) -> list[BlockDefinition]  # ast only, never exec
+def validate(defs: list[BlockDefinition], taken_ids: set[str]) -> dict[str, list[str]]  # id -> errors
+def load_builtin() -> list[BlockDefinition]       # replaces register_block() at import time
+def list_library() -> list[LibraryFile]           # file -> its blocks + per-block errors
+def save_file(name: str, source: str, *, overwrite=False) -> LibraryFile
+def add_block(file: str | None, definition) -> LibraryFile  # "save to library": new file or append to one
+def extract(file: str, ids: list[str]) -> str     # one file holding just these blocks + their helpers
+def delete_file(name: str) / delete_block(file: str, id: str)
 ```
 
-Both go through `project.graph_to_dict`/`dict_to_graph`. `_form_for_block` in
-`api.py` returns `block.form` for a custom block when it is set (today it
-returns `None`), so library blocks get the same labelled fields as built-ins
-in both the web UI and the TUI.
+`validate` runs code in exactly one place: it defines the functions without
+calling them (the same as `_compile_code_to_fn` today). That happens on save
+and on import, after the user has seen the code. Editing a file with several
+blocks rewrites only that block's `BLOCKS` entry and function, using
+`ast` positions, so comments and the rest of the file stay untouched.
 
-### API (`api.py`)
+### Architecture modules that take over the extras
+
+- `runner.py`: sampling via `.head(n)`; fusion eligibility from `lazy` port flags.
+- `sources.py` (new, small): change-detection strategies by param kind
+  (`path` → mtime/size, `sql` → the existing SQL fingerprint). Replaces `probe`.
+- `agent/hints.py`: rules keyed by `measures`/`table`, replacing the
+  31 per-block hint functions.
+- `metadata_transforms.py`: `schema_diff` as the default, plus declarative
+  `roles`.
+
+### API
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/library` | list: name, display_name, summary, group, tags, ports, version, sha, errors |
-| `GET /api/library/{name}` | full entry incl. code + description |
-| `POST /api/library` | create/overwrite from `{source}` (the editor's full file text) |
-| `POST /api/library/from_block/{block_id}` | "Save to library" for a canvas custom block → `render()` + `save()` |
-| `DELETE /api/library/{name}` | delete the file |
-| `GET /api/library/{name}/export` | the `.py` file as a download |
-| `GET /api/library/export?names=a,b` | `.zip` of several files |
-| `POST /api/library/import/preview` | upload `.py`/`.zip` → parsed entries, errors, conflicts. **Runs no code.** |
-| `POST /api/library/import` | commit the previewed files, with per-file `overwrite`/`rename`/`skip` |
-| `POST /api/blocks` (existing) | gains `library: str`, which expands into the existing custom-block fields + `library_ref` |
-| `POST /api/blocks/{id}/update_from_library` | replace code/ports/transform/form with the current file, keep params that still exist |
+| `GET /api/library` | files → blocks (id, display_name, summary, group, tags, ports, version, sha, errors) |
+| `GET /api/library/files/{file}` | full file source + parsed blocks |
+| `PUT /api/library/files/{file}` | save a whole file from the editor |
+| `POST /api/library/from_block/{block_id}` | *Save to library*: `{file?: existing or new, id, display_name, group}` |
+| `DELETE /api/library/files/{file}` · `DELETE /api/library/files/{file}/blocks/{id}` | delete a file or one block from it |
+| `GET /api/library/export?files=a,b` · `?blocks=x,y` | download a `.py` (one file) or `.zip`. Exporting single blocks uses `extract()` |
+| `POST /api/library/import/preview` | upload `.py`/`.zip` → per-block validation + id clashes. **Runs no code.** |
+| `POST /api/library/import` | commit, choosing per clash: overwrite / rename / skip |
+| `POST /api/blocks` (existing) | gains `library: {file, id}` → embedded definition + `library_ref` |
+| `POST /api/blocks/{id}/update_from_library` | swap in the current definition, keep params that still exist |
 
-`GET /api/graph` marks a block `library_outdated: true` when its
-`library_ref.sha` no longer matches the file. That costs one hash per
-referenced name per poll, or a cheap mtime check.
-
-### Untouched
-
-Runner, worker pool, compiler, cache keys and the AI build loop need no
-changes, because instances are ordinary custom blocks.
+`GET /api/registry` keeps its shape but also lists library blocks (with
+`source` and `file`), so the palette needs one fetch.
 
 ## 6. Frontend
 
-1. **Palette → "Library" group** (`Palette.tsx`): library blocks are listed
-   under their own `group` like registry blocks, with a small badge. Dragging
-   one creates `{kind: 'library', name}`, which maps to `POST /api/blocks
-   {library: name}`. Broken files are shown greyed out with the error as a
-   tooltip.
-2. **Library panel** (new `LibraryPanel.tsx`, opened from the toolbar): a
-   list with search/tag filter, and a detail pane (description, ports,
-   form fields, read-only code). Actions: *New*, *Edit*, *Duplicate*,
-   *Export*, *Delete*, *Import…*, and a multi-select *Export selected*.
-3. **Block editor** (reuse `CodeEditor.tsx`): edits the whole file as text.
-   That keeps one source of truth and avoids a form editor that has to stay
-   in sync with the file. Save → `POST /api/library`, and validation errors
-   show inline. *(Later:* a small form for name/ports/tags that rewrites the
-   `BLOCK` literal.)*
-4. **Inspector on a custom block**: a *Save to library…* button (asks for a
-   name/display name/group). On a library-derived block: "from library
-   `winsorize` v3", plus an *Update to v4* button with a code diff when it
-   is outdated.
-5. **Import dialog**: file picker (`.py` or `.zip`) → preview table (name,
-   summary, ✓/errors, *exists → overwrite / rename / skip*) with the code
-   visible per row → *Import*.
-6. **Built-ins in the library panel**: shown read-only with a *Duplicate to
-   library* action, which writes a single file from the built-in's `fn`
-   source + spec. Built-ins that rely on `lazy_fn`/`probe`/`hints` lose those
-   extras in the copy, and the panel says so.
+Mock: https://claude.ai/artifact/QGEp3iNJeBWGfSStogzAU3 (the library list
+there is still flat; per-file grouping is the change below).
 
-TUI: phase 2. It only needs the palette listing and "add from library",
-both over the same endpoints via `tui/client.py`.
+1. **Palette**: a *Library* section, grouped by file (the file's docstring
+   first line as the heading), with LIB badges. Broken blocks are greyed
+   out with the error as a tooltip.
+2. **Library panel**: a list grouped by file, then block. Search and tag
+   filter. Built-ins are shown read-only under their own files. Block detail
+   shows description, ports, form, *measures* (which hints it gets),
+   change detection and streaming (both derived, shown so the user can see
+   what the architecture will do), and usage in this project. Actions are
+   per block (*Edit*, *Duplicate*, *Export block*, *Delete*) and per file
+   (*Export file*, *New block in this file*).
+3. **Editor**: edits a whole file in `CodeEditor.tsx`, with a live per-block
+   checklist and errors on the exact line. Opening one block scrolls to it.
+4. **Inspector**: *Save to library…* on custom blocks, asking for a new file
+   or an existing file to add the block to. *From library: X v2 → Update to v3*
+   with a diff on library-derived blocks.
+5. **Import dialog**: one row per *block*, grouped by file, with validation
+   status, clash state (*overwrite / rename / skip*) and expandable code.
+6. **Built-in → library**: *Duplicate to library* copies a built-in (plus its
+   helpers) into a library file. No extras are lost now, because extras are
+   architecture.
 
 ## 7. Phasing
 
 | Phase | Scope | Size |
 |---|---|---|
-| **1. Backend core** | `block_library.py` (parse/validate/list/save/delete/render), `library_ref` + `form` on `BlockInstance` + project round-trip, `POST /api/blocks {library}`, list/get/save/delete endpoints. Tests: parse without exec, validation rules, instance round-trip, compile output identical to the equivalent custom block. | M |
-| **2. UI: browse & add** | Palette library group, library panel (read-only), drag to canvas, form rendering for library instances. | M |
-| **3. Authoring** | Editor (new/edit/duplicate), *Save to library* from a canvas block, *Duplicate to library* for built-ins. | M |
-| **4. Import / export** | Single + zip export, preview-then-commit import with conflict handling. | S |
-| **5. Updates** | `library_outdated` flag, *Update from library* with diff. | S |
-| **6. Extras** | TUI support, multiple search paths, AI catalogue integration (§9). | S each |
+| **1. Architecture for the extras** | Runner-side sampling, `lazy` port flags in fusion, `sources.py` change detection, hint rule table, `schema_diff` + declarative roles. Built-ins still use `BlockSpec`, but each extra is switched to the new mechanism one at a time, and the existing tests stay green at every step. | L |
+| **2. File format + loader** | `BlockDefinition`, `parse_file`/`validate`, helper-aware compiler emission. Migrate built-ins module by module from `register_block(BlockSpec(...))` to `BLOCKS = {...}`. The goal is an identical registry and identical compiled scripts (checked by snapshot tests on the demo project). | L |
+| **3. Library backend** | Library folder, embedded definitions + `library_ref`, the custom-block merge, API endpoints. | M |
+| **4. UI: browse & add** | Palette section, library panel (read-only), drag to canvas. | M |
+| **5. Authoring** | Editor, *Save to library*, *Duplicate to library*. | M |
+| **6. Import / export + updates** | Preview-then-commit import, file/block export, outdated badge + *Update*. | M |
+| **7. Extras** | TUI, several search paths, library blocks in the AI catalogue (§10). | S each |
+
+Phases 1–2 are a refactor of existing code with no user-visible change, and
+they can ship on their own. They are also where most of the risk is, so they
+come first.
 
 ## 8. Risks and decisions
 
-- **Imported files are code.** Importing a `.py` is running someone
-  else's Python, the same trust model as opening someone's project today
-  ("trusted, project-local code"). Mitigations that cost little: preview
-  never executes, the import dialog shows the full code, and the
-  validation exec (`_compile_code_to_fn`) runs only on *Import*. Nothing
-  runs until a block is actually executed on the canvas.
-- **`aggregate_outputs` is not allowed in library files.** That flag decides
-  which tables an AI build may read row by row (`agent/tools.summarize_value`).
-  The code comment says it lives on the registry spec "so a block instance
-  (or custom code) can never claim it for itself". Library blocks follow
-  that rule, so an imported file cannot opt its outputs into being sent to
-  an LLM.
-- **Name clashes with built-ins.** Library names live in their own space
-  (instances are custom blocks with `category="lib_<name>"`), so they can
-  never shadow a built-in category.
-- **Edits to library files never propagate silently.** This is deliberate
-  (see §2). The cost is that a bug fix has to be pulled into each model with
-  *Update*. The outdated badge makes that visible.
+- **Imported files are code.** Opening someone's project today already
+  means trusting their code. Preview never executes, the import dialog
+  shows the code, and validation only *defines* functions.
+- **Trust for `aggregate`.** That flag decides which tables an AI build may
+  read row by row. The architecture honors it for `builtin` blocks and for
+  library blocks the user has marked trusted in the panel. Imported blocks
+  arrive untrusted, so their outputs reach the AI as schema + summary
+  statistics only until the user opts in.
+- **Edits never propagate silently** to models (§4). The cost is an
+  explicit *Update* per model.
+- **Id uniqueness across files.** Two files can't both define `psi_test`.
+  This keeps `model.json` references simple (just the id, as today), at the
+  cost of an occasional rename on import.
 
-## 9. Open questions
+## 9. Migration notes (phase 1–2)
 
-1. **Migrate built-ins to the single-file format?** It is tempting for
-   consistency, but built-ins use `lazy_fn`, `probe` and `hints`, which a
-   literal-only `BLOCK` dict can't express. Proposal: not now. Built-ins stay
-   as they are and show read-only in the library panel.
-2. **Should the AI build loop see library blocks?** Adding them to
-   `agent/catalogue.py` would let a build use a team's house blocks, which
-   is valuable. It needs a decision on whether unvalidated user code should
-   be offered to the agent. Proposal: phase 6, behind a setting.
-3. **Library location default.** Is `~/.modelmaker/blocks/` right, or should
-   it sit under the default projects dir so it is visible next to projects?
-4. **Project-local blocks?** A `<project>/blocks/` folder using the same
-   format would let a project ship its own templates. It isn't needed for
-   portability (instances already embed their code), so it is left out
-   unless there's demand.
+- **Bespoke metadata transforms (~40)** are the biggest unknown. The
+  assumption is that most are "inherit + tag the column a param names with
+  role R" or "add these columns", which `schema_diff` + `roles` cover.
+  Each one gets audited, and any that doesn't fit becomes a new *generic*
+  declarative kind (never a per-block function). If one genuinely can't be
+  expressed, that's a signal to stop and redesign, not to add an escape hatch.
+- **Hints with structure** (IV tables, data profile, stepwise selection)
+  become `table` kinds with their rules in `hints.py`. The thresholds there
+  stay as they are.
+- `library.py` (804 lines, mixed I/O and transforms) splits into `io.py` and
+  `transforms.py`. The other modules keep their names.
+- `worker_pool.BASE_PRELOAD`, `run_worker` and `catalogue.ensure_blocks_registered`
+  replace their hard-coded module lists with the loader.
+
+## 10. Open questions
+
+1. **Should the AI build loop see library blocks?** It would let a build use
+   a team's house blocks. Proposal: phase 7, behind a setting, and only for
+   trusted library blocks.
+2. **Library location default:** `~/.modelmaker/blocks/` or next to the
+   projects dir?
+3. **Project-local block files** (`<project>/blocks/`, same format), so a
+   project can ship its own block definitions? They aren't needed for
+   portability (instances embed their code), so they're left out unless
+   there's demand.
