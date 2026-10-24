@@ -6,7 +6,10 @@ import time
 
 import pytest
 
+from modelmaker.blocks.base import PortSpec
 from modelmaker.session import ProjectSession
+
+from .helpers import library_definition
 
 
 @pytest.fixture
@@ -211,11 +214,11 @@ def test_undo_while_a_run_is_in_flight_does_not_disturb_it(session, tmp_path):
     with session.edit():
         slow = session.add_block(
             "slow_block",
-            block_type="standard",
-            inputs=[{"name": "df", "type": "dataframe"}],
-            outputs=[{"name": "out", "type": "dataframe"}],
-            code="def slow_block(df):\n    import time\n    time.sleep(1.5)\n    return df\n",
-            metadata_transform={"kind": "passthrough"},
+            definition=library_definition(
+                "def slow_block(df):\n    import time\n    time.sleep(1.5)\n    return df\n",
+                inputs=[PortSpec("df")],
+                outputs=[PortSpec("out")],
+            ),
         )
     with session.edit():
         session.add_wire(read.id, "out", slow.id, "df")

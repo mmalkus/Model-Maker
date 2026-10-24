@@ -78,7 +78,8 @@ class BuildLimits:
     plan_tool_calls: int = 30
     # The build also plans each stage's blocks now (plan_stage).
     build_tool_calls: int = 200
-    custom_blocks: int = 5
+    # New blocks a build may create (library drafts -- see tools.create_library_block).
+    new_blocks: int = 5
     consecutive_failures_per_block: int = 3
     wall_seconds: float = 20 * 60
 
@@ -94,10 +95,14 @@ class BuildOptions:
     # waiting for the user -- see controller._after_plan_turn and
     # _after_build_turn.
     auto_build: bool = False
-    # Let the build write its own polars code (add_custom_block) when no
-    # registry block does the job. Off: registry blocks only, and the
-    # custom-code tools aren't offered at all (tools.tools_for_phase).
-    allow_custom_blocks: bool = True
+    # Let the build create new blocks (create_library_block, saved to the
+    # block library as AI drafts) when no registry block does the job. Off:
+    # registry blocks only, and those tools aren't offered at all
+    # (tools.tools_for_phase).
+    allow_new_blocks: bool = True
+    # Let the build use blocks from the user's block library (their own,
+    # or ones earlier AI builds created) alongside the built-ins.
+    use_library_blocks: bool = True
     # Small context: each stage starts a fresh conversation (the stage
     # prompt carries what it needs -- the outline, what's built, and the
     # decisions so far) instead of continuing one that grows stage by
@@ -201,7 +206,7 @@ class AgentBuild:
         # can take a minute, during which the user could already act.
         self.turn_over = False
 
-        self.counters = {"plan_tool_calls": 0, "build_tool_calls": 0, "custom_blocks": 0}
+        self.counters = {"plan_tool_calls": 0, "build_tool_calls": 0, "new_blocks": 0}
         self.failures: dict[str, int] = {}
         self.usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
@@ -447,7 +452,7 @@ class AgentBuild:
         the tool's result, or {"error": ...} for anything the model should
         see and react to. Never raises, except that the loop should end
         its conversation once `stop_requested` is set."""
-        from .tools import CUSTOM_TOOLS, TOOLS  # local: tools imports this module
+        from .tools import NEW_BLOCK_TOOLS, TOOLS  # local: tools imports this module
 
         args = args or {}
         tool = TOOLS.get(name)
@@ -457,8 +462,8 @@ class AgentBuild:
                 raise ToolError(f"unknown tool {name!r}")
             if self.phase not in tool.phases:
                 raise ToolError(f"{name} isn't available in the {self.phase} phase")
-            if name in CUSTOM_TOOLS and not self.options.allow_custom_blocks:
-                raise ToolError("custom blocks are turned off for this build -- use registry blocks, or ask_user")
+            if name in NEW_BLOCK_TOOLS and not self.options.allow_new_blocks:
+                raise ToolError("new blocks are turned off for this build -- use registry blocks, or ask_user")
             stage = self.current_stage
             if stage is not None and stage["status"] == STAGE_DONE and not self.finished:
                 # complete_stage ended the turn; a model that keeps going
@@ -501,7 +506,8 @@ class AgentBuild:
                 "final_full_run": self.options.final_full_run,
                 "sample_rows": self.options.sample_rows,
                 "auto_build": self.options.auto_build,
-                "allow_custom_blocks": self.options.allow_custom_blocks,
+                "allow_new_blocks": self.options.allow_new_blocks,
+                "use_library_blocks": self.options.use_library_blocks,
                 "small_context": self.options.small_context,
                 "decision_hints": self.options.decision_hints,
             },

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import types
 from dataclasses import dataclass, field
 from typing import Any
 
-import polars as pl
-
-from .blocks.base import BLOCK_REGISTRY, BlockType, PortSpec
+from .block_library import definition_for
+from .blocks.base import BlockDefinition, BlockType, PortSpec
 
 
 @dataclass
@@ -47,15 +45,18 @@ class BlockInstance:
     params: dict[str, Any]
     inputs: list[PortSpec]
     outputs: list[PortSpec]
-    code_ref: str | None = None
-    code: str | None = None
-    # dict declaration for custom blocks (see metadata_transforms.resolve);
-    # None for registry blocks, whose transform lives in the registry.
-    metadata_transform: dict[str, Any] | None = None
-    # True for an AI-authored block with its own editable code/metadata_transform;
-    # False for a block backed by a fixed BLOCK_REGISTRY entry. Independent of
-    # block_type -- a custom block can be an input, standard, or output block.
-    is_custom: bool = False
+    # A library block's own copy of its definition ({"id", "meta", "code",
+    # "sha", "description"} -- see BlockDefinition.embedded), so the project
+    # runs without the library and a library edit never changes it silently.
+    # None for a built-in, which runs BLOCK_REGISTRY[category].
+    definition: dict[str, Any] | None = None
+    # Where an embedded definition came from: {"file", "id", "version",
+    # "sha"} -- what "Update to vN" compares against. None for a built-in.
+    library_ref: dict[str, Any] | None = None
+    # A built-in's definition sha when the block was placed or last
+    # accepted; differing from the installed one shows "built-in changed
+    # since this model was saved". None for a library block.
+    builtin_sha: str | None = None
     # column name -> ColumnRole value (see packet.py), hand-tagged by the
     # user (see session.set_column_role) and layered on top of whatever role
     # this block's own metadata_transform already computed -- applies to
@@ -102,27 +103,9 @@ class BlockInstance:
     # for every hand-built block.
     provenance: dict[str, Any] | None = None
 
-    def resolved_fn(self):
-        if self.is_custom:
-            return _compile_code_to_fn(self.code or "")
-        return BLOCK_REGISTRY[self.category].fn
-
-    def resolved_metadata_transform(self):
-        if self.is_custom:
-            return self.metadata_transform
-        return BLOCK_REGISTRY[self.category].metadata_transform
-
-
-def _compile_code_to_fn(code: str):
-    # `pl` is available here to match the compiled script's module-level
-    # `import polars as pl` (see compiler.py) -- custom block code should be
-    # able to rely on it being in scope either way.
-    ns: dict[str, Any] = {"pl": pl}
-    exec(code, ns)  # trusted, project-local code; matches the plan's no-sandboxing execution model
-    fns = [v for v in ns.values() if isinstance(v, types.FunctionType)]
-    if len(fns) != 1:
-        raise ValueError("custom block code must define exactly one top-level function")
-    return fns[0]
+    def resolve(self) -> BlockDefinition:
+        """The definition this block runs (see block_library.definition_for)."""
+        return definition_for(self)
 
 
 @dataclass

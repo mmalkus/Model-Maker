@@ -3,6 +3,7 @@ import pytest
 
 from modelmaker.blocks import data_quality
 from modelmaker.packet import ColumnMeta, ColumnRole
+from .helpers import meta_of
 
 
 def test_data_profile_reports_fill_rate_and_dominant_value():
@@ -58,7 +59,7 @@ def test_apply_exclusions_metadata_passes_through_only_the_dataframe_port():
     df = pl.DataFrame({"a": [1, 2]})
     in_meta = {"a": ColumnMeta(dtype="Int64", role=ColumnRole.FEATURE)}
     kept, summary = data_quality.apply_exclusions(df, [])
-    result = data_quality._apply_exclusions_meta({"df": in_meta}, {"out": kept}, {})
+    result = meta_of("apply_exclusions")({"df": in_meta}, {"out": kept}, {})
     assert result == {"out": {"a": in_meta["a"]}}
 
 
@@ -144,12 +145,12 @@ def test_missing_value_treatment_flag_leaves_values_untouched():
     assert out["a"].to_list() == [1.0, None, 3.0]
 
 
-def test_missing_value_treatment_meta_tags_the_strategy_and_the_indicator_column():
+def test_missing_value_treatment_meta_keeps_the_role_and_tags_the_indicator_column():
     df = pl.DataFrame({"a": [1.0, None, 3.0]})
     in_meta = {"a": ColumnMeta(dtype="Float64", role=ColumnRole.FEATURE)}
     out = data_quality.missing_value_treatment(df, {"a": {"method": "mean", "add_indicator": True}})
-    result = data_quality._missing_value_treatment_meta(
+    result = meta_of("missing_value_treatment")(
         {"df": in_meta}, {"out": out}, {"strategies": {"a": {"method": "mean", "add_indicator": True}}}
     )
-    assert "missing_treatment:mean" in result["out"]["a"].tags
+    assert result["out"]["a"].role == ColumnRole.FEATURE
     assert result["out"]["a_was_missing"].role == ColumnRole.FEATURE

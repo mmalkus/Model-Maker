@@ -10,14 +10,52 @@ itself (see compiler.py), not sibling module-level helpers.
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Any
-
 import polars as pl
 
-from ..agent import hints as h
-from ..packet import ColumnMeta, ColumnRole
-from .base import BlockSpec, PortSpec, register_block
+BLOCKS = {
+    "data_profile": {
+        "display_name": "Data profile",
+        "version": 1,
+        "block_type": "output",
+        "group": "quality",
+        "tags": ["data_quality"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "meta": {"inherit": "none"},
+        "hints": "data_profile",
+    },
+    "apply_exclusions": {
+        "display_name": "Apply exclusions",
+        "version": 1,
+        "block_type": "standard",
+        "group": "quality",
+        "tags": ["data_prep", "data_quality"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}, {"name": "summary", "type": "scalar_metric"}],
+        "hints": "apply_exclusions",
+    },
+    "data_quality_rules": {
+        "display_name": "Data quality rules",
+        "version": 1,
+        "block_type": "output",
+        "group": "quality",
+        "tags": ["data_quality"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "meta": {"inherit": "none"},
+        "hints": "data_quality_rules",
+    },
+    "missing_value_treatment": {
+        "display_name": "Missing value treatment",
+        "version": 1,
+        "block_type": "standard",
+        "group": "quality",
+        "tags": ["data_prep", "data_quality"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "meta": {"new_role": "feature"},
+    },
+}
 
 
 def data_profile(df: pl.DataFrame, features: list[str] | None = None) -> dict:
@@ -68,49 +106,6 @@ def data_profile(df: pl.DataFrame, features: list[str] | None = None) -> dict:
     return {"kind": "data_profile", "row_count": n, "columns": rows}
 
 
-def _data_profile_hints(outputs: dict[str, Any]) -> list[str]:
-    cols = h.metric(outputs).get("columns") or []
-    empty = [c["column"] for c in cols if h.num(c.get("fill_rate")) and c["fill_rate"] < h.LOW_FILL_RATE]
-    flat = [
-        c["column"]
-        for c in cols
-        if h.num(c.get("dominant_value_share")) and c["dominant_value_share"] >= h.DOMINANT_SHARE and c["column"] not in empty
-    ]
-    ids = [
-        c["column"]
-        for c in cols
-        if h.num(c.get("distinct_ratio"))
-        and c["distinct_ratio"] >= h.ID_LIKE_DISTINCT
-        and not str(c.get("dtype", "")).startswith("Float")
-    ]
-    hints = []
-    if empty:
-        hints.append(f"Mostly empty (filled < {h.LOW_FILL_RATE:.0%}): {h.names(empty)} -- leave out, or treat the missing values.")
-    if flat:
-        hints.append(f"Near-constant (one value >= {h.DOMINANT_SHARE:.0%}): {h.names(flat)} -- leave out as features.")
-    if ids:
-        hints.append(f"Id-like (almost every value distinct): {h.names(ids)} -- never use as features.")
-    if cols and not hints:
-        hints.append("No empty, constant or id-like columns among those profiled.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="data_profile",
-        block_type="output",
-        group="quality",
-        display_name="Data profile",
-        tags=("data_quality",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=data_profile,
-        metadata_transform=lambda *_a, **_k: {},
-        hints=_data_profile_hints,
-    )
-)
-
-
 def apply_exclusions(df: pl.DataFrame, rules: list[dict]) -> tuple[pl.DataFrame, dict]:
     """Applies a named, ordered list of exclusion rules and keeps every row
     that survives all of them, while recording the population waterfall --
@@ -140,49 +135,6 @@ def apply_exclusions(df: pl.DataFrame, rules: list[dict]) -> tuple[pl.DataFrame,
         "steps": steps,
     }
     return kept, summary
-
-
-def _apply_exclusions_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()  # "summary" is a dict, not a DataFrame -- filtered out before this runs
-    return {"out": {name: in_meta[name] for name in df.columns if name in in_meta}}
-
-
-def _apply_exclusions_hints(outputs: dict[str, Any]) -> list[str]:
-    summary = h.metric(outputs, "summary")
-    start, final = summary.get("starting_population"), summary.get("final_population")
-    if not h.num(start) or not start:
-        return []
-    hints = []
-    for step in summary.get("steps") or []:
-        if step.get("rule") is None:
-            continue
-        if step.get("dropped") == 0:
-            hints.append(f"Rule {step['step']!r} dropped nothing -- check its expression keeps the right rows.")
-        elif h.num(step.get("dropped")) and step["dropped"] / start > h.BIG_EXCLUSION:
-            hints.append(
-                f"Rule {step['step']!r} dropped {step['dropped'] / start:.0%} of the population -- confirm that's "
-                "intended (ask_user if the plan didn't say)."
-            )
-    if not hints and h.num(final):
-        hints.append(f"Exclusions kept {final / start:.0%} of the population; no rule looks off.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="apply_exclusions",
-        block_type="standard",
-        group="quality",
-        display_name="Apply exclusions",
-        tags=("data_prep", "data_quality"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out"), PortSpec("summary", type="scalar_metric")],
-        fn=apply_exclusions,
-        metadata_transform=_apply_exclusions_meta,
-        hints=_apply_exclusions_hints,
-    )
-)
 
 
 def data_quality_rules(df: pl.DataFrame, rules: list[dict]) -> dict:
@@ -264,36 +216,6 @@ def data_quality_rules(df: pl.DataFrame, rules: list[dict]) -> dict:
     }
 
 
-def _data_quality_rules_hints(outputs: dict[str, Any]) -> list[str]:
-    results = h.metric(outputs).get("results") or []
-    errors = [r["name"] for r in results if not r.get("passed") and r.get("severity", "error") == "error"]
-    warnings = [r["name"] for r in results if not r.get("passed") and r.get("severity") == "warning"]
-    hints = []
-    if errors:
-        hints.append(f"Failed: {h.names(errors)} -- fix the data (or ask_user) before modelling on it.")
-    if warnings:
-        hints.append(f"Warnings: {h.names(warnings)} -- mention them in the stage summary.")
-    if results and not hints:
-        hints.append("Every data-quality rule passed.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="data_quality_rules",
-        block_type="output",
-        group="quality",
-        display_name="Data quality rules",
-        tags=("data_quality",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=data_quality_rules,
-        metadata_transform=lambda *_a, **_k: {},
-        hints=_data_quality_rules_hints,
-    )
-)
-
-
 def missing_value_treatment(df: pl.DataFrame, strategies: dict[str, dict]) -> pl.DataFrame:
     """Fills or drops missing values per column under an explicit, named
     strategy -- absent from the tool until now, even though how missing
@@ -343,33 +265,3 @@ def missing_value_treatment(df: pl.DataFrame, strategies: dict[str, dict]) -> pl
     if drop_cols:
         out = out.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in drop_cols]))
     return out
-
-
-def _missing_value_treatment_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    strategies = params.get("strategies", {})
-    result = dict(in_meta)
-    for col, spec in strategies.items():
-        if col in result:
-            existing = result[col]
-            result[col] = replace(existing, tags=[*existing.tags, f"missing_treatment:{spec['method']}"])
-        indicator_col = f"{col}_was_missing"
-        if spec.get("add_indicator") and indicator_col in df.columns:
-            result[indicator_col] = ColumnMeta(dtype=str(df.schema[indicator_col]), role=ColumnRole.FEATURE)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="missing_value_treatment",
-        block_type="standard",
-        group="quality",
-        display_name="Missing value treatment",
-        tags=("data_prep", "data_quality"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=missing_value_treatment,
-        metadata_transform=_missing_value_treatment_meta,
-    )
-)

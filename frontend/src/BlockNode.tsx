@@ -201,6 +201,32 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
             ⟲ {block.group_by}
           </span>
         )}
+        {block.definition_info?.source === 'library' && (
+          <span
+            title={
+              block.definition_info.update_available
+                ? `Library block (${block.definition_info.file}) -- v${block.definition_info.latest_version} is available`
+                : `Library block from ${block.definition_info.file ?? 'an embedded copy'}, v${block.definition_info.version}`
+            }
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: 'var(--brand)',
+              border: '1px solid var(--brand-border)',
+              background: block.definition_info.update_available ? '#fffbeb' : 'var(--brand-light)',
+              borderRadius: 4,
+              padding: '0 4px',
+              flexShrink: 0,
+            }}
+          >
+            LIB{block.definition_info.update_available ? ' ↑' : ''}
+          </span>
+        )}
+        {block.definition_info?.source === 'builtin' && block.definition_info.changed_since_saved && (
+          <span title="This built-in changed since the model was saved -- review it in the inspector" style={{ fontSize: 10, color: '#92400e', flexShrink: 0 }}>
+            changed
+          </span>
+        )}
         {(aiBuilt || aiChanged) && (
           <button
             className="nodrag"

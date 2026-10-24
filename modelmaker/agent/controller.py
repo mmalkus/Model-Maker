@@ -164,7 +164,7 @@ class BuildController:
         return b
 
     def _tools(self, phase: str):
-        return tools_for_phase(phase, allow_custom=self.build.options.allow_custom_blocks)
+        return tools_for_phase(phase, allow_new=self.build.options.allow_new_blocks)
 
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()

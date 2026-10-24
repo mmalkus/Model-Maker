@@ -30,8 +30,9 @@ class InfoPanel(Static):
             lines.append(f"[red]error: {block['last_error']}[/red]")
         if block.get("group_by"):
             lines.append(f"grouped by: {block['group_by']}")
-        if block.get("is_custom"):
-            lines.append("[magenta]AI-authored block[/magenta]")
+        info = block.get("definition_info") or {}
+        if info.get("source") == "library":
+            lines.append(f"[magenta]library block: {info.get('file') or 'not in library'} v{info.get('version')}[/magenta]")
         self.update("\n".join(lines))
 
 
@@ -201,7 +202,6 @@ class CodePanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._area = TextArea(language="python")
-        self._is_custom = False
         self._shown_signature: tuple[Any, ...] | None = None
 
     def compose(self):
@@ -212,9 +212,8 @@ class CodePanel(Vertical):
         # tick -- reloading unconditionally would wipe an in-progress edit
         # (and reset the cursor) every couple of seconds while typing.
         block_id = block["id"] if block is not None else None
-        is_custom = bool(block.get("is_custom")) if block is not None else False
-        code_value = (block.get("code") if is_custom else block.get("source")) if block is not None else None
-        signature = (block_id, is_custom, code_value)
+        code_value = block.get("source") if block is not None else None
+        signature = (block_id, code_value)
         if signature == self._shown_signature:
             return
         self._shown_signature = signature
@@ -222,12 +221,9 @@ class CodePanel(Vertical):
             self._area.load_text("")
             self._area.read_only = True
             return
-        self._is_custom = is_custom
         self._area.load_text(code_value or "")
-        self._area.read_only = not self._is_custom
-
-    def collect_code(self) -> str | None:
-        return self._area.text if self._is_custom else None
+        # Code is edited in the block library, never on a placed block.
+        self._area.read_only = True
 
 
 class AIPanel(Vertical):

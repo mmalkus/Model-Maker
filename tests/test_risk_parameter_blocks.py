@@ -16,9 +16,6 @@ import polars as pl
 import pytest
 
 from modelmaker.blocks.modelling import (
-    _compute_lgd_meta,
-    _forward_default_flag_meta,
-    _moc_meta,
     assign_rating_grade,
     calibrate_model,
     compute_ead,
@@ -38,7 +35,7 @@ from modelmaker.graph import Graph, Wire
 from modelmaker.packet import ColumnMeta, ColumnRole
 from modelmaker.runner import Runner
 
-from .helpers import make_block
+from .helpers import make_block, meta_of
 
 SAMPLE = Path(__file__).resolve().parents[1] / "sample_data"
 
@@ -135,7 +132,7 @@ def test_forward_default_flag_is_the_target():
         "in_default": ColumnMeta("Int64", role=ColumnRole.TARGET),
     }
     params = {"default_col": "in_default", "horizon": 3}
-    meta = _forward_default_flag_meta({"df": in_meta}, {"out": out}, params)["out"]
+    meta = meta_of("forward_default_flag")({"df": in_meta}, {"out": out}, params)["out"]
     assert meta["default_3m"].role == ColumnRole.TARGET
     assert meta["in_default"].role == ColumnRole.EXCLUDED
     assert meta["acct"].role == ColumnRole.ID and meta["month"].role == ColumnRole.DATE
@@ -164,10 +161,10 @@ def test_compute_ead_and_lgd_target_role():
     assert out["ead_predicted"].to_list() == [80.0, 120.0]
 
     lgd_df = pl.DataFrame({"ead": [1.0], "lgd": [0.3]})
-    meta = _compute_lgd_meta({"df": {"ead": ColumnMeta("Float64")}}, {"out": lgd_df}, {})["out"]
+    meta = meta_of("compute_lgd")({"df": {"ead": ColumnMeta("Float64")}}, {"out": lgd_df}, {})["out"]
     assert meta["lgd"].role == ColumnRole.TARGET
     taken = {"ead": ColumnMeta("Float64"), "flag": ColumnMeta("Int64", role=ColumnRole.TARGET)}
-    meta = _compute_lgd_meta({"df": taken}, {"out": lgd_df.with_columns(flag=pl.lit(1))}, {})["out"]
+    meta = meta_of("compute_lgd")({"df": taken}, {"out": lgd_df.with_columns(flag=pl.lit(1))}, {})["out"]
     assert meta["lgd"].role == ColumnRole.FEATURE
 
 
@@ -198,7 +195,7 @@ def test_margin_of_conservatism_moves_the_predicted_role():
     df = pl.DataFrame({"predicted": [0.1, 0.95]})
     out = margin_of_conservatism(df, "predicted", add_on=0.1, multiplier=1.0, cap=1.0)
     assert out["predicted_moc"].to_list() == pytest.approx([0.2, 1.0])
-    meta = _moc_meta({"df": {"predicted": ColumnMeta("Float64", role=ColumnRole.PREDICTED)}}, {"out": out}, {})["out"]
+    meta = meta_of("margin_of_conservatism")({"df": {"predicted": ColumnMeta("Float64", role=ColumnRole.PREDICTED)}}, {"out": out}, {})["out"]
     assert meta["predicted_moc"].role == ColumnRole.PREDICTED
     assert meta["predicted"].role == ColumnRole.FEATURE
 

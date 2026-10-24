@@ -9,18 +9,12 @@ JSON_ONLY_INSTRUCTIONS = """
 Respond with ONLY a single JSON object -- no markdown code fences, no prose \
 before or after it. It must have exactly these keys:
 {
-  "code": "<the complete function definition as a string>",
-  "metadata_transform": {
-    "kind": "passthrough" | "narrow" | "declared",
-    "base": "<input port name, only when kind is 'declared', else null>",
-    "drops": ["<column name>", ...],
-    "adds": [{"name": "...", "dtype": "...", "role": "..."}, ...]
-  },
-  "params": {"<param name>": <default value>, ...},
+  "code": "<Python source: the block function, any _helpers, and its _example_ (or empty)>",
+  "block": {<the block's BLOCKS entry (or {})>},
+  "params": {"<param name>": <value>, ...},
   "explanation": "<one or two sentences>"
 }
-Omit "drops"/"adds"/"base" (send empty list / null) when kind is not \
-"declared". The response must be valid JSON parseable by a standard parser."""
+The response must be valid JSON parseable by a standard parser."""
 
 
 def extract_json_response(text: str) -> dict:
@@ -40,47 +34,63 @@ def extract_json_response(text: str) -> dict:
         return json.loads(brace.group(0))
     raise ValueError(f"model did not return parseable JSON: {text[:500]!r}")
 
-CONTRACT = """You draft a single block's implementation for a visual, \
-Polars-based data pipeline tool. Follow the contract exactly:
+CONTRACT = """You write one block for the block library of a visual, \
+Polars-based model development tool. A block is a plain Python function plus \
+a literal description of it (its BLOCKS entry). Follow the contract exactly:
 
-- Write exactly one top-level Python function named as instructed. It takes \
-`df: pl.DataFrame` as its first parameter, plus any additional parameters you \
-introduce for configurable values (each with a sensible default), and returns \
-a single `pl.DataFrame`.
-- Use only the `polars` library (imported as `pl`). Never use pandas.
-- The function body is inlined verbatim into a generated script and also run \
-directly by the engine -- do not reference anything outside the function \
-(no globals, no I/O, no network calls). It must be a pure function of its \
-arguments.
-- Only reference columns that are listed in the provided input schema. If the \
-instruction implies a new column, add it with `.with_columns(...)`.
-- Never hardcode an *existing* input column's name as a string literal in the \
-function body. For each existing column your logic reads, add a `str` \
-parameter named `<descriptive_name>_col`, defaulting to that column's real \
-name from the input schema, and reference the parameter (e.g. \
-`pl.col(income_col)`) instead of the literal -- this lets the tool re-point \
-the block at a differently-named upstream column later without touching the \
-code. Columns you are newly creating still get fixed, literal names via \
-`.alias(...)`; only pre-existing columns you read need a `_col` parameter.
-- Also produce a `metadata_transform` describing how the function changes the \
-column set, so the tool can track column roles/types without re-executing \
-your code:
-  - kind="passthrough": output columns are exactly the input columns, \
-unchanged (dtype may differ; the tool re-infers dtype either way).
-  - kind="narrow": output columns are a subset of the input columns (e.g. a \
-select/filter that drops columns).
-  - kind="declared": output adds and/or drops specific columns. Set `base` \
-to the input port name ("df"), list any dropped column names in `drops`, and \
-describe every added column in `adds` (name, a short polars dtype string like \
-"Int64"/"Float64"/"Boolean"/"String"/"Date", and a role -- one of id, target, \
-weight, feature, date, segment, excluded, unassigned).
-- If `params` values are provided as suggested defaults, they must match the \
-extra parameter names in your function signature exactly.
-- If existing code and an error are provided, this is a bug-fix request: fix \
-the described error while preserving the function's original intent as \
-closely as possible. Do not rewrite unrelated behavior.
-- Keep `explanation` to one or two plain-English sentences describing what \
-the function does or what you changed and why."""
+`code` -- Python source holding:
+- Exactly one public top-level function: the block. Name it in snake_case for \
+what it does (or as instructed); the name is the block's id. Its first \
+parameters are its input ports (usually `df: pl.DataFrame`), then any \
+configurable values, each with a sensible default. It returns one value per \
+output port (a tuple when there are several).
+- Optional private helpers (names starting with `_`) the block calls.
+- One `_example_<block name>()` function: a self-check that builds a tiny \
+`pl.DataFrame` by hand, calls the block, and `assert`s something meaningful \
+about the result. It must pass.
+- Only `polars` is available at the top (as `pl`; don't import it). Import \
+anything else (numpy, scipy, sklearn) *inside* the function that uses it. \
+No pandas, no file or network I/O, no global state.
+- Give the function a docstring: first line a one-sentence summary, then \
+what it computes, its inputs and outputs, and its parameters.
+- Never hardcode an *existing* input column's name in the body: read it \
+through a `str` parameter named `<descriptive>_col` (or `<descriptive>_cols` \
+for a list) defaulted to the real column name from the input schema. New \
+columns you create get literal names via `.alias(...)`.
+
+`block` -- the BLOCKS entry, a JSON object with these keys:
+- "display_name": short title shown on the canvas.
+- "version": 1 for a new block; the existing version + 1 when changing one.
+- "block_type": "standard" (a transform or test), "input" (no inputs, reads \
+data) or "output" (a report/sink at the end of a branch).
+- "inputs" / "outputs": lists of {"name": <port>, "type": <type>}; types are \
+dataframe, model, scalar_metric, image, master_scale, binning, any. Add \
+"aggregate": true to a dataframe output that is a statistics table (one row \
+per feature/bin/grade/period, never per record). Add "lazy": true to a \
+dataframe input only if the function is pure polars expressions that also \
+work on a pl.LazyFrame (filter/select/with_columns/join/group_by).
+- "form" (optional): [{"key": <param>, "label": <text>, "kind": <kind>}] for \
+params worth a label; kinds: text, number, select (+ "options"), column, \
+columns, checkbox. Every key must be a parameter of the function.
+- "meta" (optional): how output columns get their roles. Columns from an \
+input keep its role; new columns start "unassigned". {"new_role": "feature"} \
+tags every new column a feature; {"roles": [{"column": <name>, "role": \
+<role>}]} tags specific columns (roles: id, target, predicted, weight, \
+feature, date, segment, excluded, unassigned); {"inherit": "none"} for a \
+block whose output is a new table (statistics, a summary).
+- "tags" (optional): from the tag list given below only.
+- "hints" (optional): a decision-hint rule from the list given below, only \
+when this block's outputs have exactly the shape that rule reads.
+- "requires" (optional): pip requirements beyond polars/numpy/scipy/sklearn.
+
+When existing code and an error are given, this is a bug fix: fix the error, \
+keep the block's name, ports and intent, and bump "version". When an existing \
+block is given without an error, change it as instructed and bump "version". \
+When other blocks of the target file are shown, reuse their helpers and match \
+their style instead of duplicating code.
+
+Leave `params` empty. Keep `explanation` to one or two plain-English \
+sentences: what the block does, or what you changed and why."""
 
 CONTRACT_ANALYZE_DATA = """You are analyzing one block's output columns in \
 a visual, Polars-based data pipeline tool, given only column names, dtypes, \
@@ -89,8 +99,8 @@ not writing or configuring any code; ignore the "Function name"/"Fixed \
 function source" framing below, it's an artifact of a shared request format. \
 Follow the contract exactly:
 
-- Leave `code` as an empty string and `metadata_transform` as \
-`{"kind": "passthrough"}` -- both are ignored for this action.
+- Leave `code` as an empty string and `block` as `{}` -- both are ignored \
+for this action.
 - In `params`, add one entry per column worth flagging, keyed by that \
 column's exact name, whose value is a short comma-separated list of \
 lowercase, hyphen-separated tags (e.g. "likely-id, high-cardinality" or \
@@ -115,8 +125,8 @@ the canvas). You are not writing or configuring any code; ignore the \
 "Function name"/"Fixed function source" framing below, it's an artifact of \
 a shared request format. Follow the contract exactly:
 
-- Leave `code` as an empty string and `metadata_transform` as \
-`{"kind": "passthrough"}` -- both are ignored for this action.
+- Leave `code` as an empty string and `block` as `{}` -- both are ignored \
+for this action.
 - In `params`, propose a name for the block itself under the key "name", \
 and a name for each output port under a key exactly matching that port's \
 own name (e.g. "out"). Base each on what the block's instruction/category \
@@ -140,8 +150,8 @@ parameters the instruction implies should change. Only use keys that are \
 real parameter names of the function -- never invent new ones, and never \
 include the dataframe argument(s) themselves.
 - Only reference columns listed in the provided input schema.
-- Leave `code` as an empty string and `metadata_transform` as \
-`{"kind": "passthrough"}` -- both are ignored for this block.
+- Leave `code` as an empty string and `block` as `{}` -- both are ignored \
+for this block.
 - Keep `explanation` to one sentence describing the values you chose and \
 why."""
 
@@ -184,10 +194,8 @@ def bucket_income(df: pl.DataFrame, income_col: str = "income") -> pl.DataFrame:
 ```
 `income` is an existing column being read, so it becomes the `income_col` \
 parameter (defaulted to its real name) instead of a literal; `high_income` is \
-a new column, so it keeps a fixed, literal name via `.alias(...)`. `params` \
-would be `{"income_col": "income"}`, and this adds one boolean column, so \
-`metadata_transform` would be \
-`{"kind": "declared", "base": "df", "drops": [], "adds": [{"name": "high_income", "dtype": "Boolean", "role": "feature"}]}`.
+a new column, so it keeps a fixed, literal name via `.alias(...)`, and the \
+block's "meta" would be `{"new_role": "feature"}`.
 """
 
 
@@ -227,7 +235,7 @@ def format_columns(columns: list[ColumnInfo]) -> str:
 
 
 def build_user_prompt(ctx: DraftContext) -> str:
-    parts = [f"Function name: {ctx.function_name}"]
+    parts = [f"Function name: {ctx.function_name}"] if ctx.function_name else ["Function name: (your choice)"]
 
     if ctx.fixed_source:
         parts += [
@@ -248,6 +256,12 @@ def build_user_prompt(ctx: DraftContext) -> str:
 
     if ctx.existing_code:
         parts += ["", "Existing code:", "```python", ctx.existing_code, "```"]
+
+    if ctx.existing_block:
+        parts += ["", "Its current BLOCKS entry:", json.dumps(ctx.existing_block, indent=2)]
+
+    if ctx.library_context:
+        parts += ["", ctx.library_context]
 
     if ctx.error:
         parts += ["", "This code just failed with the following error -- fix it:", ctx.error, "", f"Additional instruction: {ctx.instruction}"]

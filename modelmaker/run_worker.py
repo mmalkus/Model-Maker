@@ -18,11 +18,36 @@ from __future__ import annotations
 from typing import Any
 
 
+def resolve_fn(category: str, code: str | None):
+    """A block's function inside a worker: a built-in's from the package
+    (`import modelmaker` loads every built-in), a library block's defined
+    from the code the task carries."""
+    if code is not None:
+        from .block_library import compile_fn
+
+        return compile_fn(category, code)
+    from .blocks.base import BLOCK_REGISTRY
+
+    return BLOCK_REGISTRY[category].fn
+
+
+def _collect(value: Any, sample_rows: int | None) -> Any:
+    """A LazyFrame result collected (with sample mode's row cap pushed down
+    first); a DataFrame truncated the same way; anything else as is."""
+    import polars as pl
+
+    if isinstance(value, pl.LazyFrame):
+        return (value.head(sample_rows) if sample_rows is not None else value).collect()
+    if isinstance(value, pl.DataFrame) and sample_rows is not None:
+        return value.head(sample_rows)
+    return value
+
+
 def run_worker_entry(
     category: str,
-    is_custom: bool,
     code: str | None,
     kwargs: dict[str, Any],
+    sample_rows: int | None,
     result_queue: Any,
     task_key: Any,
 ) -> None:
@@ -30,30 +55,18 @@ def run_worker_entry(
     back over `result_queue` as `(task_key, ok, payload)`. Never raises into
     the parent process -- multiprocessing.Process has no return channel of
     its own, so any escaping exception here would simply vanish and leave
-    the parent's `_dispatch` waiting until it notices the process died."""
+    the parent's `_dispatch` waiting until it notices the process died.
+
+    LazyFrame results are collected here (a LazyFrame can't cross the
+    process boundary as data), after sample mode's `.head(sample_rows)` --
+    set only for an input block -- so the row cap reaches the scan."""
     try:
-        if is_custom:
-            from .graph import _compile_code_to_fn
-
-            fn = _compile_code_to_fn(code or "")
-        else:
-            # A freshly spawned interpreter has none of the registry blocks
-            # registered yet -- modelmaker/__init__.py only imports
-            # library.py itself, so modelling.py/stat_tests.py (and any
-            # other block module the running app has loaded) must be
-            # imported explicitly here too, mirroring what api.py does at
-            # startup, or BLOCK_REGISTRY simply won't have `category` yet.
-            import modelmaker.blocks.binning  # noqa: F401
-            import modelmaker.blocks.data_quality  # noqa: F401
-            import modelmaker.blocks.feature_analysis  # noqa: F401
-            import modelmaker.blocks.library  # noqa: F401
-            import modelmaker.blocks.modelling  # noqa: F401
-            import modelmaker.blocks.stat_tests  # noqa: F401
-            import modelmaker.blocks.stochastic  # noqa: F401
-            from .blocks.base import BLOCK_REGISTRY
-
-            fn = BLOCK_REGISTRY[category].fn
+        fn = resolve_fn(category, code)
         result = fn(**kwargs)
+        if isinstance(result, tuple):
+            result = tuple(_collect(v, sample_rows) for v in result)
+        else:
+            result = _collect(result, sample_rows)
         result_queue.put((task_key, True, result))
     except BaseException as e:  # noqa: BLE001 -- must reach the queue, not crash the worker silently
         result_queue.put((task_key, False, f"{type(e).__name__}: {e}"))
@@ -66,8 +79,8 @@ def run_fused_group_entry(
 ) -> None:
     """Entry point for a *streaming run*'s fused group (see
     Runner._build_fusion_groups/_dispatch_fused_group in runner.py) --
-    runs a whole connected DAG of compatible registry blocks (filter/
-    select/groupby_agg/join and read_csv today; see BlockSpec.lazy_fn) as
+    runs a whole connected DAG of fusable blocks (lazy port flags -- see
+    runner._fusable_block) as
     one unbroken polars lazy plan in this single subprocess, and only
     collects at the very end, with the streaming engine -- the one place
     in this app where a source larger than memory doesn't fully
@@ -78,9 +91,9 @@ def run_fused_group_entry(
     topological order over the group, guaranteed by the caller) and
     resolved by block id rather than by "the previous step".
 
-    Each `steps[i]` is `{"id", "category", "kwargs", "chain_inputs",
-    "is_exit", "is_sink"}`: `kwargs` is every param this step's lazy_fn (or
-    lazy_sink_fn, for a sink step) needs *except* the chained ones --
+    Each `steps[i]` is `{"id", "category", "code", "kwargs", "chain_inputs",
+    "is_exit", "is_sink"}`: `kwargs` is every param this step's function
+    needs *except* the chained ones --
     including any already-materialized pl.DataFrame values read from cache
     for a non-chained dataframe input (the caller's job, see
     Runner._real_df_and_meta) -- lazily wrapped here so it joins the same
@@ -96,9 +109,9 @@ def run_fused_group_entry(
     which applies common-subplan elimination across them, so a shared
     upstream stretch (fan-out) is computed once even though it feeds two
     different exits. A step with `is_sink` True is a terminal write (e.g.
-    write_csv, see BlockSpec.lazy_sink_fn): its lazy_fn is never called --
-    instead its `lazy_sink_fn` is called directly on its one chained input
-    and writes straight to disk via the streaming engine, so the block(s)
+    write_csv, see runner._sink_block): its function is called on its one
+    chained, still-lazy input and writes straight to disk via the streaming
+    engine, so the block(s)
     feeding it never need a collected DataFrame at all, in memory or in
     the cache.
 
@@ -113,23 +126,22 @@ def run_fused_group_entry(
     parent, same contract as run_worker_entry above."""
     import polars as pl
 
-    import modelmaker.blocks.library  # noqa: F401 -- see run_worker_entry's comment on this import
-    from .blocks.base import BLOCK_REGISTRY
-
     idx = -1
     schemas: dict[str, dict[str, str]] = {}
     lazy_by_id: dict[str, pl.LazyFrame] = {}
     try:
         exit_ids: list[str] = []
         for idx, step in enumerate(steps):
-            spec = BLOCK_REGISTRY[step["category"]]
+            fn = resolve_fn(step["category"], step.get("code"))
             kwargs = {k: (v.lazy() if isinstance(v, pl.DataFrame) else v) for k, v in step["kwargs"].items()}
             for port, src_id in step["chain_inputs"].items():
                 kwargs[port] = lazy_by_id[src_id]
             if step.get("is_sink"):
-                spec.lazy_sink_fn(**kwargs)
+                fn(**kwargs)
                 continue
-            value = spec.lazy_fn(**kwargs)
+            value = fn(**kwargs)
+            if isinstance(value, pl.DataFrame):
+                value = value.lazy()
             lazy_by_id[step["id"]] = value
             schemas[step["id"]] = {name: str(dtype) for name, dtype in value.collect_schema().items()}
             if step.get("is_exit"):
@@ -165,7 +177,7 @@ def run_iteration_entry(
     eager calls in order, exactly like run_worker_entry's single call,
     repeated for every block in the region.
 
-    Each `steps[i]` is `{"id", "category", "is_custom", "code", "kwargs",
+    Each `steps[i]` is `{"id", "category", "code", "kwargs",
     "chain_inputs", "n_outputs", "wants_iteration_index"}`: `kwargs` is
     every param and already-resolved external (outside-the-region) input
     this step's fn needs; `chain_inputs` maps a kwarg name to
@@ -181,15 +193,6 @@ def run_iteration_entry(
     not the whole region's output, since concatenating that one value
     across iterations is all the parent (_run_region_iterations) needs.
     Never raises into the parent, same contract as the entry points above."""
-    import modelmaker.blocks.feature_analysis  # noqa: F401
-    import modelmaker.blocks.library  # noqa: F401
-    import modelmaker.blocks.modelling  # noqa: F401
-    import modelmaker.blocks.stat_tests  # noqa: F401
-    import modelmaker.blocks.stochastic  # noqa: F401
-
-    from .blocks.base import BLOCK_REGISTRY
-    from .graph import _compile_code_to_fn
-
     idx = -1
     outputs_by_id: dict[str, tuple[Any, ...]] = {}
     try:
@@ -199,8 +202,9 @@ def run_iteration_entry(
                 kwargs[port] = outputs_by_id[src_id][src_port_index]
             if step["wants_iteration_index"]:
                 kwargs["_iteration_index"] = iteration_index
-            fn = _compile_code_to_fn(step["code"] or "") if step["is_custom"] else BLOCK_REGISTRY[step["category"]].fn
+            fn = resolve_fn(step["category"], step.get("code"))
             raw = fn(**kwargs)
+            raw = tuple(_collect(v, None) for v in raw) if isinstance(raw, tuple) else _collect(raw, None)
             n_out = step["n_outputs"]
             outputs_by_id[step["id"]] = (raw,) if n_out <= 1 else tuple(raw)
         result_queue.put((task_key, True, outputs_by_id[collect_source_id][collect_source_port_index]))

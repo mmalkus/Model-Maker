@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-import inspect
 import json
 import os
 import re
@@ -17,20 +15,12 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import blocks as _blocks_pkg  # noqa: F401 -- populates BLOCK_REGISTRY
 from . import gitops, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildController, BuildError
 from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
 from .agent.tools import tools_for_phase
-from .blocks import binning as _binning  # noqa: F401
-from .blocks import data_quality as _data_quality  # noqa: F401
-from .blocks import feature_analysis as _feature_analysis  # noqa: F401
-from .blocks import library as _library  # noqa: F401
-from .blocks import modelling as _modelling  # noqa: F401
-from .blocks import stat_tests as _stat_tests  # noqa: F401
-from .blocks import stochastic as _stochastic  # noqa: F401
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
 from .forms import block_form
@@ -130,17 +120,16 @@ class PortSpecOut(BaseModel):
 
 
 class BlockCreate(BaseModel):
-    category: str
-    block_type: str | None = None
+    # A built-in's id; ignored when `library` is given.
+    category: str = ""
+    # {"file": ..., "id": ...}: place this library block (it embeds a copy
+    # of its definition -- see BlockInstance.definition).
+    library: dict[str, str] | None = None
     name: str | None = None
     lane: str | None = None
     x: float = 0
     y: float = 0
     params: dict[str, Any] = {}
-    code: str | None = None
-    inputs: list[dict] | None = None
-    outputs: list[dict] | None = None
-    metadata_transform: dict[str, Any] | None = None
 
 
 class BlockUpdate(BaseModel):
@@ -148,8 +137,6 @@ class BlockUpdate(BaseModel):
     lane: str | None = None
     position: dict[str, float] | None = None
     params: dict[str, Any] | None = None
-    code: str | None = None
-    metadata_transform: dict[str, Any] | None = None
     # Column to run this block once per distinct value of, instead of once
     # overall (see BlockInstance.group_by) -- like `lane`, an explicit null
     # in the request body clears it (session.update_block applies it
@@ -264,36 +251,38 @@ class LLMSettingsUpdate(BaseModel):
 # ---- helpers -------------------------------------------------------------
 
 
-@functools.lru_cache(maxsize=None)
-def _safe_getsource(fn) -> str | None:
-    """inspect.getsource(), but None instead of raising for a function whose
-    source isn't available (e.g. defined in a REPL or compiled extension).
-    Cached since registry block functions are fixed at import time, and this
-    is called on every /api/graph and /api/blocks/{id} poll."""
+def _definition_or_none(block):
     try:
-        return inspect.getsource(fn)
-    except (OSError, TypeError):
+        return block.resolve()
+    except KeyError:
         return None
 
 
 def _source_for_block(block) -> str | None:
-    """Read-only source for the block's underlying Python function. For
-    custom (is_custom) blocks the editable source is already exposed via
-    `code`; for registry blocks it lives in BLOCK_REGISTRY as a plain
-    function, so pull it with inspect for display purposes only."""
-    if block.is_custom:
-        return None
-    spec = BLOCK_REGISTRY.get(block.category)
-    if spec is None:
-        return None
-    return _safe_getsource(spec.fn)
+    """Read-only source of the code the block runs (the function plus any
+    helpers it uses), for display."""
+    definition = _definition_or_none(block)
+    return definition.code if definition is not None else None
 
 
 def _form_for_block(block) -> dict[str, Any] | None:
-    """The params form for a registry block (see forms.block_form); None
-    for a custom block, whose UI derives its `_col` pickers from params."""
-    spec = None if block.is_custom else BLOCK_REGISTRY.get(block.category)
-    return block_form(spec) if spec is not None else None
+    """The block's params form (see forms.block_form)."""
+    definition = _definition_or_none(block)
+    if definition is None:
+        return None
+    try:
+        return block_form(definition)
+    except Exception:  # noqa: BLE001 -- a library block whose code doesn't define shows no form
+        return None
+
+
+def _definition_info(block) -> dict[str, Any] | None:
+    """Where the block's definition came from and whether it's current --
+    drives the inspector's "From library: X v2", "Update to v3" and
+    "built-in changed since saved" (see library_updates.status_for)."""
+    from .library_updates import status_for
+
+    return status_for(block)
 
 
 def _block_out(block_id: str) -> dict[str, Any]:
@@ -307,17 +296,15 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "stale_reason": SESSION.runner.stale_reason(block_id) if status == "orange" else None,
         "id": block.id,
         "block_type": block.block_type,
-        "is_custom": block.is_custom,
         "category": block.category,
         "name": block.name,
         "lane": block.lane,
         "position": {"x": block.position.x, "y": block.position.y},
         "code_version": block.code_version,
         "params": block.params,
-        "code": block.code,
         "source": _source_for_block(block),
         "form": _form_for_block(block),
-        "metadata_transform": block.metadata_transform,
+        "definition_info": _definition_info(block),
         "inputs": [asdict(p) for p in block.inputs],
         "outputs": [asdict(p) for p in block.outputs],
         "port_names": block.port_names,
@@ -442,6 +429,10 @@ def registry() -> list[dict[str, Any]]:
         {
             "category": spec.category,
             "block_type": spec.block_type,
+            "summary": spec.summary,
+            "origin": spec.origin,
+            "version": spec.version,
+            "sha": spec.sha,
             "group": spec.group or spec.block_type,
             "tags": list(spec.tags),
             "display_name": spec.display_name,
@@ -665,18 +656,20 @@ def set_sample_mode(req: SampleModeUpdate) -> dict[str, Any]:
 def create_block(req: BlockCreate) -> dict[str, Any]:
     try:
         with SESSION.edit():
+            definition = library_ref = None
+            if req.library is not None:
+                from . import library_store
+
+                definition, library_ref = library_store.placeable(req.library["file"], req.library["id"])
             block = SESSION.add_block(
                 category=req.category,
-                block_type=req.block_type,
                 name=req.name,
                 lane=req.lane,
                 x=req.x,
                 y=req.y,
                 params=req.params,
-                code=req.code,
-                inputs=req.inputs,
-                outputs=req.outputs,
-                metadata_transform=req.metadata_transform,
+                definition=definition,
+                library_ref=library_ref,
             )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1180,31 +1173,17 @@ def _provider_for(name: str | None) -> LLMProvider:
 
 
 def _draft_context_for_block(block, block_id: str, instruction: str, error: str | None = None) -> DraftContext:
-    """Build the DraftContext for either flavor of block: custom (is_custom)
-    blocks get the original "author full code" mode; registry blocks have
-    fixed code, so the model can only choose values for their existing
-    parameters ("params_only" mode) -- this is what makes "Draft with AI"
-    available on every block, not just custom ones, without letting the
-    model touch fixed code."""
+    """Build the DraftContext for suggesting a placed block's param values:
+    a block's code is fixed on the canvas (code is written in the block
+    library -- see /api/library/ai/draft), so the model only chooses values
+    for its existing parameters ("params_only" mode)."""
     input_ports = _input_schema_for_block(block_id)
     param_names = list(block.params)
     include_reference = LLM_SETTINGS.include_reference if LLM_SETTINGS.include_reference is not None else False
-
-    if block.is_custom:
-        return DraftContext(
-            instruction=instruction,
-            function_name=block.category,
-            input_ports=input_ports,
-            param_names=param_names,
-            existing_code=block.code,
-            error=error,
-            include_reference=include_reference,
-        )
-
-    spec = BLOCK_REGISTRY.get(block.category)
-    if spec is None:
+    definition = _definition_or_none(block)
+    if definition is None:
         raise HTTPException(400, f"unknown block category: {block.category}")
-    fixed_source = _safe_getsource(spec.fn)
+    fixed_source = definition.code
     return DraftContext(
         instruction=instruction,
         function_name=block.category,
@@ -1219,11 +1198,9 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
 
 @app.post("/api/blocks/{block_id}/draft")
 def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
-    """Draft (or redraft) a block from a natural-language instruction.
-    llm_authored blocks get a full function body proposal; every other
-    block type gets suggested values for its existing parameters only,
-    since their code is fixed. Never applied automatically -- returns the
-    proposal for the caller to review and save via PATCH /api/blocks/{id}."""
+    """Suggest a block's param values from a natural-language instruction.
+    Never applied automatically -- returns the proposal for the caller to
+    review and save via PATCH /api/blocks/{id}."""
     _require_block(block_id)
     block = SESSION.graph.blocks[block_id]
     if not req.instruction.strip():
@@ -1235,19 +1212,15 @@ def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM draft failed: {e}")
-    return {
-        "code": result.code,
-        "metadata_transform": result.metadata_transform,
-        "params": result.params,
-        "explanation": result.explanation,
-    }
+    return {"params": result.params, "explanation": result.explanation}
 
 
 @app.post("/api/blocks/{block_id}/suggest_fix")
 def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, Any]:
-    """AI-assisted fix for a red block: sends the code (or fixed source),
-    params, actual error, and input schema; returns a proposed diff, never
-    auto-applied."""
+    """AI-assisted fix of a red block's params: sends the block's (fixed)
+    code, params, actual error, and input schema; returns proposed params,
+    never auto-applied. A fix to the code itself is made in the library
+    (Fix with AI, /api/library/ai/draft)."""
     _require_block(block_id)
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
@@ -1260,12 +1233,7 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
         result = provider.draft(ctx)
     except Exception as e:
         raise HTTPException(502, f"LLM suggest_fix failed: {e}")
-    return {
-        "code": result.code,
-        "metadata_transform": result.metadata_transform,
-        "params": result.params,
-        "explanation": result.explanation,
-    }
+    return {"params": result.params, "explanation": result.explanation}
 
 
 def _slug(name: str) -> str:
@@ -1564,8 +1532,10 @@ class AgentBuildStart(BaseModel):
     sample_rows: int | None = None
     # Build straight after planning, without waiting for approval.
     auto_build: bool = False
-    # Let the build write custom code blocks (else registry blocks only).
-    allow_custom_blocks: bool = True
+    # Let the build create new blocks (saved to the library as AI drafts).
+    allow_new_blocks: bool = True
+    # Let the build use the user's library blocks alongside the built-ins.
+    use_library_blocks: bool = True
     # A fresh conversation per stage; None = Settings' AI-builder choice.
     small_context: bool | None = None
     # Next-step hints in run results; None = Settings' AI-builder choice.
@@ -1609,7 +1579,8 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         final_full_run=req.final_full_run,
         sample_rows=req.sample_rows,
         auto_build=req.auto_build,
-        allow_custom_blocks=req.allow_custom_blocks,
+        allow_new_blocks=req.allow_new_blocks,
+        use_library_blocks=req.use_library_blocks,
         small_context=LLM_SETTINGS.agent_small_context if req.small_context is None else req.small_context,
         decision_hints=LLM_SETTINGS.agent_decision_hints if req.decision_hints is None else req.decision_hints,
     )
@@ -1686,13 +1657,18 @@ def agent_mcp_tools(x_agent_token: str | None = Header(default=None)) -> list[di
     """The MCP bridge's tool list (see agent/mcp_server.py): the tools for
     the build's current phase."""
     build = _require_agent_token(x_agent_token)
-    return [t.definition() for t in tools_for_phase(build.phase, allow_custom=build.options.allow_custom_blocks)]
+    return [t.definition() for t in tools_for_phase(build.phase, allow_new=build.options.allow_new_blocks)]
 
 
 @app.post("/api/agent/mcp/call")
 def agent_mcp_call(req: AgentToolCall, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
     build = _require_agent_token(x_agent_token)
     return build.call_tool(req.name, req.args)
+
+
+from .library_api import router as _library_router  # noqa: E402 -- reads SESSION from this module at call time
+
+app.include_router(_library_router)
 
 
 # Serve the built frontend (from `npm run build` in frontend/, which emits

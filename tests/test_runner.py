@@ -6,7 +6,7 @@ from modelmaker.cache import CacheStore
 from modelmaker.graph import Graph, Wire
 from modelmaker.runner import Runner
 
-from .helpers import make_block
+from .helpers import make_block, set_code
 
 
 def _classification_graph(tmp_path):
@@ -207,7 +207,7 @@ def test_custom_block_code_has_polars_available_without_local_import(tmp_path):
         code="def bucket_income(df: pl.DataFrame) -> pl.DataFrame:\n    return df.with_columns((pl.col('a') > 1).alias('high_a'))\n",
         inputs=[graph.blocks["b_filter"].inputs[0]],
         outputs=[graph.blocks["b_filter"].outputs[0]],
-        metadata_transform={"kind": "declared", "base": "df", "adds": [{"name": "high_a", "dtype": "Boolean"}]},
+        meta={"new_role": "feature"},
         x=2,
     )
     graph.wires["w2"] = Wire("w2", "b_read", "out", "b_custom", "df")
@@ -466,7 +466,7 @@ def test_cancel_stops_an_in_flight_block_without_waiting_it_out(tmp_path):
         code="def slow_block(df):\n    import time\n    time.sleep(5)\n    return df\n",
         inputs=list(graph.blocks["b_filter"].inputs),
         outputs=list(graph.blocks["b_filter"].outputs),
-        metadata_transform={"kind": "passthrough"},
+
         x=2,
     )
     graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
@@ -505,7 +505,7 @@ def test_running_elapsed_reports_none_when_idle_and_a_growing_value_mid_dispatch
         code="def slow_block(df):\n    import time\n    time.sleep(2)\n    return df\n",
         inputs=list(graph.blocks["b_filter"].inputs),
         outputs=list(graph.blocks["b_filter"].outputs),
-        metadata_transform={"kind": "passthrough"},
+
         x=2,
     )
     graph.wires["w2"] = Wire("w2", "b_read", "out", "b_slow", "df")
@@ -543,7 +543,7 @@ def test_worker_crash_is_reported_as_a_red_block_not_a_hang(tmp_path):
         code="def crashy_block(df):\n    import os\n    os._exit(1)\n",
         inputs=list(graph.blocks["b_filter"].inputs),
         outputs=list(graph.blocks["b_filter"].outputs),
-        metadata_transform={"kind": "passthrough"},
+
         x=2,
     )
     graph.wires["w2"] = Wire("w2", "b_read", "out", "b_crash", "df")
@@ -599,25 +599,29 @@ def test_sample_mode_truncates_at_the_source_and_flows_downstream(tmp_path):
     assert out.data.height == 5
 
 
-def test_sample_rows_injected_only_for_input_blocks_that_accept_the_param(tmp_path):
-    # A custom input block naming `sample_rows` in its signature (the same
-    # opt-in convention as output_dir/block_id) gets the live sample size
-    # passed straight in, rather than reading everything and being
-    # truncated after the fact.
-    code = "def custom_source(sample_rows: int | None = None) -> pl.DataFrame:\n    return pl.DataFrame({'sample_rows': [sample_rows]})\n"
-    block = make_block("b_custom", "custom_source", block_type="input", code=code, outputs=[PortSpec("out")])
-    graph = Graph(blocks={"b_custom": block})
+def test_sample_mode_truncates_every_input_block_without_it_knowing(tmp_path):
+    # The runner applies sample mode itself: an eager input block's output
+    # is cut to the first N rows, a lazy one gets .head(n) pushed into its
+    # scan. No block declares or receives a sample_rows param.
+    eager = make_block(
+        "b_eager", "x", block_type="input", outputs=[PortSpec("out")],
+        code="def eager_source() -> pl.DataFrame:\n    return pl.DataFrame({'a': list(range(20))})\n",
+    )
+    lazy = make_block(
+        "b_lazy", "x", block_type="input", outputs=[PortSpec("out", lazy=True)],
+        code="def lazy_source() -> pl.LazyFrame:\n    return pl.LazyFrame({'a': list(range(20))})\n",
+    )
+    graph = Graph(blocks={"b_eager": eager, "b_lazy": lazy})
     runner = Runner(graph, CacheStore(), sample_rows=7)
-    runner.run_block("b_custom")
+    for bid in ("b_eager", "b_lazy"):
+        assert runner.run_block(bid) == "green", runner.state[bid].last_error
+        out = runner.cache.get(runner.state[bid].last_successful_key).outputs["out"]
+        assert out.data["a"].to_list() == list(range(7))
 
-    out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
-    assert out.data["sample_rows"].to_list() == [7]
-
-    # Full mode (sample_rows=None) never injects the kwarg at all.
     runner.sample_rows = None
-    runner.run_block("b_custom")
-    out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
-    assert out.data["sample_rows"].to_list() == [None]
+    runner.run_block("b_lazy")
+    out = runner.cache.get(runner.state["b_lazy"].last_successful_key).outputs["out"]
+    assert out.data.height == 20
 
 
 def test_toggling_sample_mode_invalidates_the_graph_and_returns_to_the_full_key(tmp_path):
@@ -691,14 +695,13 @@ def test_stale_reason_reports_a_code_edit_and_a_source_re_read(tmp_path):
         code="def my_block(df):\n    return df\n",
         inputs=list(graph.blocks["b_filter"].inputs),
         outputs=list(graph.blocks["b_filter"].outputs),
-        metadata_transform={"kind": "passthrough"},
+
         x=3,
     )
     graph.blocks["b_custom"] = custom
     graph.wires["w3"] = Wire("w3", "b_read", "out", "b_custom", "df")
     runner.run_block("b_custom")
-    custom.code = "def my_block(df):\n    return df.head(1)\n"
-    custom.code_version += 1
+    set_code(custom, "def my_block(df):\n    return df.head(1)\n")
     assert runner.stale_reason("b_custom") == "its code changed"
 
 
@@ -730,7 +733,7 @@ def _slow_block(graph, version: str):
         ),
         inputs=list(graph.blocks["b_filter"].inputs),
         outputs=list(graph.blocks["b_filter"].outputs),
-        metadata_transform={"kind": "passthrough"},
+
         x=5,
     )
 
@@ -750,8 +753,7 @@ def test_a_code_edit_mid_run_cannot_mix_itself_into_the_running_block(tmp_path):
     thread.start()
     _wait_until_running(runner)
     # The edit lands while the block is mid-flight.
-    graph.blocks["b_slow"].code = graph.blocks["b_slow"].code.replace("'v1'", "'v2'")
-    graph.blocks["b_slow"].code_version += 1
+    set_code(graph.blocks["b_slow"], graph.blocks["b_slow"].definition["code"].replace("'v1'", "'v2'"))
     thread.join(timeout=60)
     assert not thread.is_alive()
 

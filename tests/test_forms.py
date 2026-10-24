@@ -1,4 +1,4 @@
-"""Params forms (modelmaker/forms.py): each registry block's BlockSpec.form
+"""Params forms (modelmaker/forms.py): each block's BLOCKS "form"
 plus fields inferred from its signature, served with the block to the web
 UI and the TUI -- and the TUI's reading of them."""
 
@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 import modelmaker.api as api_module
 from modelmaker.agent.catalogue import INJECTED_PARAMS
-from modelmaker.blocks.base import BLOCK_REGISTRY, BlockSpec, FieldSpec, PortSpec, register_block
+from modelmaker.block_library import parse_source, validate
+from modelmaker.blocks.base import BLOCK_REGISTRY
 from modelmaker.forms import block_form, infer_field
 from modelmaker.session import ProjectSession
 from modelmaker.tui.paramspecs import field_specs_for, json_param_keys
@@ -64,23 +65,13 @@ def test_inference_rules():
 
 
 def test_a_form_field_must_be_a_real_param():
-    def fn(df, a: int = 1):
-        return df
-
-    with pytest.raises(ValueError, match="aren't params"):
-        register_block(
-            BlockSpec(
-                category="_bad_form",
-                block_type="standard",
-                display_name="bad",
-                inputs=[PortSpec("df")],
-                outputs=[PortSpec("out")],
-                fn=fn,
-                metadata_transform=lambda *_a, **_k: {},
-                form=(FieldSpec("b", "B", "number"),),
-            )
-        )
-    assert "_bad_form" not in BLOCK_REGISTRY
+    source = (
+        'BLOCKS = {"bad_form": {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}],'
+        ' "form": [{"key": "b", "label": "B", "kind": "number"}]}}\n\n'
+        "def bad_form(df, a: int = 1):\n    return df\n"
+    )
+    parsed = validate(parse_source(source, "bad.py"))
+    assert parsed.errors["bad_form"] == ["form field 'b' isn't a parameter of bad_form()"]
 
 
 @pytest.fixture
@@ -95,26 +86,9 @@ def test_forms_are_served_with_the_registry_and_each_block(client):
 
     block = client.post("/api/blocks", json={"category": "groupby_agg"}).json()
     assert block["form"] == block_form(BLOCK_REGISTRY["groupby_agg"])
-    custom = client.post(
-        "/api/blocks",
-        json={
-            "category": "mine",
-            "block_type": "standard",
-            "inputs": [{"name": "df", "type": "dataframe"}],
-            "outputs": [{"name": "out", "type": "dataframe"}],
-            "metadata_transform": {"kind": "passthrough"},
-            "code": "def mine(df, amount_col: str = 'a'):\n    return df\n",
-            "params": {"amount_col": "a"},
-        },
-    ).json()
-    assert custom["form"] is None
 
 
 def test_tui_reads_the_served_form():
-    block = {"category": "groupby_agg", "is_custom": False, "params": {}, "form": block_form(BLOCK_REGISTRY["groupby_agg"])}
+    block = {"category": "groupby_agg", "params": {}, "form": block_form(BLOCK_REGISTRY["groupby_agg"])}
     assert [f.key for f in field_specs_for(block)] == ["by"]
     assert json_param_keys(block) == ["aggs"]
-
-    custom = {"category": "mine", "is_custom": True, "params": {"amount_col": "a", "rate": 0.1}, "form": None}
-    assert [(f.key, f.kind) for f in field_specs_for(custom)] == [("amount_col", "column")]
-    assert json_param_keys(custom) is None

@@ -12,8 +12,6 @@ import pytest
 
 from modelmaker.blocks.feature_analysis import characteristic_stability, target_trend
 from modelmaker.blocks.library import (
-    _derive_columns_meta,
-    _one_hot_meta,
     derive_columns,
     groupby_agg,
     join,
@@ -22,6 +20,7 @@ from modelmaker.blocks.library import (
     train_test_split,
 )
 from modelmaker.packet import ColumnMeta, ColumnRole
+from .helpers import meta_of
 
 
 def test_time_split_on_iso_strings_and_dates():
@@ -67,7 +66,7 @@ def test_derive_columns_adds_features_and_keeps_replaced_roles():
 
     in_meta = {c: ColumnMeta(dtype=str(df.schema[c])) for c in df.columns}
     in_meta["age"] = ColumnMeta(dtype="Int64", role=ColumnRole.SEGMENT)
-    meta = _derive_columns_meta({"df": in_meta}, {"out": out}, {})["out"]
+    meta = meta_of("derive_columns")({"df": in_meta}, {"out": out}, {})["out"]
     assert meta["util"].role == ColumnRole.FEATURE
     assert meta["age"].role == ColumnRole.SEGMENT
 
@@ -86,7 +85,7 @@ def test_one_hot_encode_drops_reference_level_and_guards_ids():
     reordered = one_hot_encode(df.reverse(), ["product"])
     assert [c for c in reordered.columns if c.startswith("product_")] == dummies
 
-    meta = _one_hot_meta({"df": {"product": ColumnMeta("String"), "x": ColumnMeta("Int64")}}, {"out": out}, {})["out"]
+    meta = meta_of("one_hot_encode")({"df": {"product": ColumnMeta("String"), "x": ColumnMeta("Int64")}}, {"out": out}, {})["out"]
     assert all(meta[c].role == ColumnRole.FEATURE for c in dummies)
 
     with pytest.raises(ValueError, match="max_categories"):
@@ -137,6 +136,10 @@ def test_join_accepts_the_old_outer_name_and_rejects_cross():
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # polars warns on "outer"; the block maps it first
         assert join(left, right, ["k"], how="outer").equals(full)
-    assert join(left.lazy(), right.lazy(), ["k"], how="outer").collect().equals(full)
+    # A full join's row order isn't guaranteed (and differs between eager and
+    # lazy in polars 2), so compare the rows, not their order.
+    by = ["k", "k_right"]
+    lazy = join(left.lazy(), right.lazy(), ["k"], how="outer").collect()
+    assert lazy.sort(by, nulls_last=True).equals(full.sort(by, nulls_last=True))
     with pytest.raises(ValueError, match="cross"):
         join(left, right, ["k"], how="cross")

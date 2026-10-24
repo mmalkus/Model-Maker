@@ -60,9 +60,10 @@ def test_block_row_count_is_configurable_and_a_prefix_of_the_full_data(df):
 
 
 def test_block_honours_sample_mode(df):
-    assert demo_credit_data(sample_rows=50).equals(df.head(50))
-    # Sampling never asks for more rows than the block was configured with.
-    assert demo_credit_data(n_rows=30, sample_rows=50).height == 30
+    graph = Graph(blocks={"b_demo": make_block("b_demo", "demo_credit_data")}, wires={})
+    runner = Runner(graph, CacheStore(), sample_rows=50)
+    runner.refresh("b_demo")
+    assert runner.cache.get(runner.state["b_demo"].last_successful_key).outputs["out"].data.equals(df.head(50))
 
 
 def test_block_compiles_and_matches_engine_output():

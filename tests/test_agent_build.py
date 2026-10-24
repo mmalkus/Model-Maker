@@ -412,7 +412,7 @@ def test_excluded_columns_cannot_be_features(prepared):
     r = b.call_tool("add_block", {"category": "logistic_regression", "lane": "est", "params": {"features": ["dti", "interest_rate"]}})
     assert "excluded" in r["error"] and "interest_rate" in r["error"]
     code = 'def f(df, a_col: str = "dti"):\n    return df.with_columns(pl.col("interest_rate").alias("ir"))\n'
-    r = b.call_tool("add_custom_block", {"lane": "est", "name": "leak", "code": code, "metadata_transform": {"kind": "passthrough"}})
+    r = b.call_tool("create_library_block", {"lane": "est", "name": "leak", "code": code})
     assert "excluded" in r["error"]
 
 
@@ -434,24 +434,32 @@ def test_output_summary_never_contains_rows_or_text_values(prepared):
     assert "APP000001" not in str(out) and "West" not in str(out)
 
 
-def test_custom_block_contract_is_checked(prepared):
+def test_new_block_contract_is_checked_and_the_block_lands_in_the_library(prepared):
+    from modelmaker import library_store
+
     session, anchor = prepared
     b = building(session, anchor)
-    bad = b.call_tool("add_custom_block", {"lane": "x", "name": "n", "code": "def f(data):\n    return data\n", "metadata_transform": {"kind": "passthrough"}})
-    assert "first parameters" in bad["error"]
+    bad = b.call_tool("create_library_block", {"lane": "x", "name": "n", "code": "def f(data):\n    return data\n"})
+    assert "input port(s) ['df'] aren't parameters" in bad["error"]
+    clash = b.call_tool("create_library_block", {"lane": "x", "name": "n", "code": "def filter(df):\n    return df\n"})
+    assert "registry block" in clash["error"]
     good = b.call_tool(
-        "add_custom_block",
+        "create_library_block",
         {
             "lane": "Feature engineering",
             "name": "income per year",
             "code": 'def income_ratio(df, income_col: str = "annual_income", loan_col: str = "loan_amount"):\n'
             '    return df.with_columns((pl.col(loan_col) / pl.col(income_col)).alias("loan_to_income"))\n',
-            "metadata_transform": {"kind": "declared", "base": "df", "drops": [], "adds": [{"name": "loan_to_income", "dtype": "Float64", "role": "feature"}]},
+            "meta": {"new_role": "feature"},
         },
     )
     assert "block" in good, good
     blk = session.graph.blocks[good["block"]]
-    assert blk.is_custom and blk.params == {"income_col": "annual_income", "loan_col": "loan_amount"}
+    assert blk.definition is not None and blk.params == {"income_col": "annual_income", "loan_col": "loan_amount"}
+    # Saved to this build's drafts file in the library, and placed from there.
+    assert blk.library_ref["file"] == f"drafts/build_{b.id}.py"
+    draft = library_store.get_file(blk.library_ref["file"])
+    assert draft.is_draft and draft.definition("income_ratio").display_name == "income per year"
     assert session.graph.lanes[blk.lane].name == "Feature engineering"
     b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": blk.id, "to_port": "df"})
     ran = b.call_tool("run_to", {"block": blk.id})
@@ -836,15 +844,14 @@ def test_statistics_tables_are_capped(prepared, monkeypatch):
     assert 0 < len(bins["rows"]) < bins["row_count"] and len(json.dumps(bins["rows"])) <= 600
 
 
-def test_custom_blocks_never_count_as_statistics_tables(prepared):
-    """A custom block can return anything -- df.head(10) included -- so its
+def test_library_blocks_never_count_as_statistics_tables(prepared):
+    """A library block can return anything -- df.head(10) included -- so its
     rows stay hidden even when it only reshapes a statistics table."""
     session, anchor = prepared
     b = building(session, anchor)
     fit, _ = _binned(session, anchor, b)
     code = 'def top_iv(summary, iv_col: str = "iv"):\n    return summary.filter(pl.col(iv_col) > 0.02)\n'
-    custom = b.call_tool("add_custom_block", {"lane": "est", "name": "strong", "inputs": ["summary"], "code": code,
-                                              "metadata_transform": {"kind": "passthrough"}})["block"]
+    custom = b.call_tool("create_library_block", {"lane": "est", "name": "strong", "inputs": ["summary"], "code": code})["block"]
     b.call_tool("connect", {"from_block": fit, "from_port": "summary", "to_block": custom, "to_port": "summary"})
     assert b.call_tool("run_to", {"block": custom})["status"] == "green"
     out = b.call_tool("get_output_summary", {"block": custom})
@@ -852,12 +859,13 @@ def test_custom_blocks_never_count_as_statistics_tables(prepared):
 
 
 def test_only_dataframe_outputs_can_be_statistics_tables():
-    from modelmaker.blocks.base import BlockSpec, PortSpec, register_block
+    from modelmaker.block_library import parse_source, validate
 
-    spec = BlockSpec("x_bad", "standard", "x", [PortSpec("df")], [PortSpec("model", type="model")], fn=lambda df: df,
-                     metadata_transform=lambda *a: None, aggregate_outputs=("model",))
-    with pytest.raises(ValueError, match="aren't dataframe outputs"):
-        register_block(spec)
+    source = (
+        'BLOCKS = {"x_bad": {"inputs": [{"name": "df"}], "outputs": [{"name": "model", "type": "model", "aggregate": True}]}}\n'
+        "def x_bad(df):\n    return {}\n"
+    )
+    assert validate(parse_source(source, "x.py")).errors["x_bad"] == ["port 'model': only a dataframe output can be aggregate"]
 
 
 def test_the_catalogue_marks_statistics_tables():
@@ -868,27 +876,27 @@ def test_the_catalogue_marks_statistics_tables():
     assert "statistics_table" not in catalogue.describe_block_type("logistic_regression")["outputs"][0]
 
 
-# ---- custom blocks turned off ------------------------------------------------------------
+# ---- new blocks turned off ------------------------------------------------------------
 
 
-def test_custom_blocks_can_be_turned_off(prepared):
+def test_new_blocks_can_be_turned_off(prepared):
     from modelmaker.agent import prompts
     from modelmaker.agent.tools import tools_for_phase
 
     session, anchor = prepared
     b = staged(session, anchor)
-    b.options.allow_custom_blocks = False
-    names = {t.name for t in tools_for_phase(BUILDING, allow_custom=False)}
-    assert "add_block" in names and not names & {"add_custom_block", "update_custom_block"}
+    b.options.allow_new_blocks = False
+    names = {t.name for t in tools_for_phase(BUILDING, allow_new=False)}
+    assert "add_block" in names and not names & {"create_library_block", "update_library_block"}
     code = 'def f(df):\n    return df\n'
-    r = b.call_tool("add_custom_block", {"lane": "est", "name": "n", "code": code, "metadata_transform": {"kind": "passthrough"}})
+    r = b.call_tool("create_library_block", {"lane": "est", "name": "n", "code": code})
     assert "turned off" in r["error"]
     r = b.call_tool("plan_stage", {"steps": [{"ref": "s1", "category": "custom", "instruction": "x", "name": "n", "why": "",
                                               "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]})
     assert "turned off" in r["error"]
     system = prompts.build_system(b)
-    assert "Custom blocks are turned off" in system and "add_custom_block" not in system
-    assert "add_custom_block" not in prompts.plan_system(b)
+    assert "New blocks are turned off" in system and "create_library_block" not in system
+    assert "create_library_block" not in prompts.plan_system(b)
 
 
 def test_a_suspicious_feature_in_a_model_is_flagged_by_the_app(prepared):
@@ -956,12 +964,11 @@ def test_a_custom_step_hands_back_to_the_model(prepared):
          "inputs": [{"port": "df", "from": "est1", "from_port": "out"}]},
     ]
     r = b.call_tool("plan_stage", {"steps": steps})
-    assert r["stopped_at"] == "est1" and r["steps"][0]["status"] == "needs_code" and "add_custom_block" in r["next"]
+    assert r["stopped_at"] == "est1" and r["steps"][0]["status"] == "needs_code" and "create_library_block" in r["next"]
     code = ('def ratio(df, a_col: str = "loan_amount", b_col: str = "annual_income"):\n'
             '    return df.with_columns((pl.col(a_col) / pl.col(b_col)).alias("loan_to_income"))\n')
-    custom = b.call_tool("add_custom_block", {"lane": "est", "name": "ratio", "code": code, "plan_step": "est1",
-                                              "metadata_transform": {"kind": "declared", "base": "df", "drops": [],
-                                                                     "adds": [{"name": "loan_to_income", "dtype": "Float64", "role": "feature"}]}})
+    custom = b.call_tool("create_library_block", {"lane": "est", "name": "ratio", "code": code, "plan_step": "est1",
+                                                  "meta": {"new_role": "feature"}})
     b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": custom["block"], "to_port": "df"})
     r = b.call_tool("build_stage", {})
     assert r["ok"] and [st["status"] for st in r["steps"]] == ["green", "green"], r
@@ -1119,3 +1126,93 @@ def test_a_tag_used_as_a_block_gets_its_blocks_named(prepared):
     assert "that's a tag, not a block; its blocks are: train_test_split, time_split" in r["error"]
     assert "did you mean logistic_regression" in r["error"]
     assert "its blocks are" in b.call_tool("add_block", {"category": "sampling", "lane": "est"})["error"]
+
+
+# ---- the user's library blocks ------------------------------------------------------------
+
+_RATIO = (
+    'def loan_to_income(df, loan_col: str = "loan_amount", income_col: str = "annual_income"):\n'
+    '    """Adds loan_to_income: the loan amount over annual income."""\n'
+    '    return df.with_columns((pl.col(loan_col) / pl.col(income_col)).alias("loan_to_income"))\n'
+)
+
+
+def _user_library_block():
+    from .helpers import write_library_file
+
+    write_library_file(
+        "ratios.py",
+        {
+            "loan_to_income": {
+                "display_name": "Loan to income",
+                "tags": ["data_prep"],
+                "inputs": [{"name": "df"}],
+                "outputs": [{"name": "out"}],
+                "meta": {"new_role": "feature"},
+            },
+            # Input blocks stay the user's to place; broken blocks are never offered.
+            "my_source": {"block_type": "input", "outputs": [{"name": "out"}]},
+            "broken": {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}], "form": [{"key": "nope", "kind": "text"}]},
+        },
+        _RATIO + "\n\ndef my_source():\n    return pl.DataFrame()\n\n\ndef broken(df):\n    return df\n",
+    )
+
+
+def test_a_build_can_find_and_use_the_users_library_blocks(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = building(session, anchor)
+    tags = {t["tag"]: t for t in b.call_tool("list_block_types", {})["tags"]}
+    assert tags["library"]["blocks"] == 1
+    listed = b.call_tool("list_block_types", {"tag": "library"})["blocks"]
+    assert listed == [{"category": "loan_to_income", "summary": "Adds loan_to_income: the loan amount over annual income.", "library": True}]
+    assert "loan_to_income" in {x["category"] for x in b.call_tool("list_block_types", {"tag": "data_prep"})["blocks"]}
+    doc = b.call_tool("describe_block_type", {"category": "loan_to_income"})
+    assert doc["library_file"] == "ratios.py" and [p["name"] for p in doc["params"]] == ["loan_col", "income_col"]
+    assert "unknown" in b.call_tool("add_block", {"category": "my_source", "lane": "est"})["error"]
+    assert "unknown" in b.call_tool("add_block", {"category": "broken", "lane": "est"})["error"]
+
+    added = b.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})
+    assert added["library_block"] == "ratios.py"
+    blk = session.graph.blocks[added["block"]]
+    assert blk.definition is not None and blk.library_ref["file"] == "ratios.py" and blk.name == "Loan to income"
+    b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": blk.id, "to_port": "df"})
+    ran = b.call_tool("run_to", {"block": blk.id})
+    assert ran["status"] == "green" and "loan_to_income" in ran["outputs"]["out"]["columns"]
+
+    from modelmaker.agent import prompts
+
+    assert "## The user's library blocks" in prompts.plan_system(b) and "- loan_to_income" in prompts.plan_system(b)
+
+
+def test_a_stage_plan_can_use_library_blocks(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = staged(session, anchor)
+    steps = [{"ref": "est1", "category": "loan_to_income", "name": "ratio", "why": "",
+              "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]
+    r = b.call_tool("plan_stage", {"steps": steps})
+    assert r["ok"] and r["steps"][0]["status"] == "green", r
+
+
+def test_blocks_an_earlier_build_created_are_reused_not_recreated(prepared):
+    session, anchor = prepared
+    first = building(session, anchor)
+    first.call_tool("create_library_block", {"lane": "est", "name": "ratio", "code": _RATIO})
+    later = building(session, anchor)
+    later.id = "later"
+    again = later.call_tool("create_library_block", {"lane": "est", "name": "ratio", "code": _RATIO})
+    assert "add it with add_block" in again["error"]
+    assert later.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})["library_block"].startswith("drafts/")
+
+
+def test_library_blocks_can_be_turned_off_for_a_build(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = building(session, anchor)
+    b.options.use_library_blocks = False
+    assert "library" not in {t["tag"] for t in b.call_tool("list_block_types", {})["tags"]}
+    assert "unknown" in b.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})["error"]
+    from modelmaker.agent import prompts
+
+    assert "loan_to_income" not in prompts.plan_system(b)

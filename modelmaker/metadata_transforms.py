@@ -1,109 +1,110 @@
-from __future__ import annotations
+"""Column metadata for a block's outputs, derived from the block's declared
+`meta` rules -- never from per-block code. One function, `schema_diff`,
+serves every block:
 
-from typing import Any, Callable
+  - An output column that exists in an input keeps that input's metadata
+    (role, description, tags), with its dtype refreshed. When several inputs
+    have the column, the first-listed input port wins (a join's left side).
+  - A column that is new gets its dtype inferred and `new_role` (default
+    "unassigned").
+  - `roles` rules then tag specific columns.
 
-import polars as pl
-
-from .packet import ColumnMeta, ColumnRole
-
-
-def infer_dtypes(
-    input_metas: dict[str, dict[str, ColumnMeta]],
-    outputs: dict[str, pl.DataFrame],
-    params: dict[str, Any],
-) -> dict[str, dict[str, ColumnMeta]]:
-    """Used by input blocks: no upstream metadata to inherit, so build fresh
-    ColumnMeta from dtype alone; role stays unassigned until tagged."""
-    return {
-        port: {name: ColumnMeta(dtype=str(df.schema[name])) for name in df.columns}
-        for port, df in outputs.items()
+    "meta": {
+        "inherit": "all" | "none" | {"port": "df"} | {"columns_param": "by"},
+        "new_role": "feature",
+        "roles": [
+            {"column": "lgd", "role": "target", "if_taken": "feature"},
+            {"column_param": "output_col", "role": "predicted", "displaced": "feature"},
+            {"column_param": "flag_col", "fallback": "default_{horizon}m", "role": "target"},
+            {"column_suffix": "_bin", "role": "segment"},
+        ],
     }
 
+`inherit`: "none" for a block whose outputs are new tables (statistics,
+input readers); {"port": p} to inherit from one input only;
+{"columns_param": p} to inherit only the columns a list param names
+(group-by keys -- the aggregated columns are new values, not the inputs').
 
-def passthrough(
-    input_metas: dict[str, dict[str, ColumnMeta]],
-    outputs: dict[str, pl.DataFrame],
-    params: dict[str, Any],
-) -> dict[str, dict[str, ColumnMeta]]:
-    """Single input, single output, columns unchanged (e.g. filter)."""
-    (in_meta,) = input_metas.values()
-    result: dict[str, dict[str, ColumnMeta]] = {}
-    for port, df in outputs.items():
-        result[port] = {
-            name: in_meta[name] if name in in_meta else ColumnMeta(dtype=str(df.schema[name]))
-            for name in df.columns
-        }
-    return result
+A role rule names its column directly, via a param (`fallback` is a
+template over the params used when that param is unset), or by suffix (new
+columns only). For a unique role (target, predicted, ...), `if_taken`
+gives the column that role instead when another column already has it,
+and `displaced` re-tags any other column that has it.
+"""
 
+from __future__ import annotations
 
-def narrow_from_single_input(
-    input_metas: dict[str, dict[str, ColumnMeta]],
-    outputs: dict[str, pl.DataFrame],
-    params: dict[str, Any],
-) -> dict[str, dict[str, ColumnMeta]]:
-    """Single input, output columns are a subset of it (e.g. select)."""
-    (in_meta,) = input_metas.values()
-    result: dict[str, dict[str, ColumnMeta]] = {}
-    for port, df in outputs.items():
-        result[port] = {name: in_meta[name] for name in df.columns if name in in_meta}
-    return result
+from dataclasses import replace
+from typing import Any, Callable
+
+from .packet import UNIQUE_ROLES, ColumnMeta, ColumnRole
+
+MetadataTransform = Callable[[dict[str, dict[str, ColumnMeta]], dict[str, Any], dict[str, Any]], dict[str, dict[str, ColumnMeta]]]
 
 
-def broadcast_to_all_outputs(
-    input_metas: dict[str, dict[str, ColumnMeta]],
-    outputs: dict[str, pl.DataFrame],
-    params: dict[str, Any],
-) -> dict[str, dict[str, ColumnMeta]]:
-    """Single input, metadata unchanged, fanned out to every output port
-    (e.g. train/test split: both sides keep the parent's column roles)."""
-    (in_meta,) = input_metas.values()
-    return {port: dict(in_meta) for port in outputs}
+def _rule_column(rule: dict[str, Any], params: dict[str, Any]) -> str | None:
+    if "column" in rule:
+        return rule["column"]
+    value = params.get(rule["column_param"])
+    if not value and rule.get("fallback"):
+        try:
+            value = rule["fallback"].format_map(params)
+        except (KeyError, IndexError, ValueError):
+            return None
+    return value if isinstance(value, str) and value else None
 
 
-def declared(spec: dict[str, Any]) -> Callable[..., dict[str, dict[str, ColumnMeta]]]:
-    """Build a metadata transform from a JSON-serializable declaration, the
-    form used by custom/LLM-authored blocks in the project file:
-        {"kind": "declared", "base": "in", "drops": [...], "adds": [...]}
-    """
+def schema_diff(spec: dict[str, Any] | None, defaults: dict[str, Any] | None = None) -> MetadataTransform:
+    """The metadata transform for a block's `meta` rules (see module doc).
+    `defaults` are the function's signature defaults, so a rule over an
+    unset param sees what the function actually used."""
+    spec = spec or {}
+    inherit = spec.get("inherit", "all")
+    new_role = ColumnRole(spec.get("new_role", "unassigned"))
+    rules = spec.get("roles", [])
 
-    def _fn(
-        input_metas: dict[str, dict[str, ColumnMeta]],
-        outputs: dict[str, pl.DataFrame],
-        params: dict[str, Any],
-    ) -> dict[str, dict[str, ColumnMeta]]:
-        base_port = spec.get("base")
-        base: dict[str, ColumnMeta] = dict(input_metas[base_port]) if base_port else {}
-        for col in spec.get("drops", []):
-            base.pop(col, None)
-        for add in spec.get("adds", []):
-            base[add["name"]] = ColumnMeta(
-                dtype=add.get("dtype", "unknown"),
-                role=ColumnRole(add.get("role", "unassigned")),
-                description=add.get("description"),
-            )
+    def transform(input_metas, outputs, params):
+        p = {**(defaults or {}), **(params or {})}
+        if inherit == "none":
+            sources: list[dict[str, ColumnMeta]] = []
+        elif isinstance(inherit, dict) and "port" in inherit:
+            sources = [input_metas.get(inherit["port"], {})]
+        else:
+            sources = list(input_metas.values())
+        keep_only = set(p.get(inherit["columns_param"]) or []) if isinstance(inherit, dict) and "columns_param" in inherit else None
+
         result: dict[str, dict[str, ColumnMeta]] = {}
         for port, df in outputs.items():
-            result[port] = {
-                name: base[name] if name in base else ColumnMeta(dtype=str(df.schema[name]))
-                for name in df.columns
-            }
+            meta: dict[str, ColumnMeta] = {}
+            new_cols: set[str] = set()
+            for name in df.columns:
+                dtype = str(df.schema[name])
+                found = None
+                if keep_only is None or name in keep_only:
+                    found = next((s[name] for s in sources if name in s), None)
+                if found is not None:
+                    meta[name] = replace(found, dtype=dtype, tags=list(found.tags))
+                else:
+                    meta[name] = ColumnMeta(dtype=dtype, role=new_role)
+                    new_cols.add(name)
+            for rule in rules:
+                role = ColumnRole(rule["role"])
+                if "column_suffix" in rule:
+                    targets = [c for c in new_cols if c.endswith(rule["column_suffix"])]
+                else:
+                    col = _rule_column(rule, p)
+                    targets = [col] if col in meta else []
+                for col in targets:
+                    given = role
+                    if role in UNIQUE_ROLES:
+                        others = [n for n, m in meta.items() if n != col and m.role == role]
+                        if others and "if_taken" in rule:
+                            given = ColumnRole(rule["if_taken"])
+                        elif others and "displaced" in rule:
+                            for n in others:
+                                meta[n] = replace(meta[n], role=ColumnRole(rule["displaced"]))
+                    meta[col] = replace(meta[col], role=given)
+            result[port] = meta
         return result
 
-    return _fn
-
-
-def resolve_metadata_transform(transform: Any) -> Callable[..., dict[str, dict[str, ColumnMeta]]]:
-    if callable(transform):
-        return transform
-    kind = transform.get("kind")
-    if kind == "infer_dtypes":
-        return infer_dtypes
-    if kind == "passthrough":
-        return passthrough
-    if kind == "narrow":
-        return narrow_from_single_input
-    if kind == "broadcast":
-        return broadcast_to_all_outputs
-    if kind == "declared":
-        return declared(transform)
-    raise ValueError(f"unknown metadata_transform kind: {kind!r}")
+    return transform

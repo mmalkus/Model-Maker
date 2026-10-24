@@ -20,7 +20,9 @@ import { GHOST_IN, GHOST_OUT, GhostLane, GhostNode, type GhostFlowNode, type Gho
 import { Inspector } from './Inspector'
 import { BAND_X, DEFAULT_LANE_HEIGHT, LaneBand, layoutLanes, type LaneBandNode, type LaneLayoutEntry } from './LaneBand'
 import { LaneLabels, LaneResizeHandles } from './LaneLabels'
-import { Palette } from './Palette'
+import { LibraryPanel, type LibraryView } from './LibraryPanel'
+import { Palette, type DragPayload } from './Palette'
+import { UpdateDialog } from './UpdateDialog'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
 import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
@@ -32,7 +34,7 @@ const edgeTypes = { dataWire: DataWireEdge }
 // agent canvas lock) -- mirrored here only to say so up front.
 const BUILD_LOCKING = new Set(['building', 'awaiting_input', 'awaiting_stage_review', 'final_run'])
 const BUILD_TERMINAL = new Set(['done', 'done_with_errors', 'stopped', 'failed', 'discarded'])
-const BUILD_BLOCK_TOOLS = new Set(['add_block', 'add_custom_block', 'run_to', 'set_params', 'update_custom_block', 'connect'])
+const BUILD_BLOCK_TOOLS = new Set(['add_block', 'create_library_block', 'run_to', 'set_params', 'update_library_block', 'connect'])
 
 type AiEdge = { id: string; source: string; sourceHandle: string; target: string; targetHandle: string; style: React.CSSProperties; selectable: false }
 
@@ -91,6 +93,11 @@ function AppInner() {
   const [graph, setGraph] = useState<GraphOut | null>(null)
   const [blockNodes, setBlockNodes] = useState<BlockFlowNode[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // The block library overlay (null: closed), the counter the palette
+  // refetches the library on, and the block whose update dialog is open.
+  const [libraryView, setLibraryView] = useState<LibraryView | null>(null)
+  const [libraryVersion, setLibraryVersion] = useState(0)
+  const [updateBlockId, setUpdateBlockId] = useState<string | null>(null)
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set())
   const [llmSettings, setLlmSettings] = useState<LLMSettingsOut | null>(null)
@@ -545,34 +552,16 @@ function AppInner() {
     [reload],
   )
 
-  const addCustomBlock = useCallback(
-    (blockType: 'input' | 'standard' | 'output', at?: { x: number; y: number }) => {
-      // No name prompt -- create a blank block immediately and let the user
-      // describe it via "Draft with AI" right away; rename later by clicking
-      // the block's name in the inspector. An input block gets no `df`
-      // parameter (it's a pipeline source, like read_csv); standard/output
-      // both start as a df -> df passthrough the user redrafts from there.
-      const fnName = `ai_block_${Date.now().toString(36)}`
-      const isSource = blockType === 'input'
+  const addLibraryBlock = useCallback(
+    (file: string, id: string, at?: { x: number; y: number }) => {
       const pos = at ?? { x: 80 + Math.random() * 200, y: 80 + Math.random() * 200 }
-      api
-        .createBlock({
-          category: fnName,
-          block_type: blockType,
-          name: `New AI ${blockType} block`,
-          x: pos.x,
-          y: pos.y,
-          inputs: isSource ? [] : [{ name: 'df', type: 'dataframe' }],
-          outputs: [{ name: 'out', type: 'dataframe' }],
-          code: isSource ? `def ${fnName}():\n    return pl.DataFrame()\n` : `def ${fnName}(df):\n    return df\n`,
-          metadata_transform: { kind: isSource ? 'infer_dtypes' : 'passthrough' },
-        })
+      return api
+        .createBlock({ library: { file, id }, x: pos.x, y: pos.y })
         .then((b) => {
           reload()
           setSelectedId(b.id)
           setSelectedPort(null)
         })
-        .catch((e) => alert(e.message))
     },
     [reload],
   )
@@ -589,14 +578,34 @@ function AppInner() {
       if (!raw) return
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
-      const dropped = JSON.parse(raw) as { kind: 'registry'; category: string } | { kind: 'custom'; blockType: 'input' | 'standard' | 'output' }
+      const dropped = JSON.parse(raw) as DragPayload
       if (dropped.kind === 'registry') addBlock(dropped.category, at)
-      else addCustomBlock(dropped.blockType, at)
+      else addLibraryBlock(dropped.file, dropped.id, at).catch((err) => alert(err.message))
     },
-    [screenToFlowPosition, addBlock, addCustomBlock],
+    [screenToFlowPosition, addBlock, addLibraryBlock],
   )
 
+  // An AI build saves the blocks it creates to the library (as drafts):
+  // refetch the palette's library whenever the set of library blocks on the
+  // canvas changes.
+  const libraryKey = graph
+    ? Object.values(graph.blocks)
+        .map((b) => (b.definition_info?.source === 'library' ? `${b.category}@${b.definition_info.file}` : ''))
+        .filter(Boolean)
+        .sort()
+        .join('|')
+    : ''
+  useEffect(() => {
+    setLibraryVersion((v) => v + 1)
+  }, [libraryKey])
+
   const selectedBlock: BlockOut | null = graph && selectedId ? (graph.blocks[selectedId] ?? null) : null
+  // Create with AI from the palette uses the selected block's output as its
+  // example input, when it has one to offer.
+  const selectedBlockContext =
+    selectedBlock && (selectedBlock.status === 'green' || selectedBlock.status === 'orange') && selectedBlock.outputs.some((p) => p.type === 'dataframe')
+      ? selectedBlock.id
+      : undefined
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -671,7 +680,14 @@ function AppInner() {
         </div>
       )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <Palette onAdd={addBlock} onAddCustom={addCustomBlock} onAddLane={addLane} />
+        <Palette
+          onAdd={addBlock}
+          onAddLibrary={(file, id) => addLibraryBlock(file, id).catch((e) => alert(e.message))}
+          onOpenLibrary={() => setLibraryView({ kind: 'browse' })}
+          onCreateWithAI={() => setLibraryView({ kind: 'ai', start: { addToCanvas: true, contextBlock: selectedBlockContext } })}
+          onAddLane={addLane}
+          libraryVersion={libraryVersion}
+        />
         <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
           <ReactFlow
             nodes={nodes}
@@ -770,9 +786,34 @@ function AppInner() {
             onChanged={reload}
           />
         ) : (
-          <Inspector block={selectedBlock} onChanged={reload} provider={llmSettings?.active_provider ?? null} />
+          <Inspector
+            block={selectedBlock}
+            onChanged={reload}
+            provider={llmSettings?.active_provider ?? null}
+            onOpenUpdate={(b) => setUpdateBlockId(b.id)}
+            onFixWithAI={(b) => setLibraryView({ kind: 'ai', start: { fixBlock: b.id } })}
+            onOpenInLibrary={(file, id) => setLibraryView({ kind: 'browse', selected: { file, id } })}
+          />
         )}
       </div>
+      {libraryView && (
+        <LibraryPanel
+          initialView={libraryView}
+          graph={graph}
+          provider={llmSettings?.active_provider ?? null}
+          onClose={() => {
+            setLibraryView(null)
+            reload()
+          }}
+          onLibraryChanged={() => setLibraryVersion((v) => v + 1)}
+          onPlace={(file, id) => addLibraryBlock(file, id)}
+          onPlaceBuiltin={(category) => addBlock(category)}
+          onOpenUpdate={(blockId) => setUpdateBlockId(blockId)}
+        />
+      )}
+      {updateBlockId && graph?.blocks[updateBlockId] && (
+        <UpdateDialog block={graph.blocks[updateBlockId]} onClose={() => setUpdateBlockId(null)} onApplied={reload} />
+      )}
       {reportBuildId && <ReportModal key={reportBuildId} buildId={reportBuildId} onClose={() => setReportBuildId(null)} />}
     </div>
   )

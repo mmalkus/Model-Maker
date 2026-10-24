@@ -47,9 +47,28 @@ class StubProvider(LLMProvider):
             )
             return DraftResult(explanation=explanation)
 
-        code = f"def {ctx.function_name}(df):\n    return df\n"
+        name = ctx.function_name or "stub_block"
+        if ctx.existing_code:
+            code = ctx.existing_code
+            block = {**(ctx.existing_block or {}), "version": int((ctx.existing_block or {}).get("version", 1)) + 1}
+        else:
+            code = (
+                f"def {name}(df):\n"
+                '    """Returns the input unchanged (stub provider -- no LLM was called)."""\n'
+                "    return df\n\n\n"
+                f"def _example_{name}():\n"
+                "    df = pl.DataFrame({'a': [1, 2]})\n"
+                f"    assert {name}(df).equals(df)\n"
+            )
+            block = {
+                "display_name": name.replace("_", " ").capitalize(),
+                "version": 1,
+                "block_type": "standard",
+                "inputs": [{"name": "df", "type": "dataframe"}],
+                "outputs": [{"name": "out", "type": "dataframe"}],
+            }
         explanation = (
             "Stub provider: no LLM was called. Returned the input unchanged -- "
             f"replace with a real provider to act on: {ctx.instruction!r}"
         )
-        return DraftResult(code=code, metadata_transform={"kind": "passthrough"}, explanation=explanation)
+        return DraftResult(code=code, block=block, explanation=explanation)

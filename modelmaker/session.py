@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .blocks.base import BLOCK_REGISTRY, PortSpec
+from .block_library import definition_from_embedded
+from .blocks.base import BLOCK_REGISTRY, BlockDefinition
 from .cache import CacheStore
 from .graph import Artifact, BlockInstance, Graph, Lane, Position, Wire
 from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
@@ -309,47 +310,71 @@ class ProjectSession:
     def add_block(
         self,
         category: str,
-        block_type: str | None = None,
         name: str | None = None,
         lane: str | None = None,
         x: float = 0,
         y: float = 0,
         params: dict[str, Any] | None = None,
-        code: str | None = None,
-        inputs: list[dict] | None = None,
-        outputs: list[dict] | None = None,
-        metadata_transform: dict[str, Any] | None = None,
+        definition: BlockDefinition | dict[str, Any] | None = None,
+        library_ref: dict[str, Any] | None = None,
     ) -> BlockInstance:
-        spec = BLOCK_REGISTRY.get(category)
-        is_custom = spec is None
-        if spec is not None:
-            resolved_type = block_type or spec.block_type
-            resolved_inputs = [PortSpec(**p) for p in inputs] if inputs else list(spec.inputs)
-            resolved_outputs = [PortSpec(**p) for p in outputs] if outputs else list(spec.outputs)
+        """Place a block: a built-in by `category`, or a library block from
+        its `definition` (a BlockDefinition, or the embedded dict form),
+        which the instance keeps its own copy of."""
+        if definition is not None:
+            embedded = definition.embedded() if isinstance(definition, BlockDefinition) else dict(definition)
+            resolved = definition_from_embedded(embedded)
+            category = resolved.id
         else:
-            if block_type is None:
-                raise ValueError(f"unknown category '{category}'; block_type is required for custom blocks")
-            resolved_type = block_type
-            resolved_inputs = [PortSpec(**p) for p in (inputs or [])]
-            resolved_outputs = [PortSpec(**p) for p in (outputs or [])]
-
+            embedded = None
+            resolved = BLOCK_REGISTRY.get(category)
+            if resolved is None:
+                raise ValueError(f"unknown block '{category}'")
         bid = new_id()
         block = BlockInstance(
             id=bid,
-            block_type=resolved_type,
+            block_type=resolved.block_type,
             category=category,
-            name=name or category,
+            name=name or resolved.display_name or category,
             lane=lane,
             position=Position(x=x, y=y),
             code_version=1,
             params=params or {},
-            inputs=resolved_inputs,
-            outputs=resolved_outputs,
-            code=code,
-            metadata_transform=metadata_transform,
-            is_custom=is_custom,
+            inputs=[replace(p) for p in resolved.inputs],
+            outputs=[replace(p) for p in resolved.outputs],
+            definition=embedded,
+            library_ref=library_ref,
+            builtin_sha=resolved.sha if embedded is None else None,
         )
         self.graph.blocks[bid] = block
+        return block
+
+    def set_definition(
+        self,
+        block_id: str,
+        definition: BlockDefinition | dict[str, Any] | None,
+        library_ref: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> BlockInstance:
+        """Switch a placed block to another version of its definition (a
+        library block's Update, a built-in's Accept -- `definition` None
+        re-pins the installed built-in). Ports follow the definition; wires
+        to ports that no longer exist are removed by the caller (see
+        library_updates.apply_update)."""
+        block = self.graph.blocks[block_id]
+        if definition is None:
+            resolved = BLOCK_REGISTRY[block.category]
+            block.definition, block.library_ref, block.builtin_sha = None, None, resolved.sha
+        else:
+            embedded = definition.embedded() if isinstance(definition, BlockDefinition) else dict(definition)
+            resolved = definition_from_embedded(embedded)
+            block.definition, block.library_ref, block.builtin_sha = embedded, library_ref, None
+        block.block_type = resolved.block_type
+        block.inputs = [replace(p) for p in resolved.inputs]
+        block.outputs = [replace(p) for p in resolved.outputs]
+        if params is not None:
+            block.params = params
+        block.code_version += 1
         return block
 
     def _mark_user_modified(self, block: BlockInstance, actor: str) -> None:
@@ -363,9 +388,9 @@ class ProjectSession:
     def update_block(self, block_id: str, actor: str = "user", **fields: Any) -> BlockInstance:
         """`actor` is "user" for every canvas/API edit and "agent" for an
         AI build's own edits (see agent/tools.py) -- only a user's change
-        to params or code flags an AI-built block as modified_by_user."""
+        to params flags an AI-built block as modified_by_user."""
         block = self.graph.blocks[block_id]
-        old_params, old_code = block.params, block.code
+        old_params = block.params
         if "name" in fields and fields["name"] is not None:
             block.name = fields["name"]
         if "lane" in fields:
@@ -378,12 +403,7 @@ class ProjectSession:
             block.group_by = fields["group_by"]
         if "max_workers" in fields:
             block.max_workers = fields["max_workers"]
-        if "code" in fields and fields["code"] is not None and fields["code"] != block.code:
-            block.code = fields["code"]
-            block.code_version += 1
-        if "metadata_transform" in fields and fields["metadata_transform"] is not None:
-            block.metadata_transform = fields["metadata_transform"]
-        if block.params != old_params or block.code != old_code:
+        if block.params != old_params:
             self._mark_user_modified(block, actor)
         return block
 

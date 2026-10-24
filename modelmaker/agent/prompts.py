@@ -13,7 +13,6 @@ import json
 import re
 from typing import Any
 
-from ..blocks.base import BLOCK_REGISTRY
 from ..packet import ColumnRole, DataFramePacket
 from . import catalogue
 from .build import AgentBuild, ToolError
@@ -70,20 +69,25 @@ use forward_default_flag (tags the flag as the target) rather than derive_column
 CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
 (train/test/OOT side by side) and, for a rating scale, grade_backtest."""
 
-CUSTOM_CONTRACT = """Custom block contract (add_custom_block / update_custom_block):
-- Exactly one top-level Python function. Its first parameters are its \
-dataframe inputs (named as in `inputs`, default ['df']), typed pl.DataFrame; \
-any further parameters are configurable values with defaults. It returns one \
-pl.DataFrame.
-- Use only polars (in scope as `pl`). No pandas, no I/O, no globals, no network.
+CUSTOM_CONTRACT = """New block contract (create_library_block / update_library_block):
+- Exactly one public top-level Python function -- the block, named in \
+snake_case for what it does (the name is its id in the user's block library). \
+Its first parameters are its dataframe inputs (named as in `inputs`, default \
+['df']), typed pl.DataFrame; any further parameters are configurable values \
+with defaults. It returns one pl.DataFrame. Shared code may go in private \
+helper functions whose names start with _.
+- Use only polars (in scope as `pl`; import anything else inside the \
+function). No pandas, no I/O, no globals, no network.
 - Never hardcode an existing input column's name in the body: take it as a \
 `<descriptive>_col` str parameter defaulted to the real column name (or \
 `<descriptive>_cols` for a list) and use pl.col(param). New columns you \
 create get literal names via .alias(...).
-- metadata_transform describes the column set change: {"kind": "passthrough"} \
-(same columns), {"kind": "narrow"} (a subset), or {"kind": "declared", "base": \
-"<input port>", "drops": [...], "adds": [{"name", "dtype" (e.g. Float64, \
-Int64, Boolean, String, Date), "role"}]}."""
+- `meta` says how output columns get their roles (leave it out for the \
+default): columns that exist in an input keep that input's role and new ones \
+start unassigned. {"new_role": "feature"} tags every new column a feature; \
+{"roles": [{"column": "<name>", "role": "<role>"}]} tags specific columns; \
+{"inherit": "none"} for a block that builds a new table (a summary, a \
+statistics table) rather than adding to its input."""
 
 PLAN_INSTRUCTIONS = """## Your job now: plan
 
@@ -159,26 +163,27 @@ headline metric blocks. The app then runs the whole graph on the full data \
 and refreshes those metrics. End your turn after finish."""
 
 
-CUSTOM_ON = """- Prefer registry blocks. Only write a custom block when no registry block \
-does the job (e.g. a multi-column transformation, an out-of-time split by \
-date). """
+CUSTOM_ON = """- Prefer existing blocks -- the built-ins and the user's library blocks \
+(tag `library`). Only create a new block when none of them does the job \
+(e.g. a multi-column transformation). New blocks are saved to the user's \
+block library as drafts for them to review, and later builds can reuse them. """
 
 CUSTOM_STEPS = """
-A custom step stops the build there: write it with add_custom_block \
+A custom step stops the build there: write it with create_library_block \
 (plan_step set to its ref, lane the stage key), connect its inputs, then \
 call build_stage."""
 
-CUSTOM_OFF = """- Custom blocks are turned off for this build: use registry blocks only. \
+CUSTOM_OFF = """- New blocks are turned off for this build: use registry blocks only. \
 If the goal needs something no registry block does, say so -- in \
 `questions` while planning, with ask_user while building. """
 
 
 def _common(build: AgentBuild) -> str:
-    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_custom_blocks else CUSTOM_OFF)
+    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_new_blocks else CUSTOM_OFF)
 
 
 def _custom_contract(build: AgentBuild) -> list[str]:
-    return [CUSTOM_CONTRACT] if build.options.allow_custom_blocks else []
+    return [CUSTOM_CONTRACT] if build.options.allow_new_blocks else []
 
 
 def _anchor_context(build: AgentBuild) -> str:
@@ -193,7 +198,7 @@ def _anchor_context(build: AgentBuild) -> str:
     return "\n".join(lines) or "- (none)"
 
 
-def _catalogue_context(compact: bool = False) -> str:
+def _catalogue_context(compact: bool = False, include_library: bool = True) -> str:
     """The registry blocks for the system prompt. Full: one line per block
     with tags, ports and summary (~8k tokens). Compact, for small-context
     local models (see loop.LMStudioLoop): just the tags (~400 tokens) --
@@ -204,8 +209,8 @@ def _catalogue_context(compact: bool = False) -> str:
         # Tags with their blocks' names: names only, so a step's category
         # is never a guess (or a tag name) -- describe_block_type has the rest.
         lines = [
-            f"- {t['tag']}: {t['about']}\n  blocks: {', '.join(catalogue.tag_block_names(t['tag']))}"
-            for t in catalogue.list_tags()
+            f"- {t['tag']}: {t['about']}\n  blocks: {', '.join(catalogue.tag_block_names(t['tag'], include_library))}"
+            for t in catalogue.list_tags(include_library)
         ]
         return (
             "## Registry blocks, by tag\n"
@@ -213,12 +218,19 @@ def _catalogue_context(compact: bool = False) -> str:
             "block's one-line summary, and describe_block_type its ports and params -- read it before using a "
             "block whose ports you haven't seen.\n" + "\n".join(lines)
         )
-    lines = []
-    for e in catalogue.list_block_types():
+    lines, library = [], []
+    for e in catalogue.list_block_types(include_library=include_library):
         ins = ", ".join(f"{p['name']}:{p['type']}" for p in e["inputs"]) or "-"
         outs = ", ".join(f"{p['name']}:{p['type']}" for p in e["outputs"]) or "-"
-        lines.append(f"- {e['category']} [{', '.join(e['tags'])}] ({ins}) -> ({outs}): {e['summary']}")
-    return "## Registry blocks\n" + "\n".join(lines)
+        line = f"- {e['category']} [{', '.join(e['tags'])}] ({ins}) -> ({outs}): {e['summary']}"
+        (library if e.get("library_file") else lines).append(line)
+    text = "## Registry blocks\n" + "\n".join(lines)
+    if library:
+        text += (
+            "\n\n## The user's library blocks\nBlocks the user (or an earlier AI build) wrote -- add them with add_block "
+            "like any other block. Prefer one of these over creating a new block that does the same.\n" + "\n".join(library)
+        )
+    return text
 
 
 def _preflight_context(build: AgentBuild) -> str:
@@ -230,7 +242,9 @@ def _preflight_context(build: AgentBuild) -> str:
 
 
 def plan_system(build: AgentBuild, compact: bool = False) -> str:
-    return "\n\n".join([_common(build), *_custom_contract(build), PLAN_INSTRUCTIONS, _catalogue_context(compact)])
+    return "\n\n".join(
+        [_common(build), *_custom_contract(build), PLAN_INSTRUCTIONS, _catalogue_context(compact, build.options.use_library_blocks)]
+    )
 
 
 def plan_prompt(build: AgentBuild) -> str:
@@ -272,11 +286,11 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
             *_custom_contract(build),
             BUILD_INSTRUCTIONS.format(
                 sample_note=sample_note,
-                update_tool=" / update_custom_block" if build.options.allow_custom_blocks else "",
-                custom_steps=CUSTOM_STEPS if build.options.allow_custom_blocks else "",
+                update_tool=" / update_library_block" if build.options.allow_new_blocks else "",
+                custom_steps=CUSTOM_STEPS if build.options.allow_new_blocks else "",
             ),
             *([HINTS_RULE] if build.options.decision_hints else []),
-            _catalogue_context(compact=True),
+            _catalogue_context(compact=True, include_library=build.options.use_library_blocks),
         ]
     )
 
@@ -364,12 +378,12 @@ def built_so_far(build: AgentBuild) -> str:
     return text
 
 
-def _stage_block_names(stage: dict[str, Any]) -> list[str]:
-    """The blocks the outline listed for the stage, then any registry
+def _stage_block_names(stage: dict[str, Any], include_library: bool = True) -> list[str]:
+    """The blocks the outline listed for the stage, then any block
     category its goal names."""
-    catalogue.ensure_blocks_registered()
-    names = [c for c in stage.get("blocks") or [] if c in BLOCK_REGISTRY]
-    for category in BLOCK_REGISTRY:
+    known = catalogue.available(include_library)
+    names = [c for c in stage.get("blocks") or [] if c in known]
+    for category in known:
         if category not in names and re.search(rf"\b{re.escape(category)}\b", stage.get("goal") or ""):
             names.append(category)
     return [c for c in names if c not in catalogue.AGENT_DISALLOWED][:STAGE_BLOCK_DOCS]
@@ -449,7 +463,7 @@ def stage_prompt(build: AgentBuild) -> str:
             parts.append(
                 "This stage starts a fresh conversation. What the earlier stages decided -- keep to it:\n\n" + decided
             )
-    docs = block_docs(_stage_block_names(stage))
+    docs = block_docs(_stage_block_names(stage, build.options.use_library_blocks))
     if docs:
         parts.append(
             "Docs for the blocks this stage is likely to use (describe_block_type has the full text, and "

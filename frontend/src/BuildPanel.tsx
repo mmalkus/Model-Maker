@@ -173,6 +173,7 @@ function StartForm({
   const [fullRun, setFullRun] = useState(true)
   const [autoBuild, setAutoBuild] = useState(false)
   const [allowCustom, setAllowCustom] = useState(true)
+  const [useLibrary, setUseLibrary] = useState(true)
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
@@ -216,10 +217,17 @@ function StartForm({
         </label>
         <label
           style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
-          title="Let the AI write its own polars code when no registry block does the job. Off: registry blocks only -- it asks you if the goal needs something they can't do."
+          title="Let the AI create new blocks when no registry block does the job -- they're saved to your block library as AI drafts for you to keep or discard. Off: registry blocks only -- it asks you if the goal needs something they can't do."
         >
           <input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} />
-          Allow custom code blocks
+          Allow new blocks (saved as library drafts)
+        </label>
+        <label
+          style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
+          title="Let the AI use blocks from your block library -- ones you wrote, or ones earlier AI builds created -- alongside the built-ins."
+        >
+          <input type="checkbox" checked={useLibrary} onChange={(e) => setUseLibrary(e.target.checked)} />
+          Use my library blocks
         </label>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           Build on a sample:
@@ -247,7 +255,8 @@ function StartForm({
             final_full_run: fullRun,
             sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
             auto_build: autoBuild,
-            allow_custom_blocks: allowCustom,
+            allow_new_blocks: allowCustom,
+            use_library_blocks: useLibrary,
           })
         }
       >
@@ -315,7 +324,7 @@ function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
         {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
         {build.usage.cost_usd ? ` · $${build.usage.cost_usd.toFixed(2)}` : ''}
         {build.options.auto_build ? ' · builds automatically' : ''}
-        {build.options.allow_custom_blocks === false ? ' · registry blocks only' : ''}
+        {build.options.allow_new_blocks === false ? ' · registry blocks only' : ''}
         {build.options.small_context ? ' · small context' : ''}
         {build.options.decision_hints ? ' · decision hints' : ''}
       </div>
@@ -691,8 +700,8 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
       ? ''
       : tool === 'add_block'
         ? String(args.category)
-        : tool === 'add_custom_block'
-          ? `custom: ${args.name}`
+        : tool === 'create_library_block'
+          ? `new block: ${args.name}`
           : tool === 'connect'
             ? `${blockName(args.from_block)}.${args.from_port} → ${blockName(args.to_block)}.${args.to_port}`
             : blockName(args.block ?? args.category ?? '')

@@ -36,13 +36,7 @@ atexit.register(shutil.rmtree, _CACHE_DIR, ignore_errors=True)
 if os.environ.get("PYTEST_XDIST_WORKER"):
     os.environ.setdefault("MODELMAKER_WARM_WORKERS", "0")
 
-import modelmaker  # noqa: E402,F401
-
-# Populate the full block registry the same way the app does (see api.py):
-# importing these for their registration side effect is what makes
-# BLOCK_REGISTRY complete, so a test module run on its own sees the same
-# catalog as one run as part of the whole suite.
-from modelmaker.blocks import binning, data_quality, feature_analysis, library, modelling, stat_tests, stochastic  # noqa: E402,F401
+import modelmaker  # noqa: E402,F401 -- loads every built-in block into BLOCK_REGISTRY
 
 # The demo dataset isn't committed -- it's generated (fixed seed) by
 # modelmaker/demo_data.py. The agent tests read it as a file through Read
@@ -71,3 +65,15 @@ if not _DEMO_CSV.is_file() or _DEMO_CSV.read_bytes() != _fresh:
     except PermissionError:
         # Windows: another worker has the (identical) file open mid-replace.
         _part.unlink()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def block_library_dir(tmp_path, monkeypatch):
+    """Every test gets its own empty block library folder (see
+    library_store.library_dir) instead of the user's ~/.modelmaker/blocks."""
+    path = tmp_path / "block-library"
+    monkeypatch.setenv("MODELMAKER_BLOCK_LIBRARY", str(path))
+    return path

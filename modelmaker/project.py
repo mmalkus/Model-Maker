@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ PROJECT_FILENAME = "model.json"
 
 # Written into a project folder's .gitignore the first time it's given one
 # (see ensure_project_scaffold) -- covers the regenerable local cache and
-# common Python/editor cruft; the project JSON, its code sidecars, and
+# common Python/editor cruft; the project JSON, its block code files, and
 # whatever the user drops in files/ are meant to be versioned.
 DEFAULT_GITIGNORE = """\
 .modelmaker-cache/
@@ -54,11 +54,21 @@ def is_project_dir(path: Path) -> bool:
     return (path / PROJECT_FILENAME).is_file()
 
 
+# Version 2: blocks are built-ins or embedded library definitions; the
+# canvas-only custom blocks of version 1 no longer exist.
+PROJECT_FORMAT = 2
+
+
+class ProjectFormatError(ValueError):
+    pass
+
+
 def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Graph:
-    """Rebuild a Graph from its serialized form. A custom block's code comes
-    from an inline "code" key when present (how in-memory snapshots carry it
-    -- see graph_to_dict), else from the sidecar file named by "code_ref",
-    resolved against project_dir (how a saved project carries it)."""
+    """Rebuild a Graph from its serialized form. A library block's embedded
+    definition carries its code inline under "code" (in-memory snapshots --
+    see graph_to_dict) or in the file named by "code_ref", resolved against
+    project_dir (a saved project). Ports are refreshed from each block's
+    definition, which is what actually runs."""
     lanes = {
         lid: Lane(name=lane["name"], order=lane["order"], height=lane.get("height", 260.0))
         for lid, lane in data.get("lanes", {}).items()
@@ -66,11 +76,21 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
 
     blocks: dict[str, BlockInstance] = {}
     for bid, b in data.get("blocks", {}).items():
-        code = b.get("code")
-        if code is None and b.get("code_ref") and project_dir is not None:
-            code = (project_dir / b["code_ref"]).read_text(encoding="utf-8")
+        if b.get("is_custom"):
+            raise ProjectFormatError(
+                f"block {b.get('name', bid)!r} is a custom block from an older Model-Maker -- custom blocks now "
+                "live in the block library; recreate it there and place it again"
+            )
+        definition = b.get("definition")
+        if definition is not None:
+            definition = dict(definition)
+            ref = definition.pop("code_ref", None)
+            if "code" not in definition:
+                if ref is None or project_dir is None:
+                    raise ProjectFormatError(f"block {bid!r}: embedded definition has no code")
+                definition["code"] = (project_dir / ref).read_text(encoding="utf-8")
         pos = b.get("position", {"x": 0, "y": 0})
-        blocks[bid] = BlockInstance(
+        block = BlockInstance(
             id=bid,
             block_type=b["block_type"],
             category=b["category"],
@@ -81,10 +101,9 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
             params=b.get("params", {}),
             inputs=[PortSpec(**p) for p in b["ports"]["inputs"]],
             outputs=[PortSpec(**p) for p in b["ports"]["outputs"]],
-            code_ref=b.get("code_ref"),
-            code=code,
-            metadata_transform=b.get("metadata_transform"),
-            is_custom=b.get("is_custom", False),
+            definition=definition,
+            library_ref=b.get("library_ref"),
+            builtin_sha=b.get("builtin_sha"),
             column_role_overrides=b.get("column_role_overrides", {}),
             port_names=b.get("port_names", {}),
             group_by=b.get("group_by"),
@@ -92,6 +111,18 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
             column_tags=b.get("column_tags", {}),
             provenance=b.get("provenance"),
         )
+        try:
+            resolved = block.resolve()
+        except KeyError:
+            pass  # unknown built-in (e.g. removed in this version): kept as saved, goes red when run
+        else:
+            block.inputs = [replace(p) for p in resolved.inputs]
+            block.outputs = [replace(p) for p in resolved.outputs]
+            block.block_type = resolved.block_type
+            if block.definition is None and block.builtin_sha is None:
+                # Saved before built-ins were pinned: pin to the installed one.
+                block.builtin_sha = resolved.sha
+        blocks[bid] = block
 
     wires = {
         wid: Wire(
@@ -123,33 +154,20 @@ def graph_from_dict(data: dict[str, Any], project_dir: Path | None = None) -> Gr
 
 
 def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path | None = None) -> dict[str, Any]:
-    """Serialize a Graph. With project_dir given, a custom block's code is
-    written to a sidecar .py file and referenced by "code_ref" (keeps git
-    diffs line-level -- see the plan's section 8.1); without one, the code
-    rides inline under "code" instead, for snapshots that never touch disk."""
+    """Serialize a Graph. With project_dir given, a library block's embedded
+    code is written to blocks/<block id>.py and referenced by "code_ref"
+    (keeps git diffs line-level); without one, the code rides inline under
+    "code", for snapshots that never touch disk."""
     blocks_out: dict[str, Any] = {}
     for bid, b in sorted(graph.blocks.items()):
-        code_ref = b.code_ref
-        inline_code: str | None = None
-        if b.is_custom and b.code is not None:
-            if project_dir is not None:
-                code_ref = code_ref or f"blocks/{bid}.py"
-                sidecar = project_dir / code_ref
-                sidecar.parent.mkdir(parents=True, exist_ok=True)
-                sidecar.write_text(b.code, encoding="utf-8")
-            else:
-                inline_code = b.code
-        entry = {
+        entry: dict[str, Any] = {
             "block_type": b.block_type,
-            "is_custom": b.is_custom,
             "category": b.category,
             "name": b.name,
             "lane": b.lane,
             "position": {"x": b.position.x, "y": b.position.y},
             "code_version": b.code_version,
             "params": b.params,
-            "code_ref": code_ref,
-            "metadata_transform": b.metadata_transform if b.is_custom else None,
             "column_role_overrides": b.column_role_overrides,
             "port_names": b.port_names,
             "group_by": b.group_by,
@@ -164,12 +182,22 @@ def graph_to_dict(graph: Graph, project_name: str = "project", project_dir: Path
         # byte-identically to before this field existed.
         if b.provenance is not None:
             entry["provenance"] = b.provenance
-        if inline_code is not None:
-            entry["code"] = inline_code
+        if b.builtin_sha is not None:
+            entry["builtin_sha"] = b.builtin_sha
+        if b.definition is not None:
+            definition = dict(b.definition)
+            if project_dir is not None:
+                code_ref = f"blocks/{bid}.py"
+                sidecar = project_dir / code_ref
+                sidecar.parent.mkdir(parents=True, exist_ok=True)
+                sidecar.write_text(definition.pop("code"), encoding="utf-8")
+                definition["code_ref"] = code_ref
+            entry["definition"] = definition
+            entry["library_ref"] = b.library_ref
         blocks_out[bid] = entry
 
     return {
-        "modelmaker_version": 1,
+        "modelmaker_version": PROJECT_FORMAT,
         "project_name": project_name,
         "lanes": {
             lid: {"name": lane.name, "order": lane.order, "height": lane.height}
