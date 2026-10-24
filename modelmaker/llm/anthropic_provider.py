@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import os
-from typing import Literal
 
 import anthropic
 from pydantic import BaseModel, Field
@@ -12,25 +12,9 @@ from .prompts import build_user_prompt, contract_for
 DEFAULT_MODEL = "claude-opus-5"
 
 
-class _ColumnAdd(BaseModel):
-    name: str
-    dtype: str
-    role: Literal["id", "target", "weight", "feature", "date", "segment", "excluded", "unassigned"] = "unassigned"
-
-
-class _MetadataTransformDraft(BaseModel):
-    kind: Literal["passthrough", "narrow", "declared"]
-    base: str | None = Field(default=None, description="Input port name; required when kind is 'declared'.")
-    drops: list[str] = Field(default_factory=list)
-    adds: list[_ColumnAdd] = Field(default_factory=list)
-
-
 class _BlockDraft(BaseModel):
-    code: str = Field(description="The complete function definition, including the `def` line.")
-    metadata_transform: _MetadataTransformDraft
-    params: dict[str, str | float | bool | int] = Field(
-        default_factory=dict, description="Suggested default values for any extra parameters the function takes."
-    )
+    code: str = Field(description="Python source: the block function, any _helpers, and its _example_.")
+    block_json: str = Field(description="The block's BLOCKS entry, as a JSON object.")
     explanation: str
 
 
@@ -71,9 +55,8 @@ class AnthropicProvider(LLMProvider):
             output_format=_BlockDraft,
         )
         draft = response.parsed_output
-        transform = draft.metadata_transform.model_dump(exclude_none=True)
-        if draft.metadata_transform.kind != "declared":
-            transform.pop("base", None)
-            transform.pop("drops", None)
-            transform.pop("adds", None)
-        return DraftResult(code=draft.code, metadata_transform=transform, explanation=draft.explanation, params=draft.params)
+        try:
+            block = json.loads(draft.block_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"the model's BLOCKS entry isn't valid JSON: {e}") from e
+        return DraftResult(code=draft.code, block=block if isinstance(block, dict) else {}, explanation=draft.explanation)

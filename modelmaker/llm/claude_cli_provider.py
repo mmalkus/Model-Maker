@@ -88,16 +88,13 @@ class ClaudeCliProvider(LLMProvider):
 
         try:
             code = data["code"]
-            transform = dict(data["metadata_transform"])
         except KeyError as e:
             raise ValueError(f"claude CLI response missing required field: {e}") from e
-
-        if transform.get("kind") != "declared":
-            transform = {"kind": transform.get("kind", "passthrough")}
+        block = data.get("block") or {}
 
         return DraftResult(
             code=code,
-            metadata_transform=transform,
+            block=block if isinstance(block, dict) else {},
             explanation=data.get("explanation", ""),
             params=data.get("params", {}) or {},
         )

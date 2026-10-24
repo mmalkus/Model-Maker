@@ -399,3 +399,107 @@ def update_block_definition(block_id: str) -> dict[str, Any]:
     except (store.LibraryError, KeyError) as e:
         raise HTTPException(400, str(e))
     return {"applied": summary, "block": api._block_out(block_id)}
+
+
+# ---- Create with AI ---------------------------------------------------------
+
+
+class AIDraftRequest(BaseModel):
+    instruction: str
+    provider: str | None = None
+    # The library file the block goes to (new or existing) and, to change
+    # an existing block, its id.
+    file: str | None = None
+    block: str | None = None
+    # A canvas block whose output becomes the example input: the model sees
+    # its schema and column roles only, never rows.
+    context_block: str | None = None
+    context_port: str | None = None
+    # Fix with AI on a placed block: its code, error and input schema.
+    fix_block: str | None = None
+    # Refine: the draft being iterated on.
+    previous_code: str | None = None
+    previous_block: dict[str, Any] | None = None
+
+
+def _output_schema(block_id: str, port: str | None) -> dict[str, list]:
+    from .llm.redact import column_info_for_llm
+
+    session = _session()
+    st = session.runner.state.get(block_id)
+    entry = session.runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
+    if entry is None:
+        raise HTTPException(400, "run the context block first -- its output schema isn't known yet")
+    value = entry.outputs.get(port) if port else next(iter(entry.outputs.values()), None)
+    if not isinstance(value, DataFramePacket):
+        raise HTTPException(400, "the context block's output isn't a dataframe")
+    return {"df": [column_info_for_llm(name, meta) for name, meta in value.schema_meta.items()]}
+
+
+@router.post("/api/library/ai/draft")
+def ai_draft(req: AIDraftRequest) -> dict[str, Any]:
+    """Draft (or edit, fix, refine) a library block with AI. Returns the
+    proposed file source, the validator's verdict and a diff -- never saved
+    automatically; the caller saves it with PUT /api/library/files/{file}
+    (passing base_sha as expected_sha)."""
+    from . import api, library_ai
+
+    if not req.instruction.strip() and req.fix_block is None:
+        raise HTTPException(400, "describe the block you want")
+    session = _session()
+    input_ports: dict[str, list] = {}
+    existing = None
+    error = None
+    file, block = req.file, req.block
+    if req.fix_block is not None:
+        placed = session.graph.blocks.get(req.fix_block)
+        if placed is None:
+            raise HTTPException(404, f"no such block: {req.fix_block}")
+        st = session.runner.state.get(req.fix_block)
+        error = st.last_error if st else None
+        if not error:
+            raise HTTPException(400, "the block has no recorded error to fix")
+        info = library_updates.status_for(placed) or {}
+        definition = placed.resolve()
+        if definition.source == "builtin":
+            raise HTTPException(400, "built-in blocks can't be changed -- Duplicate it to the library first")
+        if info.get("in_library") and not file:
+            file, block = info["file"], placed.category
+        else:
+            existing = (definition.code, definition.meta)
+            file = file or f"{placed.category}.py"
+        input_ports = api._input_schema_for_block(req.fix_block)
+    elif req.context_block is not None:
+        input_ports = _output_schema(req.context_block, req.context_port)
+    previous = (req.previous_code, req.previous_block or {}) if req.previous_code else None
+    try:
+        provider = api._provider_for(req.provider)
+        include_reference = bool(api.LLM_SETTINGS.include_reference)
+        result = library_ai.draft(
+            provider,
+            req.instruction.strip() or "Fix the error.",
+            file=file,
+            block=block,
+            input_ports=input_ports,
+            existing=existing,
+            error=error,
+            previous=previous,
+            include_reference=include_reference,
+        )
+    except library_ai.DraftError as e:
+        raise HTTPException(422, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 -- the provider's failure, reported as such
+        raise HTTPException(502, f"LLM draft failed: {e}")
+    return {
+        "file": result.file,
+        "block": result.block_id,
+        "source": result.source,
+        "base_sha": result.base_sha,
+        "explanation": result.explanation,
+        "check": result.check,
+        "diff": result.diff,
+        "code": result.code,
+        "entry": result.block,
+    }

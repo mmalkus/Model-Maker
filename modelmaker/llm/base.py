@@ -13,7 +13,7 @@ class ColumnInfo:
     dtype: str
     role: str
     # Summary statistics (see packet.ColumnStats) -- optional and unused by
-    # "author"/"params_only" drafting, populated only for "analyze_data" (see
+    # "library_block"/"params_only" drafting, populated only for "analyze_data" (see
     # DraftContext.mode) so the model has more than names/dtypes to go on
     # without ever being handed actual row data.
     count: int | None = None
@@ -39,12 +39,13 @@ class DraftContext:
     param_names: list[str] = field(default_factory=list)
     existing_code: str | None = None
     error: str | None = None
-    # "author": drafting a full llm_authored function body (the original
-    # flow). "params_only": the block's code is fixed (a standard/input/
-    # output block from the registry) -- the model may only choose values
-    # for its existing parameters, given the fixed source for context.
-    # "analyze_data": not drafting anything -- `code`/`metadata_transform`
-    # come back as fixed placeholders (see prompts.CONTRACT_ANALYZE_DATA),
+    # "library_block": writing a block for the block library -- its code
+    # (function, helpers, _example_) and its BLOCKS entry (see
+    # library_ai.py, Create with AI). "params_only": the block's code is
+    # fixed -- the model may only choose values for its existing
+    # parameters, given the fixed source for context.
+    # "analyze_data": not drafting anything -- `code`/`block` come back as
+    # fixed placeholders (see prompts.CONTRACT_ANALYZE_DATA),
     # `params` carries per-column tag suggestions instead of parameter
     # values, and `explanation` carries the write-up itself rather than a
     # one-sentence note. Reuses the same DraftContext/DraftResult shape (and
@@ -54,8 +55,13 @@ class DraftContext:
     # output ports' names instead -- `params["name"]` is the block name,
     # `params[<port>]` each port's proposed name (see
     # prompts.CONTRACT_RENAME).
-    mode: Literal["author", "params_only", "analyze_data", "rename"] = "author"
+    mode: Literal["library_block", "params_only", "analyze_data", "rename"] = "library_block"
     fixed_source: str | None = None
+    # library_block mode: the block's current BLOCKS entry when changing or
+    # fixing one, and extra context (the target file's other blocks, the
+    # tag list, the hint rules) appended to the request.
+    existing_block: dict[str, Any] | None = None
+    library_context: str | None = None
     # Off by default: appends a condensed Polars API cheat sheet + worked
     # example to the system prompt. Costs extra tokens on every call, so it's
     # opt-in -- mainly useful to compensate smaller/local models' weaker
@@ -66,7 +72,8 @@ class DraftContext:
 @dataclass
 class DraftResult:
     code: str = ""
-    metadata_transform: dict[str, Any] = field(default_factory=dict)
+    # library_block mode: the drafted BLOCKS entry.
+    block: dict[str, Any] = field(default_factory=dict)
     explanation: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 

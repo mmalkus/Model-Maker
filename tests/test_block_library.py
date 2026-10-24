@@ -538,3 +538,45 @@ def test_streaming_fuses_a_lazy_library_block(tmp_path, block_library_dir):
     assert report == {"r": "fused", "d": "fused", "s": "green"}, report
     out = runner.cache.get(runner.state["s"].last_successful_key).outputs["out"].data
     assert out["a"].to_list() == [2, 4]
+
+
+# ---- Create with AI ----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ai_client(tmp_path, monkeypatch):
+    from modelmaker.llm.settings import LLMSettingsStore
+
+    monkeypatch.setenv("MODELMAKER_LLM_PROVIDER", "stub")
+    api_module.SESSION = ProjectSession(recovery_path=tmp_path / "recovery.json")
+    api_module.LLM_SETTINGS = LLMSettingsStore()
+    return TestClient(api_module.app)
+
+
+def test_create_with_ai_proposes_a_valid_file_and_saves_only_when_asked(ai_client, block_library_dir, tmp_path):
+    csv = tmp_path / "a.csv"
+    csv.write_text("a\n1\n")
+    read = ai_client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv)}}).json()
+    ai_client.post(f"/api/blocks/{read['id']}/refresh")
+    draft = ai_client.post("/api/library/ai/draft", json={"instruction": "keep it as is", "context_block": read["id"]}).json()
+    assert draft["file"] == "stub_block.py" and draft["block"] == "stub_block" and draft["base_sha"] is None
+    assert draft["check"] == {"ok": True, "file_errors": [], "errors": [], "has_example": True}
+    assert not (block_library_dir / "stub_block.py").exists()  # nothing written yet
+
+    saved = ai_client.put("/api/library/files/stub_block.py", json={"source": draft["source"], "create": True}).json()
+    assert saved["blocks"][0]["id"] == "stub_block"
+    assert ai_client.post("/api/library/files/stub_block.py/try", json={}).json()["examples"]["stub_block"]["ok"] is True
+    placed = ai_client.post("/api/blocks", json={"library": {"file": "stub_block.py", "id": "stub_block"}}).json()
+    assert placed["definition_info"]["source"] == "library"
+
+
+def test_edit_with_ai_bumps_the_version_and_keeps_the_rest_of_the_file(ai_client, block_library_dir):
+    store.save_file("pd.py", GOOD)
+    draft = ai_client.post("/api/library/ai/draft", json={"instruction": "tidy", "file": "pd.py", "block": "halve_it"}).json()
+    assert draft["entry"]["version"] == 2 and draft["base_sha"] == store.get_file("pd.py").sha
+    assert "# comment inside the literal" in draft["source"] and draft["check"]["ok"]
+
+
+def test_fix_with_ai_needs_a_red_library_block(ai_client, tmp_path):
+    filt = ai_client.post("/api/blocks", json={"category": "filter", "params": {"expr": "x"}}).json()
+    assert ai_client.post("/api/library/ai/draft", json={"instruction": "", "fix_block": filt["id"]}).status_code == 400

@@ -23,8 +23,8 @@ def test_stub_provider_registered():
         input_ports={"df": [ColumnInfo(name="b", dtype="Int64", role="unassigned")]},
     )
     result = provider.draft(ctx)
-    assert "def bucket_income(df):" in result.code
-    assert result.metadata_transform == {"kind": "passthrough"}
+    assert "def bucket_income(df):" in result.code and "def _example_bucket_income():" in result.code
+    assert result.block["inputs"] == [{"name": "df", "type": "dataframe"}]
 
 
 def test_draft_on_a_standard_block_is_params_only(client, tmp_path):
