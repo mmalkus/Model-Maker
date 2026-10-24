@@ -136,6 +136,10 @@ def test_join_accepts_the_old_outer_name_and_rejects_cross():
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # polars warns on "outer"; the block maps it first
         assert join(left, right, ["k"], how="outer").equals(full)
-    assert join(left.lazy(), right.lazy(), ["k"], how="outer").collect().equals(full)
+    # A full join's row order isn't guaranteed (and differs between eager and
+    # lazy in polars 2), so compare the rows, not their order.
+    by = ["k", "k_right"]
+    lazy = join(left.lazy(), right.lazy(), ["k"], how="outer").collect()
+    assert lazy.sort(by, nulls_last=True).equals(full.sort(by, nulls_last=True))
     with pytest.raises(ValueError, match="cross"):
         join(left, right, ["k"], how="cross")
