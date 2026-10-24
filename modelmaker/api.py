@@ -430,6 +430,9 @@ def registry() -> list[dict[str, Any]]:
             "category": spec.category,
             "block_type": spec.block_type,
             "summary": spec.summary,
+            "origin": spec.origin,
+            "version": spec.version,
+            "sha": spec.sha,
             "group": spec.group or spec.block_type,
             "tags": list(spec.tags),
             "display_name": spec.display_name,
@@ -1658,6 +1661,11 @@ def agent_mcp_tools(x_agent_token: str | None = Header(default=None)) -> list[di
 def agent_mcp_call(req: AgentToolCall, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
     build = _require_agent_token(x_agent_token)
     return build.call_tool(req.name, req.args)
+
+
+from .library_api import router as _library_router  # noqa: E402 -- reads SESSION from this module at call time
+
+app.include_router(_library_router)
 
 
 # Serve the built frontend (from `npm run build` in frontend/, which emits

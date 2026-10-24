@@ -44,7 +44,8 @@ from .blocks.base import (
 )
 
 BUILTIN_DIR = Path(__file__).resolve().parent / "blocks"
-_NOT_BLOCK_MODULES = {"__init__", "base"}
+_NOT_BLOCK_MODULES = {"base"}  # plus every _-prefixed module (__init__, _template)
+TEMPLATE_PATH = BUILTIN_DIR / "_template.py"
 
 # Top-level imports a block file may have; everything else is imported
 # inside the function that needs it, so each emitted function stays a
@@ -348,7 +349,7 @@ def load_builtin() -> dict[str, BlockDefinition]:
         return BLOCK_REGISTRY
     loaded: dict[str, BlockDefinition] = {}
     for path in sorted(BUILTIN_DIR.glob("*.py")):
-        if path.stem in _NOT_BLOCK_MODULES:
+        if path.stem in _NOT_BLOCK_MODULES or path.stem.startswith("_"):
             continue
         module = importlib.import_module(f"modelmaker.blocks.{path.stem}")
         parsed = parse_source(path.read_text(encoding="utf-8"), f"modelmaker/blocks/{path.name}", kind="builtin")
@@ -402,6 +403,95 @@ def definition_for(block) -> BlockDefinition:
         return BLOCK_REGISTRY[block.category]
     except KeyError:
         raise KeyError(f"unknown block {block.category!r}") from None
+
+
+# ---- running block code on request -----------------------------------------
+#
+# Examples ("Try it", `modelmaker check-blocks`) and trial runs on a canvas
+# block's output execute block code. They run in a fresh process with a
+# timeout -- sandboxed by process, not by permission: a hanging or crashing
+# example can't take the server down, but it is still trusted code.
+
+EXAMPLE_TIMEOUT = 30.0
+
+
+def _child_examples(source: str, origin: str, ids: list[str] | None, conn) -> None:
+    import traceback
+
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        import polars as pl
+
+        ns: dict[str, Any] = {"pl": pl, "__name__": "modelmaker_block_examples"}
+        flags = __future__.annotations.compiler_flag
+        exec(compile(source, origin, "exec", flags=flags, dont_inherit=True), ns)  # trusted block code, on request
+        parsed = parse_source(source, origin)
+        for d in parsed.definitions:
+            if ids is not None and d.id not in ids:
+                continue
+            name = parsed.examples.get(d.id)
+            if name is None:
+                out[d.id] = {"ok": None, "error": "no _example_ for this block"}
+                continue
+            try:
+                ns[name]()
+                out[d.id] = {"ok": True, "error": None}
+            except BaseException as e:  # noqa: BLE001 -- reported per example
+                tb = traceback.extract_tb(e.__traceback__)
+                line = next((f.lineno for f in reversed(tb) if f.filename == origin), None)
+                out[d.id] = {"ok": False, "error": f"{type(e).__name__}: {e}", "line": line}
+    except BaseException as e:  # noqa: BLE001 -- the file itself failed to run
+        out["__file__"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    conn.send(out)
+    conn.close()
+
+
+def _child_call(block_id: str, code: str, kwargs: dict[str, Any], conn) -> None:
+    try:
+        from .run_worker import _collect
+
+        fn = compile_fn(block_id, code)
+        result = fn(**kwargs)
+        result = tuple(_collect(v, None) for v in result) if isinstance(result, tuple) else _collect(result, None)
+        conn.send((True, result))
+    except BaseException as e:  # noqa: BLE001 -- reported to the caller
+        conn.send((False, f"{type(e).__name__}: {e}"))
+    conn.close()
+
+
+def _in_child(target, args: tuple, timeout: float):
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    recv, send = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=target, args=(*args, send), daemon=True)
+    proc.start()
+    send.close()
+    try:
+        if recv.poll(timeout):
+            return True, recv.recv()
+        return False, f"timed out after {timeout:.0f}s"
+    except EOFError:
+        return False, "the process running the block crashed"
+    finally:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(5)
+
+
+def run_examples(source: str, origin: str, ids: list[str] | None = None, timeout: float = EXAMPLE_TIMEOUT) -> dict[str, dict[str, Any]]:
+    """Run a file's `_example_<id>` self-checks in a fresh process: {block
+    id: {"ok": True|False|None (no example), "error", "line"}}; a file that
+    fails to run at all reports under "__file__"."""
+    ok, result = _in_child(_child_examples, (source, origin, ids), timeout)
+    return result if ok else {"__file__": {"ok": False, "error": result}}
+
+
+def try_call(definition: BlockDefinition, kwargs: dict[str, Any], timeout: float = EXAMPLE_TIMEOUT) -> tuple[bool, Any]:
+    """Call a definition's function once on real inputs (a canvas block's
+    output) in a fresh process: (ok, result or error message)."""
+    ok, result = _in_child(_child_call, (definition.id, definition.code, kwargs), timeout)
+    return result if ok else (False, result)
 
 
 # ---- writing literals ----------------------------------------------------

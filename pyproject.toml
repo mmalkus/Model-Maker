@@ -65,6 +65,7 @@ db = ["connectorx>=0.3.3", "pyarrow>=16.0.0"]
 modelmaker-api = "modelmaker.api:main"
 modelmaker-tui = "modelmaker.tui.app:main"
 modelmaker-demo = "modelmaker.demo_data:workspace_main"
+modelmaker = "modelmaker.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["modelmaker*"]
