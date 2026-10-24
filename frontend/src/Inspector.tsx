@@ -620,7 +620,7 @@ function DefinitionBanner({
         </span>
         {info.update_available && (
           <button className="brand-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={onOpenUpdate}>
-            Update to v{info.latest_version}
+            {info.library_older ? `Switch to library v${info.latest_version} (older)` : `Update to v${info.latest_version}`}
           </button>
         )}
         {block.status === 'red' && (

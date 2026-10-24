@@ -1073,7 +1073,7 @@ def _draft_definition(
     errors = block_library.validate_definition(definition)
     if errors:
         raise ToolError("; ".join(errors))
-    sig = inspect.signature(definition.fn)
+    sig = inspect.signature(definition.signature_fn)
     names = list(sig.parameters)
     if names[: len(inputs)] != inputs:
         raise ToolError(f"the function's first parameters must be the input ports {inputs} in order; got {names}")

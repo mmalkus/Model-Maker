@@ -75,7 +75,7 @@ def block_form(spec: BlockDefinition) -> dict[str, Any]:
     """{"fields": [...], "other_params": [...]} for a block. Each field
     carries the param's signature default (null if required), so a
     checkbox or number box can show what an unset param means."""
-    return _block_form(spec.sha, spec.fn, spec.form, tuple(p.name for p in spec.inputs))
+    return _block_form(spec.sha, spec.signature_fn, spec.form, tuple(p.name for p in spec.inputs))
 
 
 # Keyed on the definition's sha (a definition's form never changes without

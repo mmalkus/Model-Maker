@@ -157,8 +157,8 @@ class CheckRequest(BaseModel):
 @router.post("/api/library/check")
 def check_source(req: CheckRequest) -> dict[str, Any]:
     """Parse and validate unsaved source -- the editor's live checklist.
-    Defines the functions (to check forms against signatures) but never
-    calls them."""
+    Runs none of the code: signatures are read from stubs (see
+    block_library.signature_stub)."""
     taken = set(BLOCK_REGISTRY) | {d.id for f in store.list_files() if f.name != req.name for d in f.parsed.definitions}
     parsed = bl.validate(bl.parse_source(req.source, req.name), taken)
     return {
@@ -187,15 +187,19 @@ def save_library_file(name: str, req: SaveRequest) -> dict[str, Any]:
 
 @router.delete("/api/library/files/{name:path}/blocks/{block_id}")
 def delete_library_block(name: str, block_id: str) -> dict[str, Any]:
+    """The file without the block -- or {"deleted": name} when that was its
+    last block and the file went too."""
     try:
         f = store.delete_block(name, block_id)
     except store.LibraryError as e:
         raise _fail(e)
-    return file_summary(f)
+    return file_summary(f) if f is not None else {"deleted": name}
 
 
 @router.delete("/api/library/files/{name:path}")
-def delete_library_file(name: str, expected_sha: str | None = None) -> dict[str, str]:
+def delete_library_file(name: str, expected_sha: str) -> dict[str, str]:
+    """Delete a whole file -- only the version the caller has seen (its
+    sha), so an edit saved meanwhile isn't lost."""
     try:
         store.delete_file(name, expected_sha=expected_sha)
     except store.LibraryError as e:
@@ -393,7 +397,7 @@ def discard_draft(req: DiscardRequest) -> dict[str, str]:
         f = store.get_file(req.file)
         if not f.is_draft:
             raise store.LibraryError(f"{req.file} isn't an AI drafts file")
-        store.delete_file(req.file)
+        store.delete_file(req.file, expected_sha=f.sha)
     except store.LibraryError as e:
         raise _fail(e)
     return {"deleted": req.file}

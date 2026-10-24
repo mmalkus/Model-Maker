@@ -32,6 +32,8 @@ DRAFTS_DIR = "drafts"
 # Import limits (see import_preview).
 MAX_FILE_BYTES = 1_000_000
 MAX_UPLOAD_BYTES = 10_000_000
+MAX_UNPACKED_BYTES = 20_000_000  # every .py in a zip, uncompressed
+MAX_ZIP_ENTRIES = 500
 MAX_IMPORT_BLOCKS = 200
 
 _NAME = re.compile(r"^(drafts/)?[A-Za-z_][A-Za-z0-9_]*\.py$")
@@ -226,13 +228,14 @@ def save_file(name: str, source: str, *, expected_sha: str | None = None, create
         return get_file(name)
 
 
-def delete_file(name: str, *, expected_sha: str | None = None) -> None:
+def delete_file(name: str, *, expected_sha: str) -> None:
+    """Delete a file, if it's still the version with `expected_sha`."""
     name = check_name(name)
     path = library_dir() / name
     with _lock:
         if not path.exists():
             raise LibraryError(f"no library file {name!r}")
-        if expected_sha is not None and expected_sha != text_sha(path.read_text(encoding="utf-8")):
+        if expected_sha != text_sha(path.read_text(encoding="utf-8")):
             raise ConflictError(f"{name} changed on disk since it was opened")
         path.unlink()
         list_files(force=True)
@@ -290,10 +293,18 @@ def upsert_block(source: str, block_id: str, meta: dict[str, Any], code: str) ->
         edits.append((_offset(source, v.lineno, v.col_offset), _offset(source, v.end_lineno, v.end_col_offset), entry_text))
     else:
         close = _offset(source, d.end_lineno, d.end_col_offset) - 1  # the closing brace
-        before = source[:close].rstrip()
-        sep = "" if before.endswith(("{", ",")) else ","
-        insert_at = len(before)
-        edits.append((insert_at, close, f"{sep}\n    \"{block_id}\": {entry_text},\n"))
+        # The new entry goes on its own line just before the closing brace.
+        head = source[:close].rstrip(" \t")
+        nl = "" if head.endswith("\n") else "\n"
+        edits.append((len(head), close, f"{nl}    \"{block_id}\": {entry_text},\n"))
+        if d.values:
+            # The last entry's comma goes right after its value -- the text
+            # before the brace may end in a comment. (Appended after the
+            # entry so that, at the same offset, the comma lands first.)
+            last = d.values[-1]
+            after_last = _offset(source, last.end_lineno, last.end_col_offset)
+            if not re.match(r"\s*,", source[after_last:close]):
+                edits.append((after_last, after_last, ","))
 
     top = _top_level(tree)
     new_tree = ast.parse(code)
@@ -316,6 +327,10 @@ def upsert_block(source: str, block_id: str, meta: dict[str, Any], code: str) ->
         out = out[:s] + text + out[e:]
     if appended:
         out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(appended)
+    try:
+        ast.parse(out)
+    except SyntaxError as e:  # a layout this splice doesn't handle: never save it
+        raise LibraryError(f"couldn't add {block_id} to the file without breaking it (line {e.lineno}: {e.msg})") from None
     return out
 
 
@@ -324,7 +339,9 @@ def remove_block(source: str, block_id: str) -> str:
     `_example_`. Helpers stay (another block may use them)."""
     tree = ast.parse(source)
     blocks_node = next((n for n in tree.body if bl._top_level_names(n) == ["BLOCKS"]), None)
-    d: ast.Dict = blocks_node.value  # type: ignore[union-attr]
+    if blocks_node is None or not isinstance(blocks_node.value, ast.Dict):  # type: ignore[attr-defined]
+        raise LibraryError("the file has no BLOCKS = {...} dict")
+    d: ast.Dict = blocks_node.value  # type: ignore[attr-defined]
     idx = next((i for i, k in enumerate(d.keys) if isinstance(k, ast.Constant) and k.value == block_id), None)
     if idx is None:
         raise LibraryError(f"no block {block_id!r} in this file")
@@ -352,6 +369,14 @@ def remove_block(source: str, block_id: str) -> str:
     return re.sub(r"\n{4,}", "\n\n\n", source)
 
 
+def _rename_calls(code: str, old: str, new: str) -> str:
+    """`code` with the block function (and its `_example_`) renamed: the
+    def and every call, matched as whole names -- `bin(` never touches
+    `woe_bin(`."""
+    code = re.sub(rf"\b_example_{re.escape(old)}\b", f"_example_{new}", code)
+    return re.sub(rf"(?<![\w.]){re.escape(old)}(?=\s*\()", new, code)
+
+
 def add_block(file: str, meta: dict[str, Any], block_id: str, code: str, *, doc: str = "Blocks.") -> LibraryFile:
     """Add (or replace) one block in a library file, creating the file if
     needed -- the write behind Create with AI's Save and an agent build's
@@ -364,10 +389,16 @@ def add_block(file: str, meta: dict[str, Any], block_id: str, code: str, *, doc:
         return save_file(name, upsert_block(source, block_id, meta, code), expected_sha=expected)
 
 
-def delete_block(file: str, block_id: str) -> LibraryFile:
+def delete_block(file: str, block_id: str) -> LibraryFile | None:
+    """Remove one block from a file. Removing the last block deletes the
+    file (None), as keeping a draft does -- no empty files left behind."""
     with _lock:
         f = get_file(file)
-        return save_file(f.name, remove_block(f.source, block_id), expected_sha=f.sha)
+        remaining = remove_block(f.source, block_id)
+        if not bl.parse_source(remaining, f.name).definitions:
+            delete_file(f.name, expected_sha=f.sha)
+            return None
+        return save_file(f.name, remaining, expected_sha=f.sha)
 
 
 def move_block(src_file: str, block_id: str, dst_file: str) -> LibraryFile:
@@ -380,13 +411,21 @@ def move_block(src_file: str, block_id: str, dst_file: str) -> LibraryFile:
             raise LibraryError(f"{src_file} has no block {block_id!r}")
         example = _example_source(src.source, block_id)
         code = d.code + ("\n\n" + example if example else "")
-        out = add_block(dst_file, d.meta, block_id, code)
+        # Out of the source first, so the id never exists twice; if the
+        # destination write fails, the source file is restored as it was.
         remaining = remove_block(src.source, block_id)
-        if not bl.parse_source(remaining, src.name).definitions:
-            delete_file(src.name)
+        emptied = not bl.parse_source(remaining, src.name).definitions
+        if emptied:
+            delete_file(src.name, expected_sha=src.sha)
         else:
             save_file(src.name, remaining, expected_sha=src.sha)
-        return out
+        try:
+            return add_block(dst_file, d.meta, block_id, code)
+        except BaseException:
+            path = library_dir() / src.name
+            _atomic_write(path, src.source)
+            list_files(force=True)
+            raise
 
 
 def duplicate(source_def: BlockDefinition, new_id: str, dst_file: str, example: str | None = None) -> LibraryFile:
@@ -398,12 +437,10 @@ def duplicate(source_def: BlockDefinition, new_id: str, dst_file: str, example: 
     taken = set(BLOCK_REGISTRY) | {d.id for f in list_files() for d in f.parsed.definitions}
     if new_id in taken:
         raise LibraryError(f"block id {new_id!r} is already taken")
-    code = re.sub(rf"\bdef {re.escape(source_def.id)}\(", f"def {new_id}(", source_def.code, count=1)
+    code = source_def.code + ("\n\n" + example if example else "")
     meta = {**source_def.meta, "version": 1}
     meta["display_name"] = f"{source_def.display_name} (copy)"
-    if example:
-        code += "\n\n" + example.replace(f"_example_{source_def.id}", f"_example_{new_id}").replace(f"{source_def.id}(", f"{new_id}(")
-    return add_block(dst_file, meta, new_id, code)
+    return add_block(dst_file, meta, new_id, _rename_calls(code, source_def.id, new_id))
 
 
 def _example_source(source: str, block_id: str) -> str | None:
@@ -456,7 +493,15 @@ def read_upload(filename: str, data: bytes) -> list[tuple[str, str]]:
             zf = zipfile.ZipFile(io.BytesIO(data))
         except zipfile.BadZipFile:
             raise LibraryError("not a valid .zip") from None
-        for info in zf.infolist():
+        infos = zf.infolist()
+        if len(infos) > MAX_ZIP_ENTRIES:
+            raise LibraryError(f"the zip has {len(infos)} entries -- at most {MAX_ZIP_ENTRIES}")
+        # Declared sizes, checked before anything is decompressed (zipfile
+        # never inflates an entry past its declared size).
+        unpacked = sum(i.file_size for i in infos if not i.is_dir() and i.filename.endswith(".py"))
+        if unpacked > MAX_UNPACKED_BYTES:
+            raise LibraryError(f"the zip's .py files come to over {MAX_UNPACKED_BYTES // 1_000_000} MB uncompressed")
+        for info in infos:
             if info.is_dir():
                 continue
             n = info.filename
@@ -481,14 +526,15 @@ def read_upload(filename: str, data: bytes) -> list[tuple[str, str]]:
 
 
 def import_preview(files: list[tuple[str, str]]) -> list[dict[str, Any]]:
-    """Per file and block: validation (literal checks only -- nothing is
-    defined or run), requirements, and whether the id already exists."""
+    """Per file and block: validation (nothing is defined or run -- see
+    block_library.signature_stub), requirements, and whether the id already
+    exists."""
     existing = {d.id: (f.name, d) for f in list_files() for d in f.parsed.definitions}
     out = []
     total = 0
     for name, text in files:
         parsed = bl.parse_source(text, name)
-        bl.validate(parsed, set(), define=False)
+        bl.validate(parsed, set())
         blocks = []
         for d in parsed.definitions:
             total += 1
@@ -521,15 +567,18 @@ def import_commit(files: list[tuple[str, str]], actions: dict[str, str]) -> list
     a new id), "overwrite", "rename" (as <id>_2, _3, ...) or "skip". A block
     that clashes and has no action is skipped. Each imported block goes to
     a library file of the uploaded file's name (merged into it when it
-    exists). Returns the ids written."""
-    preview = {(p["file"], b["id"]): b for p in import_preview(files) for b in p["blocks"]}
+    exists). A block with validation errors is skipped too unless its
+    action says otherwise -- the same defaults the import dialog shows.
+    Returns the ids written."""
+    previews = import_preview(files)
+    preview = {(p["file"], b["id"]): {**b, "broken": bool(b["errors"] or p["file_errors"])} for p in previews for b in p["blocks"]}
     written = []
     for name, text in files:
         parsed = bl.parse_source(text, name)
         target = check_name(Path(name).name)
         for d in parsed.definitions:
             info = preview[(name, d.id)]
-            action = actions.get(f"{name}:{d.id}") or ("add" if info["clash"] is None else "skip")
+            action = actions.get(f"{name}:{d.id}") or ("add" if info["clash"] is None and not info["broken"] else "skip")
             if action == "skip" or info["clash"] and info["clash"]["kind"] == "builtin" and action != "rename":
                 continue
             block_id = d.id
@@ -541,9 +590,9 @@ def import_commit(files: list[tuple[str, str]], actions: dict[str, str]) -> list
                 while f"{d.id}_{n}" in taken:
                     n += 1
                 block_id = f"{d.id}_{n}"
-                code = re.sub(rf"\bdef {d.id}\(", f"def {block_id}(", code, count=1)
+                code = _rename_calls(code, d.id, block_id)
                 if example:
-                    example = example.replace(f"_example_{d.id}", f"_example_{block_id}").replace(f"{d.id}(", f"{block_id}(")
+                    example = _rename_calls(example, d.id, block_id)
             elif action == "overwrite" and info["clash"]:
                 if info["clash"]["file"] != target:
                     delete_block(info["clash"]["file"], d.id)

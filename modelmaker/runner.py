@@ -163,7 +163,7 @@ def _try_resolve(block: BlockInstance) -> BlockDefinition | None:
 
 def _accepts(definition: BlockDefinition, name: str) -> bool:
     try:
-        return accepts_param(definition.fn, name)
+        return accepts_param(definition.signature_fn, name)
     except Exception:  # noqa: BLE001 -- a library block whose code doesn't define: it fails when run
         return False
 
@@ -201,7 +201,7 @@ def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
         return None
     if _accepts(definition, "output_dir") or _accepts(definition, "block_id"):
         return None
-    if any(find_role_param(definition.fn, role) for role in ROLE_PARAM_NAMES):
+    if any(find_role_param(definition.signature_fn, role) for role in ROLE_PARAM_NAMES):
         return None
     return definition
 
@@ -1126,9 +1126,9 @@ class Runner:
                 # Same output_dir/block_id auto-fill run_block does for an
                 # ordinary output block (see accepts_param) -- a sink step
                 # never goes through run_block, so it has to happen here.
-                if accepts_param(definition.fn, "output_dir"):
+                if accepts_param(definition.signature_fn, "output_dir"):
                     kwargs["output_dir"] = self.output_dir
-                if accepts_param(definition.fn, "block_id"):
+                if accepts_param(definition.signature_fn, "block_id"):
                     kwargs["block_id"] = bid
             chain_inputs: dict[str, str] = {}
             input_metas: dict[str, dict[str, ColumnMeta]] = {}

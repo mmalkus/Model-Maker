@@ -187,10 +187,10 @@ def block_params(spec: BlockDefinition) -> list[dict[str, Any]]:
     role_bound = {
         role_param: role.value
         for role in ROLE_PARAM_NAMES
-        if (role_param := find_role_param(spec.fn, role)) is not None
+        if (role_param := find_role_param(spec.signature_fn, role)) is not None
     }
     out = []
-    for name, param in inspect.signature(spec.fn).parameters.items():
+    for name, param in inspect.signature(spec.signature_fn).parameters.items():
         if name in port_names or name in INJECTED_PARAMS:
             continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
