@@ -187,11 +187,13 @@ def save_library_file(name: str, req: SaveRequest) -> dict[str, Any]:
 
 @router.delete("/api/library/files/{name:path}/blocks/{block_id}")
 def delete_library_block(name: str, block_id: str) -> dict[str, Any]:
+    """The file without the block -- or {"deleted": name} when that was its
+    last block and the file went too."""
     try:
         f = store.delete_block(name, block_id)
     except store.LibraryError as e:
         raise _fail(e)
-    return file_summary(f)
+    return file_summary(f) if f is not None else {"deleted": name}
 
 
 @router.delete("/api/library/files/{name:path}")

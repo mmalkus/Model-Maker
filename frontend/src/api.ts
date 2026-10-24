@@ -227,7 +227,9 @@ export const api = {
     }),
   libraryDeleteFile: (name: string, expectedSha: string) =>
     request<{ deleted: string }>(`/library/files/${name}?expected_sha=${encodeURIComponent(expectedSha)}`, { method: 'DELETE' }),
-  libraryDeleteBlock: (name: string, id: string) => request<LibraryFile>(`/library/files/${name}/blocks/${id}`, { method: 'DELETE' }),
+  // The file without the block, or { deleted } when it was the file's last block.
+  libraryDeleteBlock: (name: string, id: string) =>
+    request<LibraryFile | { deleted: string }>(`/library/files/${name}/blocks/${id}`, { method: 'DELETE' }),
   libraryTry: (
     name: string,
     body: { blocks?: string[]; block?: string; input_block?: string; input_port?: string; params?: Record<string, unknown>; source?: string },

@@ -617,6 +617,8 @@ def test_library_api_round_trip(client, block_library_dir):
     assert updated["block"]["definition_info"]["version"] == 3
 
     assert client.delete("/api/library/files/pd.py/blocks/halve_it").json()["blocks"][0]["id"] == "double_it"
+    assert client.delete("/api/library/files/pd.py/blocks/double_it").json() == {"deleted": "pd.py"}  # its last block
+    assert not (block_library_dir / "pd.py").exists()
     assert client.delete("/api/library/files/halve_it.py").status_code == 422  # expected_sha is required
     sha = client.get("/api/library/files/halve_it.py").json()["sha"]
     assert client.delete("/api/library/files/halve_it.py", params={"expected_sha": "stale"}).status_code == 409

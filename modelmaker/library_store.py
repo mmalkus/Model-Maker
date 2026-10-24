@@ -389,10 +389,16 @@ def add_block(file: str, meta: dict[str, Any], block_id: str, code: str, *, doc:
         return save_file(name, upsert_block(source, block_id, meta, code), expected_sha=expected)
 
 
-def delete_block(file: str, block_id: str) -> LibraryFile:
+def delete_block(file: str, block_id: str) -> LibraryFile | None:
+    """Remove one block from a file. Removing the last block deletes the
+    file (None), as keeping a draft does -- no empty files left behind."""
     with _lock:
         f = get_file(file)
-        return save_file(f.name, remove_block(f.source, block_id), expected_sha=f.sha)
+        remaining = remove_block(f.source, block_id)
+        if not bl.parse_source(remaining, f.name).definitions:
+            delete_file(f.name, expected_sha=f.sha)
+            return None
+        return save_file(f.name, remaining, expected_sha=f.sha)
 
 
 def move_block(src_file: str, block_id: str, dst_file: str) -> LibraryFile:

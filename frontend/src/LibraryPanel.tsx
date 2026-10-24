@@ -376,6 +376,18 @@ function Browser({
                 <button style={{ fontSize: 10, padding: '1px 6px' }} onClick={() => setView({ kind: 'ai', start: { file: f.name } })} title="Create a new block in this file with AI">
                   + ✦
                 </button>
+                <button
+                  style={{ fontSize: 10, padding: '1px 6px', color: '#b91c1c' }}
+                  title="Delete this file from the library"
+                  onClick={() => {
+                    const n = f.blocks.length
+                    const what = n ? `${n} block${n === 1 ? '' : 's'} (${f.blocks.map((b) => b.id).join(', ')})` : 'no blocks'
+                    if (!confirm(`Delete ${f.name}? It holds ${what}. Placed copies keep working: they embed their code.`)) return
+                    api.libraryDeleteFile(f.name, f.sha).then(onChanged).catch((e) => onError(e.message))
+                  }}
+                >
+                  Delete file
+                </button>
               </div>
               {f.doc && <div style={{ ...muted, fontSize: 11, margin: '1px 0 3px' }}>{f.doc.split('\n')[0]}</div>}
               {f.file_errors.map((e) => (
@@ -581,7 +593,11 @@ function BlockDetail({
             <button
               style={{ color: '#b91c1c', borderColor: '#fecaca', marginLeft: 'auto' }}
               onClick={() => {
-                if (!confirm(`Delete ${block.id} from ${file.name}? Placed copies keep working.`)) return
+                const last = file.blocks.length === 1
+                const msg = last
+                  ? `Delete ${block.id}? It's the last block in ${file.name}, so the file goes too. Placed copies keep working.`
+                  : `Delete ${block.id} from ${file.name}? Placed copies keep working.`
+                if (!confirm(msg)) return
                 api
                   .libraryDeleteBlock(file.name, block.id)
                   .then(() => {
