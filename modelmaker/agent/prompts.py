@@ -70,20 +70,25 @@ use forward_default_flag (tags the flag as the target) rather than derive_column
 CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
 (train/test/OOT side by side) and, for a rating scale, grade_backtest."""
 
-CUSTOM_CONTRACT = """Custom block contract (add_custom_block / update_custom_block):
-- Exactly one top-level Python function. Its first parameters are its \
-dataframe inputs (named as in `inputs`, default ['df']), typed pl.DataFrame; \
-any further parameters are configurable values with defaults. It returns one \
-pl.DataFrame.
-- Use only polars (in scope as `pl`). No pandas, no I/O, no globals, no network.
+CUSTOM_CONTRACT = """New block contract (create_library_block / update_library_block):
+- Exactly one public top-level Python function -- the block, named in \
+snake_case for what it does (the name is its id in the user's block library). \
+Its first parameters are its dataframe inputs (named as in `inputs`, default \
+['df']), typed pl.DataFrame; any further parameters are configurable values \
+with defaults. It returns one pl.DataFrame. Shared code may go in private \
+helper functions whose names start with _.
+- Use only polars (in scope as `pl`; import anything else inside the \
+function). No pandas, no I/O, no globals, no network.
 - Never hardcode an existing input column's name in the body: take it as a \
 `<descriptive>_col` str parameter defaulted to the real column name (or \
 `<descriptive>_cols` for a list) and use pl.col(param). New columns you \
 create get literal names via .alias(...).
-- metadata_transform describes the column set change: {"kind": "passthrough"} \
-(same columns), {"kind": "narrow"} (a subset), or {"kind": "declared", "base": \
-"<input port>", "drops": [...], "adds": [{"name", "dtype" (e.g. Float64, \
-Int64, Boolean, String, Date), "role"}]}."""
+- `meta` says how output columns get their roles (leave it out for the \
+default): columns that exist in an input keep that input's role and new ones \
+start unassigned. {"new_role": "feature"} tags every new column a feature; \
+{"roles": [{"column": "<name>", "role": "<role>"}]} tags specific columns; \
+{"inherit": "none"} for a block that builds a new table (a summary, a \
+statistics table) rather than adding to its input."""
 
 PLAN_INSTRUCTIONS = """## Your job now: plan
 
@@ -159,26 +164,26 @@ headline metric blocks. The app then runs the whole graph on the full data \
 and refreshes those metrics. End your turn after finish."""
 
 
-CUSTOM_ON = """- Prefer registry blocks. Only write a custom block when no registry block \
-does the job (e.g. a multi-column transformation, an out-of-time split by \
-date). """
+CUSTOM_ON = """- Prefer registry blocks. Only create a new block when no registry block \
+does the job (e.g. a multi-column transformation). New blocks are saved to the \
+user's block library as drafts for them to review. """
 
 CUSTOM_STEPS = """
-A custom step stops the build there: write it with add_custom_block \
+A custom step stops the build there: write it with create_library_block \
 (plan_step set to its ref, lane the stage key), connect its inputs, then \
 call build_stage."""
 
-CUSTOM_OFF = """- Custom blocks are turned off for this build: use registry blocks only. \
+CUSTOM_OFF = """- New blocks are turned off for this build: use registry blocks only. \
 If the goal needs something no registry block does, say so -- in \
 `questions` while planning, with ask_user while building. """
 
 
 def _common(build: AgentBuild) -> str:
-    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_custom_blocks else CUSTOM_OFF)
+    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_new_blocks else CUSTOM_OFF)
 
 
 def _custom_contract(build: AgentBuild) -> list[str]:
-    return [CUSTOM_CONTRACT] if build.options.allow_custom_blocks else []
+    return [CUSTOM_CONTRACT] if build.options.allow_new_blocks else []
 
 
 def _anchor_context(build: AgentBuild) -> str:
@@ -272,8 +277,8 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
             *_custom_contract(build),
             BUILD_INSTRUCTIONS.format(
                 sample_note=sample_note,
-                update_tool=" / update_custom_block" if build.options.allow_custom_blocks else "",
-                custom_steps=CUSTOM_STEPS if build.options.allow_custom_blocks else "",
+                update_tool=" / update_library_block" if build.options.allow_new_blocks else "",
+                custom_steps=CUSTOM_STEPS if build.options.allow_new_blocks else "",
             ),
             *([HINTS_RULE] if build.options.decision_hints else []),
             _catalogue_context(compact=True),

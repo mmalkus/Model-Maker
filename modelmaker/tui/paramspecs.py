@@ -31,27 +31,8 @@ class FieldSpec:
     default: Any = None
 
 
-def _prettify_column_param_label(key: str) -> str:
-    base = key[:-4] if key.endswith("_col") else key
-    base = base.replace("_", " ")
-    return f"{base[:1].upper()}{base[1:]} column"
-
-
-def derive_column_field_specs(params: dict[str, object]) -> list[FieldSpec]:
-    """AI-drafted (custom) blocks name every existing input column they read
-    as a `<name>_col` string parameter (see llm/prompts.CONTRACT) instead of
-    hardcoding it into the function body. Turn each such param into a
-    'column' field (a picker over the block's real input columns) instead
-    of leaving it in raw JSON -- a stale value (e.g. after an upstream
-    rename) then shows up as an extra, clearly-off option rather than
-    silently failing at run time."""
-    keys = sorted(k for k, v in params.items() if k.endswith("_col") and (v is None or isinstance(v, str)))
-    return [FieldSpec(key, _prettify_column_param_label(key), "column") for key in keys]
-
-
 def field_specs_for(block: dict[str, Any]) -> list[FieldSpec]:
-    """The fields to render for a block: its served form if it's a registry
-    block, else (custom blocks) the _col-derived column pickers."""
+    """The fields to render for a block: its served form."""
     form = block.get("form")
     if form:
         return [
@@ -67,15 +48,13 @@ def field_specs_for(block: dict[str, Any]) -> list[FieldSpec]:
             )
             for f in form["fields"]
         ]
-    if block.get("is_custom"):
-        return derive_column_field_specs(block.get("params") or {})
     return []
 
 
 def json_param_keys(block: dict[str, Any]) -> list[str] | None:
-    """The params edited as raw JSON alongside the fields: a registry block's
-    `other_params`, or None meaning "all of them" (custom blocks, and any
-    block with no fields at all)."""
+    """The params edited as raw JSON alongside the fields: the block's
+    `other_params`, or None meaning "all of them" (a block with no fields at
+    all)."""
     form = block.get("form")
     if form and form["fields"]:
         return list(form["other_params"])

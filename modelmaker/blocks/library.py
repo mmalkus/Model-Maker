@@ -1,88 +1,268 @@
-"""Standard block library. Each `fn` is a plain function over pl.DataFrame /
-literal params only — no DataFramePacket, no ColumnMeta. This is what a
---with-metadata=off compile emits verbatim (see plan section 7); the engine
-wraps packets around calls to these at run time, and applies the paired
-metadata_transform separately.
+"""Data: read sources, filter, join, split and write.
+
+Each block is a plain function over pl.DataFrame and literal params -- no
+DataFramePacket, no ColumnMeta. A compiled script emits these verbatim; the
+engine wraps packets around calls at run time and applies each block's
+declared metadata rules separately.
 """
 
 from __future__ import annotations
 
-import os
-from dataclasses import replace
-from typing import Any
-
 import polars as pl
 
-from ..agent import hints as h
-from ..metadata_transforms import (
-    broadcast_to_all_outputs,
-    infer_dtypes,
-    narrow_from_single_input,
-    passthrough,
-)
-from ..packet import ColumnMeta, ColumnRole, DataFramePacket
-from .base import BlockSpec, FieldSpec, PortSpec, register_block
+BLOCKS = {
+    "read_csv": {
+        "display_name": "Read CSV",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out", "lazy": True}],
+        "form": [{"key": "path", "label": "File path", "kind": "path", "options": [".csv"]}],
+        "meta": {"inherit": "none"},
+    },
+    "demo_credit_data": {
+        "display_name": "Demo credit data (PD/LGD/CCF)",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out"}],
+        "meta": {"inherit": "none"},
+    },
+    "read_parquet": {
+        "display_name": "Read Parquet",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out", "lazy": True}],
+        "form": [{"key": "path", "label": "File path", "kind": "path", "options": [".parquet"]}],
+        "meta": {"inherit": "none"},
+    },
+    "read_json": {
+        "display_name": "Read JSON",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out"}],
+        "form": [{"key": "path", "label": "File path", "kind": "path", "options": [".json"]}],
+        "meta": {"inherit": "none"},
+    },
+    "read_excel": {
+        "display_name": "Read Excel",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "path", "label": "File path", "kind": "path", "options": [".xlsx"]},
+            {
+                "key": "sheet",
+                "label": "Sheet name (optional -- defaults to the first sheet)",
+                "kind": "text",
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "read_sql": {
+        "display_name": "Read SQL",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {
+                "key": "connection_env",
+                "label": "Connection variable",
+                "kind": "env",
+                "placeholder": "WAREHOUSE_URI",
+            },
+            {
+                "key": "query",
+                "label": "SQL query",
+                "kind": "sql",
+                "placeholder": "SELECT * FROM loans",
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "filter": {
+        "display_name": "Filter",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {
+                "key": "expr",
+                "label": "Filter expression (SQL)",
+                "kind": "text",
+                "placeholder": "age > 30 and region = 'West'",
+            },
+        ],
+    },
+    "select": {
+        "display_name": "Select columns",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [{"name": "out"}],
+        "form": [{"key": "cols", "label": "Columns to keep", "kind": "columns"}],
+    },
+    "groupby_agg": {
+        "display_name": "Group by / aggregate",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [{"name": "out"}],
+        "meta": {"inherit": {"columns_param": "by"}},
+    },
+    "join": {
+        "display_name": "Join",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "left", "lazy": True}, {"name": "right", "lazy": True}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "on", "label": "Join on", "kind": "columns"},
+            {
+                "key": "how",
+                "label": "How",
+                "kind": "select",
+                "options": ["inner", "left", "right", "full", "semi", "anti"],
+            },
+        ],
+    },
+    "train_test_split": {
+        "display_name": "Train/test split",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["sampling"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "train"}, {"name": "test"}],
+        "form": [
+            {"key": "test_size", "label": "Test size (fraction)", "kind": "number", "step": 0.05},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+            {
+                "key": "stratify_col",
+                "label": "Stratify by (optional, e.g. the default flag)",
+                "kind": "column",
+            },
+        ],
+        "hints": "split",
+    },
+    "time_split": {
+        "display_name": "Out-of-time split",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["sampling"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "development"}, {"name": "out_of_time"}],
+        "form": [
+            {"key": "date_col", "label": "Date column", "kind": "column"},
+            {
+                "key": "cutoff",
+                "label": "Cut-off date (first out-of-time day)",
+                "kind": "text",
+                "placeholder": "2025-01-01",
+            },
+            {
+                "key": "oot_end",
+                "label": "Out-of-time end date (optional, exclusive)",
+                "kind": "text",
+                "placeholder": "2026-01-01",
+            },
+        ],
+        "hints": "split",
+    },
+    "derive_columns": {
+        "display_name": "Derive columns",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [{"name": "out"}],
+        "meta": {"new_role": "feature"},
+    },
+    "one_hot_encode": {
+        "display_name": "One-hot encode",
+        "version": 1,
+        "block_type": "standard",
+        "tags": ["data_prep"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "meta": {"new_role": "feature"},
+    },
+    "write_csv": {
+        "display_name": "Write CSV",
+        "version": 1,
+        "block_type": "output",
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [],
+        "form": [
+            {
+                "key": "filename",
+                "label": "Output filename",
+                "kind": "text",
+                "placeholder": "output.csv",
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "display_table": {
+        "display_name": "Display table",
+        "version": 1,
+        "block_type": "output",
+        "tags": ["output"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+    },
+    "display_value": {
+        "display_name": "View value",
+        "version": 1,
+        "block_type": "output",
+        "tags": ["output"],
+        "inputs": [{"name": "value", "type": "any"}],
+        "outputs": [{"name": "value", "type": "any"}],
+    },
+    "generate_image": {
+        "display_name": "Generate image",
+        "version": 1,
+        "block_type": "output",
+        "tags": ["output"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "image", "type": "image"}],
+        "form": [
+            {
+                "key": "kind",
+                "label": "Chart type",
+                "kind": "select",
+                "options": ["hist", "bar", "scatter", "line"],
+            },
+            {"key": "x", "label": "X column", "kind": "column"},
+            {"key": "y", "label": "Y column (bar / scatter / line)", "kind": "column"},
+            {"key": "bins", "label": "Bins (hist)", "kind": "number"},
+            {"key": "title", "label": "Title", "kind": "text"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+}
 
 
-def read_csv(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+def read_csv(path: str) -> pl.LazyFrame:
     """Reads a CSV file into a dataframe on the `out` port; no inputs.
     `path` is the file path (relative to the working directory the engine
     runs in). Column dtypes are inferred by polars; column roles start
-    untagged. `sample_rows` is not a user param -- the engine injects it in
-    sample mode to read only the first N rows; leave it unset."""
-    # `sample_rows`, when the engine's sample mode is on, is injected by
-    # Runner.run_block the same way output_dir/block_id are (see
-    # util.accepts_param) -- an input block opts in just by naming the
-    # parameter. Scanning with `n_rows` instead of reading the whole file
-    # and truncating afterward (the fallback for input blocks that don't
-    # accept this param -- see runner.py) is the one place lazy evaluation
-    # earns its keep for sample mode: the rest of the pipeline already runs
-    # on the truncated, small-by-construction sample, so nothing downstream
-    # needs lazy frames to iterate cheaply. Full runs (sample_rows=None)
-    # read exactly as before.
-    if sample_rows is not None:
-        return pl.scan_csv(path, n_rows=sample_rows).collect()
-    return pl.read_csv(path)
-
-
-def _probe_path_mtime(params: dict) -> float | None:
-    # Shared "check for changes" probe for every file-based input block
-    # (read_csv/read_parquet/read_json/read_excel): cheap, read-only, and
-    # good enough to flag "source changed" without touching the cached
-    # packet (see plan section 6).
-    try:
-        return os.path.getmtime(params["path"])
-    except OSError:
-        return None
-
-
-def _read_csv_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
-    # The lazy twin of read_csv (see BlockSpec.lazy_fn) -- used only by a
-    # streaming run's fusion path (see Runner._dispatch_fused_group), which
-    # collects once at the end of a whole fused chain rather than here.
-    # Ordinary calls to `read_csv` above are untouched and still always
-    # return a materialized pl.DataFrame.
-    if sample_rows is not None:
-        return pl.scan_csv(path, n_rows=sample_rows)
+    untagged."""
+    # A lazy scan: the engine collects it, pushing sample mode's row cap
+    # down into the scan first, and a streaming run fuses it with whatever
+    # follows (see the output port's "lazy" flag).
     return pl.scan_csv(path)
 
 
-register_block(
-    BlockSpec(
-        category="read_csv",
-        block_type="input",
-        display_name="Read CSV",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=read_csv,
-        lazy_fn=_read_csv_lazy,
-        metadata_transform=infer_dtypes,
-        probe=_probe_path_mtime,
-    )
-)
-
-
-def demo_credit_data(n_rows: int = 5000, seed: int = 42, sample_rows: int | None = None) -> pl.DataFrame:
+def demo_credit_data(n_rows: int = 5000, seed: int = 42) -> pl.DataFrame:
     """Generates the synthetic retail credit-risk demo dataset (term loans
     and credit cards, one row per facility) on the `out` port; no inputs,
     no file. Supports PD (`default_flag`, a 12-month default), LGD
@@ -91,181 +271,61 @@ def demo_credit_data(n_rows: int = 5000, seed: int = 42, sample_rows: int | None
     `balance_at_default` on defaulted credit cards -- see compute_ccf).
     `n_rows` is the number of records; `seed` fixes the data, so the same
     seed always gives the same rows, and a smaller `n_rows` gives the first
-    rows of the larger dataset. `sample_rows` is engine-injected in sample
-    mode; leave it unset."""
+    rows of the larger dataset."""
     from modelmaker import demo_data
 
     if n_rows < 1:
         raise ValueError(f"n_rows must be at least 1, got {n_rows}")
-    return demo_data.to_frame(min(n_rows, sample_rows) if sample_rows is not None else n_rows, seed)
+    return demo_data.to_frame(n_rows, seed)
 
 
-register_block(
-    BlockSpec(
-        category="demo_credit_data",
-        block_type="input",
-        display_name="Demo credit data (PD/LGD/CCF)",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=demo_credit_data,
-        metadata_transform=infer_dtypes,
-    )
-)
-
-
-def read_parquet(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+def read_parquet(path: str) -> pl.LazyFrame:
     """Reads a Parquet file into a dataframe on the `out` port; no inputs.
-    `path` is the file path. Dtypes come from the Parquet schema.
-    `sample_rows` is engine-injected in sample mode (first N rows only);
-    leave it unset."""
-    if sample_rows is not None:
-        return pl.scan_parquet(path).head(sample_rows).collect()
-    return pl.read_parquet(path)
+    `path` is the file path. Dtypes come from the Parquet schema."""
+    return pl.scan_parquet(path)
 
 
-def _read_parquet_lazy(path: str, sample_rows: int | None = None) -> pl.LazyFrame:
-    # Lazy twin of read_parquet, same reasoning as read_csv's (see
-    # BlockSpec.lazy_fn) -- polars has no `n_rows` kwarg on scan_parquet, so
-    # sampling goes through a `.head()` the query optimizer pushes down.
-    lf = pl.scan_parquet(path)
-    return lf.head(sample_rows) if sample_rows is not None else lf
-
-
-register_block(
-    BlockSpec(
-        category="read_parquet",
-        block_type="input",
-        display_name="Read Parquet",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=read_parquet,
-        lazy_fn=_read_parquet_lazy,
-        metadata_transform=infer_dtypes,
-        probe=_probe_path_mtime,
-    )
-)
-
-
-def read_json(path: str, sample_rows: int | None = None) -> pl.DataFrame:
+def read_json(path: str) -> pl.DataFrame:
     """Reads a JSON file into a dataframe on the `out` port; no inputs.
     `path` ending in .jsonl/.ndjson (case-insensitive) is read as
     newline-delimited JSON (one object per line); anything else must be a
-    plain JSON array of records. `sample_rows` is engine-injected in sample
-    mode (first N rows only); leave it unset."""
-    # Newline-delimited JSON has a real lazy/streaming reader; a plain JSON
-    # array does not (polars must load it whole to find its structure), so
-    # this block -- unlike read_csv/read_parquet -- has no lazy_fn twin and
-    # simply never joins a streaming run's fusion group.
+    plain JSON array of records."""
+    # A plain JSON array has no lazy reader (polars must load it whole to
+    # find its structure), so this block returns an eager frame and never
+    # joins a streaming run's fusion.
     if path.lower().endswith((".jsonl", ".ndjson")):
-        if sample_rows is not None:
-            return pl.scan_ndjson(path).head(sample_rows).collect()
         return pl.read_ndjson(path)
-    df = pl.read_json(path)
-    return df.head(sample_rows) if sample_rows is not None else df
+    return pl.read_json(path)
 
 
-register_block(
-    BlockSpec(
-        category="read_json",
-        block_type="input",
-        display_name="Read JSON",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=read_json,
-        metadata_transform=infer_dtypes,
-        probe=_probe_path_mtime,
-    )
-)
-
-
-def read_excel(path: str, sheet: str | None = None, sample_rows: int | None = None) -> pl.DataFrame:
+def read_excel(path: str, sheet: str | None = None) -> pl.DataFrame:
     """Reads one worksheet of an Excel workbook into a dataframe on the
     `out` port; no inputs. `path` is the .xlsx file path; `sheet` is the
     worksheet name -- unset/empty reads the first sheet. The first row is
-    taken as the header. `sample_rows` is engine-injected in sample mode
-    (the whole sheet is still read, then truncated); leave it unset."""
-    df = pl.read_excel(path, sheet_name=sheet) if sheet else pl.read_excel(path)
-    return df.head(sample_rows) if sample_rows is not None else df
+    taken as the header."""
+    return pl.read_excel(path, sheet_name=sheet) if sheet else pl.read_excel(path)
 
 
-register_block(
-    BlockSpec(
-        category="read_excel",
-        block_type="input",
-        display_name="Read Excel",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=read_excel,
-        metadata_transform=infer_dtypes,
-        probe=_probe_path_mtime,
-        form=(
-            FieldSpec("sheet", "Sheet name (optional -- defaults to the first sheet)", "text"),
-        ),
-    )
-)
-
-
-def read_sql(connection_env: str, query: str, sample_rows: int | None = None) -> pl.DataFrame:
+def read_sql(connection_env: str, query: str) -> pl.DataFrame:
     """Runs a SQL query against a database and returns the result set as a
     dataframe on the `out` port; no inputs. `connection_env` is the *name*
     of an environment variable (e.g. "WAREHOUSE_URI") holding the
     connection URI -- never the URI itself; raises KeyError if that
     variable isn't set. `query` is the SQL text, in the target database's
-    own dialect. Optional `probe_query` param (a cheap query such as
-    SELECT MAX(updated_at) ...) lets "check for changes" detect new data;
-    it isn't passed to this function. `sample_rows` is engine-injected in
-    sample mode (the full query still runs, then is truncated client-side);
-    leave it unset."""
+    own dialect. Set the block's optional `probe_query` (a cheap query such
+    as SELECT MAX(updated_at) ...) to let "check for changes" detect new
+    data."""
+    import os
+
     # The connection string itself never lives in params -- it's baked as a
-    # literal into saved project files and (per compiler.py section 7)
-    # compiled scripts, so a raw DB password there would leak into both.
-    # `connection_env` is only the *name* of an env var the user sets
-    # locally (the project already loads .env via api.py); the secret is
-    # read fresh from the environment at run time, live or compiled.
+    # literal into saved project files and compiled scripts, so a raw DB
+    # password there would leak into both. The secret is read fresh from
+    # the environment at run time, live or compiled.
     uri = os.environ[connection_env]
-    df = pl.read_database_uri(query, uri)
-    # No LIMIT/TOP/FETCH FIRST pushdown for sample_rows -- that syntax
-    # differs per SQL dialect (Postgres/MySQL LIMIT vs. SQL Server TOP vs.
-    # Oracle FETCH FIRST), so this truncates client-side instead. Costs a
-    # full round trip in sample mode; keeps this block dialect-agnostic.
-    return df.head(sample_rows) if sample_rows is not None else df
+    return pl.read_database_uri(query, uri)
 
 
-def _probe_sql(params: dict) -> str | None:
-    # Optional: only runs if the user gave a cheap probe_query (e.g. a
-    # COUNT(*) or a MAX(updated_at)) -- there's no generic mtime/checksum
-    # equivalent for a database table. No probe_query means no probe;
-    # Runner.check_for_changes already treats spec.probe returning None as
-    # "never flags changed", which is the right default here.
-    query = params.get("probe_query")
-    if not query:
-        return None
-    try:
-        uri = os.environ[params["connection_env"]]
-        result = pl.read_database_uri(query, uri)
-    except Exception:
-        return None
-    return str(result.row(0)) if result.height else ""
-
-
-register_block(
-    BlockSpec(
-        category="read_sql",
-        block_type="input",
-        display_name="Read SQL",
-        inputs=[],
-        outputs=[PortSpec("out")],
-        fn=read_sql,
-        metadata_transform=infer_dtypes,
-        probe=_probe_sql,
-        form=(
-            FieldSpec("query", "SQL query", "text", placeholder="SELECT * FROM loans"),
-        ),
-    )
-)
-
-
-def filter_rows(df: pl.DataFrame, expr: str) -> pl.DataFrame:
+def filter(df: pl.DataFrame, expr: str) -> pl.DataFrame:
     """Keeps only the rows of `df` for which `expr` is true, emitted on
     `out` with the same columns and roles. `expr` is a Polars SQL boolean
     expression over column names, e.g. "age >= 18 AND region = 'EU'" or
@@ -273,50 +333,11 @@ def filter_rows(df: pl.DataFrame, expr: str) -> pl.DataFrame:
     return df.filter(pl.sql_expr(expr))
 
 
-register_block(
-    BlockSpec(
-        category="filter",
-        block_type="standard",
-        display_name="Filter",
-        tags=("data_prep",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=filter_rows,
-        # filter_rows is pure expression-based code (`.filter(pl.sql_expr(...))`),
-        # identical over pl.DataFrame/pl.LazyFrame -- reused verbatim as the
-        # lazy_fn a streaming run's fusion path calls (see BlockSpec.lazy_fn).
-        lazy_fn=filter_rows,
-        metadata_transform=passthrough,
-        form=(
-            FieldSpec("expr", "Filter expression (SQL)", "text", placeholder="age > 30 and region = 'West'"),
-        ),
-    )
-)
-
-
-def select_cols(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
+def select(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
     """Keeps only the listed columns of `df`, in the order given by `cols`,
     emitted on `out`; kept columns retain their roles. Every name in `cols`
     must exist in the input."""
     return df.select(cols)
-
-
-register_block(
-    BlockSpec(
-        category="select",
-        block_type="standard",
-        display_name="Select columns",
-        tags=("data_prep",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=select_cols,
-        lazy_fn=select_cols,  # same reasoning as filter's lazy_fn above
-        metadata_transform=narrow_from_single_input,
-        form=(
-            FieldSpec("cols", "Columns to keep", "columns"),
-        ),
-    )
-)
 
 
 def groupby_agg(df: pl.DataFrame, by: list[str], aggs: dict[str, str | list[str]]) -> pl.DataFrame:
@@ -339,34 +360,6 @@ def groupby_agg(df: pl.DataFrame, by: list[str], aggs: dict[str, str | list[str]
     return df.group_by(by).agg(agg_exprs)
 
 
-def _groupby_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    by = set(params.get("by", []))
-    result = {}
-    for name in df.columns:
-        if name in by and name in in_meta:
-            result[name] = in_meta[name]
-        else:
-            result[name] = ColumnMeta(dtype=str(df.schema[name]))
-    return {"out": result}
-
-
-register_block(
-    BlockSpec(
-        category="groupby_agg",
-        block_type="standard",
-        display_name="Group by / aggregate",
-        tags=("data_prep",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=groupby_agg,
-        lazy_fn=groupby_agg,  # same reasoning as filter's lazy_fn above
-        metadata_transform=_groupby_meta,
-    )
-)
-
-
 def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inner") -> pl.DataFrame:
     """Joins the `left` and `right` input dataframes on the key columns in
     `on` (same names on both sides), emitted on `out`. `how` is a polars
@@ -382,33 +375,6 @@ def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inn
     if how == "cross":
         raise ValueError('how="cross" is not supported: polars rejects join keys with it')
     return left.join(right, on=on, how=how)
-
-
-def _join_meta(input_metas, outputs, params):
-    left_meta = input_metas["left"]
-    right_meta = input_metas["right"]
-    (df,) = outputs.values()
-    merged = {**right_meta, **left_meta}
-    return {"out": {name: merged[name] for name in df.columns if name in merged}}
-
-
-register_block(
-    BlockSpec(
-        category="join",
-        block_type="standard",
-        display_name="Join",
-        tags=("data_prep",),
-        inputs=[PortSpec("left"), PortSpec("right")],
-        outputs=[PortSpec("out")],
-        fn=join,
-        lazy_fn=join,  # same reasoning as filter's lazy_fn above
-        metadata_transform=_join_meta,
-        form=(
-            FieldSpec("on", "Join on", "columns"),
-            FieldSpec("how", "How", "select", options=("inner", "left", "right", "full", "semi", "anti")),
-        ),
-    )
-)
 
 
 def train_test_split(
@@ -440,54 +406,6 @@ def train_test_split(
     return pl.concat(trains), pl.concat(tests)
 
 
-def _split_hints(outputs: dict[str, Any]) -> list[str]:
-    samples = {}
-    for port, packet in outputs.items():
-        target = h.target_column(packet)
-        if target is None or packet.data.height == 0:
-            continue
-        y = packet.data[target].drop_nulls()
-        if y.len() == 0 or not y.dtype.is_numeric():
-            continue
-        binary = set(y.unique().to_list()) <= {0, 1}
-        samples[port] = (packet.data.height, float(y.mean()), int(y.sum()) if binary else None)
-    hints = []
-    for port, packet in outputs.items():
-        if isinstance(packet, DataFramePacket) and packet.data.height == 0:
-            hints.append(f"{port} is empty -- check the split settings (test_size, cutoff, oot_end).")
-    thin = [f"{p} has {ev}" for p, (_, _, ev) in samples.items() if ev is not None and ev < h.MIN_EVENTS]
-    if thin:
-        hints.append(f"Few events (< {h.MIN_EVENTS}): {h.names(thin)} -- metrics on it will be noisy.")
-    if len(samples) == 2:
-        (a, (_, ra, _)), (b, (_, rb, _)) = samples.items()
-        if ra and abs(rb - ra) / abs(ra) > h.SPLIT_RATE_GAP:
-            hints.append(
-                f"Target rate differs between {a} ({ra:.4f}) and {b} ({rb:.4f}) -- for a random split, set "
-                "stratify_col to the target."
-            )
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="train_test_split",
-        block_type="standard",
-        display_name="Train/test split",
-        tags=("sampling",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("train"), PortSpec("test")],
-        fn=train_test_split,
-        metadata_transform=broadcast_to_all_outputs,
-        form=(
-            FieldSpec("test_size", "Test size (fraction)", "number", step=0.05),
-            FieldSpec("seed", "Random seed", "number"),
-            FieldSpec("stratify_col", "Stratify by (optional, e.g. the default flag)", "column"),
-        ),
-        hints=_split_hints,
-    )
-)
-
-
 def time_split(
     df: pl.DataFrame, date_col: str, cutoff: str, oot_end: str | None = None
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -517,26 +435,6 @@ def time_split(
     return development, out_of_time
 
 
-register_block(
-    BlockSpec(
-        category="time_split",
-        block_type="standard",
-        display_name="Out-of-time split",
-        tags=("sampling",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("development"), PortSpec("out_of_time")],
-        fn=time_split,
-        metadata_transform=broadcast_to_all_outputs,
-        form=(
-            FieldSpec("date_col", "Date column", "column"),
-            FieldSpec("cutoff", "Cut-off date (first out-of-time day)", "text", placeholder="2025-01-01"),
-            FieldSpec("oot_end", "Out-of-time end date (optional, exclusive)", "text", placeholder="2026-01-01"),
-        ),
-        hints=_split_hints,
-    )
-)
-
-
 def derive_columns(df: pl.DataFrame, expressions: dict[str, str]) -> pl.DataFrame:
     """Adds (or replaces) columns computed from SQL expressions over the
     existing columns -- ratios, flags, differences, bands -- the everyday
@@ -549,33 +447,6 @@ def derive_columns(df: pl.DataFrame, expressions: dict[str, str]) -> pl.DataFram
     in one step. New columns are tagged role=feature; a replaced column
     keeps its role."""
     return df.with_columns([pl.sql_expr(expr).alias(name) for name, expr in expressions.items()])
-
-
-def _derive_columns_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (out,) = outputs.values()
-    result = {}
-    for name in out.columns:
-        if name in in_meta:
-            result[name] = replace(in_meta[name], dtype=str(out.schema[name]))
-        else:
-            result[name] = ColumnMeta(dtype=str(out.schema[name]), role=ColumnRole.FEATURE)
-    return {"out": result}
-
-
-register_block(
-    BlockSpec(
-        category="derive_columns",
-        block_type="standard",
-        display_name="Derive columns",
-        tags=("data_prep",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=derive_columns,
-        lazy_fn=derive_columns,  # pure expressions, same over a LazyFrame
-        metadata_transform=_derive_columns_meta,
-    )
-)
 
 
 def one_hot_encode(
@@ -611,63 +482,16 @@ def one_hot_encode(
     return base.hstack(dummies)
 
 
-def _one_hot_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (out,) = outputs.values()
-    result = {}
-    for name in out.columns:
-        result[name] = in_meta[name] if name in in_meta else ColumnMeta(dtype=str(out.schema[name]), role=ColumnRole.FEATURE)
-    return {"out": result}
-
-
-register_block(
-    BlockSpec(
-        category="one_hot_encode",
-        block_type="standard",
-        display_name="One-hot encode",
-        tags=("data_prep",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=one_hot_encode,
-        metadata_transform=_one_hot_meta,
-    )
-)
-
-
 def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
     """Writes the `df` input to a CSV file; no output ports. `filename` is
     the file name (e.g. "scored.csv"), written inside `output_dir`, which
     the engine injects as the run's output directory -- leave it unset.
     Overwrites any existing file of the same name."""
-    df.write_csv(os.path.join(output_dir, filename))
+    import os
 
-
-def _write_csv_sink(df: pl.LazyFrame, filename: str, output_dir: str = ".") -> None:
-    # The streaming-sink twin of write_csv (see BlockSpec.lazy_sink_fn):
-    # called only when this block is folded onto the end of a streaming
-    # run's fusion group as its terminal write (see
-    # Runner._build_fusion_groups), so the group's whole upstream plan --
-    # source scan included -- is written straight to disk via the
-    # streaming engine without ever materializing a cached DataFrame for
-    # the block that feeds it.
-    df.sink_csv(os.path.join(output_dir, filename))
-
-
-register_block(
-    BlockSpec(
-        category="write_csv",
-        block_type="output",
-        display_name="Write CSV",
-        inputs=[PortSpec("df")],
-        outputs=[],
-        fn=write_csv,
-        lazy_sink_fn=_write_csv_sink,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("filename", "Output filename", "text", placeholder="output.csv"),
-        ),
-    )
-)
+    # .lazy() is a no-op on a LazyFrame: in a streaming run this block is
+    # handed its upstream's uncollected plan and writes it straight to disk.
+    df.lazy().sink_csv(os.path.join(output_dir, filename))
 
 
 def display_table(df: pl.DataFrame) -> pl.DataFrame:
@@ -677,49 +501,12 @@ def display_table(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-register_block(
-    BlockSpec(
-        category="display_table",
-        block_type="output",
-        display_name="Display table",
-        tags=("output",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=display_table,
-        metadata_transform=passthrough,
-    )
-)
-
-
 def display_value(value):
     """A no-op pass-through, like display_table, but for any port type --
     a dataframe, a model/scalar_metric artifact (a plain dict), or an image.
     Its ports are typed "any" so it wires up to whatever you point it at;
     the UI figures out how to render whatever actually comes through."""
     return value
-
-
-def _display_value_meta(input_metas, outputs, params):
-    # Only reached when the value passed through actually was a DataFrame
-    # (see runner.py: the transform only runs when an output is one) --
-    # reuse the real upstream column metadata, same as display_table.
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    return {"value": {name: in_meta[name] if name in in_meta else ColumnMeta(dtype=str(df.schema[name])) for name in df.columns}}
-
-
-register_block(
-    BlockSpec(
-        category="display_value",
-        block_type="output",
-        display_name="View value",
-        tags=("output",),
-        inputs=[PortSpec("value", type="any")],
-        outputs=[PortSpec("value", type="any")],
-        fn=display_value,
-        metadata_transform=_display_value_meta,
-    )
-)
 
 
 def generate_image(
@@ -781,24 +568,3 @@ def generate_image(
         f.write(buf.getvalue())
 
     return buf.getvalue()
-
-
-register_block(
-    BlockSpec(
-        category="generate_image",
-        block_type="output",
-        display_name="Generate image",
-        tags=("output",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("image", type="image")],
-        fn=generate_image,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("kind", "Chart type", "select", options=("hist", "bar", "scatter", "line")),
-            FieldSpec("x", "X column", "column"),
-            FieldSpec("y", "Y column (bar / scatter / line)", "column"),
-            FieldSpec("bins", "Bins (hist)", "number"),
-            FieldSpec("title", "Title", "text"),
-        ),
-    )
-)

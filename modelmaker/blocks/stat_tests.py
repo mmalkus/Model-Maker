@@ -10,13 +10,195 @@ only guarantees `polars as pl` at module level.
 
 from __future__ import annotations
 
-from typing import Any
-
 import polars as pl
 
-from ..agent import hints as h
-from ..metadata_transforms import infer_dtypes
-from .base import BlockSpec, FieldSpec, PortSpec, register_block
+BLOCKS = {
+    "ks_test": {
+        "display_name": "KS test",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["performance"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {
+                "key": "score_col",
+                "label": "Score column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {
+                "key": "target_col",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "ks_test",
+    },
+    "auc_gini": {
+        "display_name": "AUC / Gini",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["performance"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {
+                "key": "score_col",
+                "label": "Score column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {
+                "key": "target_col",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "auc_gini",
+    },
+    "rating_summary": {
+        "display_name": "Rating scale summary",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["rating_scale", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {"key": "grade_col", "label": "Grade column", "kind": "column"},
+            {
+                "key": "target_col",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "rating_summary",
+    },
+    "psi_test": {
+        "display_name": "PSI test",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["stability"],
+        "inputs": [{"name": "expected"}, {"name": "actual"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {"key": "col", "label": "Column to compare", "kind": "column"},
+            {"key": "bins", "label": "Bins", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "psi_test",
+    },
+    "roc_curve": {
+        "display_name": "ROC curve",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["performance", "output"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "meta": {"inherit": "none"},
+        "hints": "roc_curve",
+    },
+    "calibration_test": {
+        "display_name": "Calibration (Hosmer-Lemeshow)",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["calibration", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "meta": {"inherit": "none"},
+        "hints": "calibration_test",
+    },
+    "continuous_accuracy": {
+        "display_name": "Continuous accuracy (MAE/MSE/RMSE)",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["performance", "lgd", "ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {"key": "actual_col", "label": "Actual column", "kind": "column", "auto_role": "target"},
+            {
+                "key": "predicted_col",
+                "label": "Predicted column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "continuous_accuracy",
+    },
+    "bucketed_calibration": {
+        "display_name": "Bucketed O vs E",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["calibration", "lgd", "ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {"key": "actual_col", "label": "Actual column", "kind": "column", "auto_role": "target"},
+            {
+                "key": "predicted_col",
+                "label": "Predicted column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {"key": "bins", "label": "Bins", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "bucketed_calibration",
+    },
+    "grade_backtest": {
+        "display_name": "Grade PD back-test (binomial / Jeffreys)",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["rating_scale", "calibration", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {"key": "grade_col", "label": "Grade column", "kind": "column"},
+            {
+                "key": "target_col",
+                "label": "Default flag column",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "pd_col", "label": "Grade PD column (e.g. grade_pd)", "kind": "column"},
+            {"key": "confidence", "label": "Confidence level", "kind": "number", "step": 0.005},
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "grade_backtest",
+    },
+    "compare_samples": {
+        "display_name": "Compare samples (train/test/OOT)",
+        "version": 1,
+        "block_type": "output",
+        "group": "tests",
+        "tags": ["performance", "stability"],
+        "inputs": [
+            {"name": "sample_1"},
+            {"name": "sample_2", "required": False},
+            {"name": "sample_3", "required": False},
+        ],
+        "outputs": [{"name": "table", "aggregate": True}],
+        "meta": {"inherit": "none"},
+        "hints": "compare_samples",
+    },
+}
 
 
 def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
@@ -39,37 +221,6 @@ def ks_test(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     return {"kind": "ks_test", "ks_statistic": float(result.statistic), "p_value": float(result.pvalue)}
 
 
-def _ks_test_hints(outputs: dict[str, Any]) -> list[str]:
-    ks = h.metric(outputs).get("ks_statistic")
-    if not h.num(ks):
-        return []
-    if ks >= h.SUSPICIOUS_KS:
-        return [f"KS {ks:.2f} is unusually high for a credit model -- check the features for leakage."]
-    if ks < h.WEAK_KS:
-        return [f"KS {ks:.2f} is weak -- the score separates goods and bads poorly."]
-    return [f"KS {ks:.2f} is in the usual range."]
-
-
-register_block(
-    BlockSpec(
-        category="ks_test",
-        block_type="output",
-        group="tests",
-        display_name="KS test",
-        tags=("performance",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=ks_test,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
-            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
-        ),
-        hints=_ks_test_hints,
-    )
-)
-
-
 def auc_gini(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     """Area under the ROC curve of `score_col` against a binary 0/1
     `target_col`, plus the Gini coefficient (2*AUC - 1). Emits a
@@ -82,42 +233,6 @@ def auc_gini(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
 
     auc = float(roc_auc_score(df[target_col].to_numpy(), df[score_col].to_numpy()))
     return {"kind": "auc_gini", "auc": auc, "gini": 2 * auc - 1}
-
-
-def _gini_value(gini: Any) -> list[str]:
-    if not h.num(gini):
-        return []
-    if gini < 0:
-        return ["Gini is negative -- the score runs the wrong way (higher = safer). Check score_col is the predicted PD."]
-    if gini >= h.SUSPICIOUS_GINI:
-        return [f"Gini {gini:.2f} is unusually high for a credit model -- check the features for leakage before going on."]
-    if gini < h.WEAK_GINI:
-        return [f"Gini {gini:.2f} is weak -- revisit feature selection before validating further."]
-    return [f"Gini {gini:.2f} is in the usual range."]
-
-
-def _auc_gini_hints(outputs: dict[str, Any]) -> list[str]:
-    return _gini_value(h.metric(outputs).get("gini"))
-
-
-register_block(
-    BlockSpec(
-        category="auc_gini",
-        block_type="output",
-        group="tests",
-        display_name="AUC / Gini",
-        tags=("performance",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=auc_gini,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
-            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
-        ),
-        hints=_auc_gini_hints,
-    )
-)
 
 
 def psi_test(expected: pl.DataFrame, actual: pl.DataFrame, col: str, bins: int = 10) -> dict:
@@ -177,69 +292,6 @@ def rating_summary(df: pl.DataFrame, grade_col: str, target_col: str) -> dict:
     return {"kind": "rating_summary", "grades": rows, "monotonic": monotonic}
 
 
-def _rating_summary_hints(outputs: dict[str, Any]) -> list[str]:
-    metric = h.metric(outputs)
-    if "monotonic" not in metric:
-        return []
-    if metric["monotonic"]:
-        return ["Default rates rise grade by grade, as they should."]
-    return [
-        "Default rates aren't monotonic across grades -- refit the master scale with algorithm "
-        "'monotonic_default_rate' (or fewer grades)."
-    ]
-
-
-register_block(
-    BlockSpec(
-        category="rating_summary",
-        block_type="output",
-        group="tests",
-        display_name="Rating scale summary",
-        tags=("rating_scale", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=rating_summary,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("grade_col", "Grade column", "column"),
-            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
-        ),
-        hints=_rating_summary_hints,
-    )
-)
-
-
-def _psi_test_hints(outputs: dict[str, Any]) -> list[str]:
-    psi = h.metric(outputs).get("psi")
-    if not h.num(psi):
-        return []
-    if psi >= h.PSI_SHIFTED:
-        return [f"PSI {psi:.3f} >= {h.PSI_SHIFTED}: a significant shift -- ask_user before relying on it."]
-    if psi >= h.PSI_STABLE:
-        return [f"PSI {psi:.3f}: a moderate shift -- worth noting in the stage summary."]
-    return [f"PSI {psi:.3f} < {h.PSI_STABLE}: stable."]
-
-
-register_block(
-    BlockSpec(
-        category="psi_test",
-        block_type="output",
-        group="tests",
-        display_name="PSI test",
-        tags=("stability",),
-        inputs=[PortSpec("expected"), PortSpec("actual")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=psi_test,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("col", "Column to compare", "column"),
-            FieldSpec("bins", "Bins", "number"),
-        ),
-        hints=_psi_test_hints,
-    )
-)
-
-
 def roc_curve(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
     """The full ROC curve -- false/true positive rate at each distinct
     score threshold -- not just the scalar AUC that auc_gini reports, for
@@ -263,27 +315,6 @@ def roc_curve(df: pl.DataFrame, score_col: str, target_col: str) -> dict:
             for f, t, th in zip(fpr, tpr, thresholds)
         ],
     }
-
-
-def _roc_curve_hints(outputs: dict[str, Any]) -> list[str]:
-    auc = h.metric(outputs).get("auc")
-    return _gini_value(2 * auc - 1) if h.num(auc) else []
-
-
-register_block(
-    BlockSpec(
-        category="roc_curve",
-        block_type="output",
-        group="tests",
-        display_name="ROC curve",
-        tags=("performance", "output"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=roc_curve,
-        metadata_transform=lambda *_a, **_k: {},
-        hints=_roc_curve_hints,
-    )
-)
 
 
 def calibration_test(df: pl.DataFrame, score_col: str, target_col: str, bins: int = 10) -> dict:
@@ -332,34 +363,6 @@ def calibration_test(df: pl.DataFrame, score_col: str, target_col: str, bins: in
             for r in rows
         ],
     }
-
-
-def _calibration_test_hints(outputs: dict[str, Any]) -> list[str]:
-    p = h.metric(outputs).get("p_value")
-    if not h.num(p):
-        return []
-    if p < h.CALIBRATION_P:
-        return [
-            f"Hosmer-Lemeshow p = {p:.3g} < {h.CALIBRATION_P}: predicted PDs don't match observed rates -- calibrate "
-            "(calibrate_model) or explain why not in the stage summary."
-        ]
-    return [f"Hosmer-Lemeshow p = {p:.3g}: calibration is acceptable."]
-
-
-register_block(
-    BlockSpec(
-        category="calibration_test",
-        block_type="output",
-        group="tests",
-        display_name="Calibration (Hosmer-Lemeshow)",
-        tags=("calibration", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=calibration_test,
-        metadata_transform=lambda *_a, **_k: {},
-        hints=_calibration_test_hints,
-    )
-)
 
 
 def continuous_accuracy(df: pl.DataFrame, actual_col: str, predicted_col: str) -> dict:
@@ -413,44 +416,6 @@ def continuous_accuracy(df: pl.DataFrame, actual_col: str, predicted_col: str) -
     }
 
 
-def _continuous_accuracy_hints(outputs: dict[str, Any]) -> list[str]:
-    m = h.metric(outputs)
-    hints = []
-    if h.num(m.get("r2")) and m["r2"] < 0:
-        hints.append("R^2 is negative -- the model predicts worse than the mean. Revisit the features.")
-    if h.num(m.get("spearman")) and m["spearman"] < h.WEAK_SPEARMAN:
-        hints.append(f"Spearman {m['spearman']:.2f} is weak -- the prediction barely ranks the outcome.")
-    actual, bias = m.get("mean_actual"), m.get("bias")
-    if h.num(actual) and h.num(bias) and actual and abs(bias) / abs(actual) > h.CALIBRATION_GAP:
-        hints.append(
-            f"Mean prediction is {abs(bias) / abs(actual):.0%} {'above' if bias > 0 else 'below'} the mean outcome -- "
-            "calibrate the model."
-        )
-    if m and not hints and h.num(m.get("spearman")):
-        hints.append(f"Accuracy looks reasonable (Spearman {m['spearman']:.2f}, bias {m.get('bias', 0):+.4f}).")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="continuous_accuracy",
-        block_type="output",
-        group="tests",
-        display_name="Continuous accuracy (MAE/MSE/RMSE)",
-        tags=("performance", "lgd", "ccf_ead"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=continuous_accuracy,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
-            FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
-        ),
-        hints=_continuous_accuracy_hints,
-    )
-)
-
-
 def bucketed_calibration(df: pl.DataFrame, actual_col: str, predicted_col: str, bins: int = 10) -> dict:
     """Observed-vs-expected by bucket for a continuous bounded target (LGD,
     CCF, EAD): quantile-buckets rows by their predicted value, then compares
@@ -477,45 +442,6 @@ def bucketed_calibration(df: pl.DataFrame, actual_col: str, predicted_col: str, 
             for r in rows
         ],
     }
-
-
-def _bucketed_calibration_hints(outputs: dict[str, Any]) -> list[str]:
-    buckets = h.metric(outputs).get("buckets") or []
-    off = [
-        b["bucket"]
-        for b in buckets
-        if h.num(b.get("observed_mean"))
-        and h.num(b.get("predicted_mean"))
-        and b["predicted_mean"]
-        and abs(b["observed_mean"] - b["predicted_mean"]) / abs(b["predicted_mean"]) > h.CALIBRATION_GAP
-    ]
-    if off:
-        return [
-            f"{len(off)} of {len(buckets)} buckets miss their prediction by more than {h.CALIBRATION_GAP:.0%}: "
-            f"{h.names(off)} -- calibrate the model, or say why in the stage summary."
-        ]
-    return ["Every bucket's observed mean is close to its prediction."] if buckets else []
-
-
-register_block(
-    BlockSpec(
-        category="bucketed_calibration",
-        block_type="output",
-        group="tests",
-        display_name="Bucketed O vs E",
-        tags=("calibration", "lgd", "ccf_ead"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=bucketed_calibration,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("actual_col", "Actual column", "column", auto_role="target"),
-            FieldSpec("predicted_col", "Predicted column", "column", auto_role="predicted"),
-            FieldSpec("bins", "Bins", "number"),
-        ),
-        hints=_bucketed_calibration_hints,
-    )
-)
 
 
 def grade_backtest(
@@ -568,52 +494,6 @@ def grade_backtest(
         "monotonic": all(a <= b for a, b in zip(rates, rates[1:])),
         "n_red": sum(1 for g in grades if g["traffic_light"] == "red"),
     }
-
-
-def _grade_backtest_hints(outputs: dict[str, Any]) -> list[str]:
-    metric = h.metric(outputs)
-    grades = metric.get("grades") or []
-    if not grades:
-        return []
-    hints = []
-    red = [str(g["grade"]) for g in grades if g.get("traffic_light") == "red"]
-    if red:
-        hints.append(
-            f"Red grades ({h.names(red)}): their PD is too low for the observed default rate -- recalibrate, or add a "
-            "margin of conservatism."
-        )
-    if (metric.get("portfolio") or {}).get("traffic_light") == "red":
-        hints.append("The portfolio-level PD is too low -- recalibrate before anything else.")
-    if metric.get("monotonic") is False:
-        hints.append("Observed rates aren't monotonic across grades -- refit the master scale ('monotonic_default_rate').")
-    hhi = metric.get("herfindahl")
-    if h.num(hhi) and hhi > 2 / len(grades):
-        hints.append(f"The population is concentrated in few grades (Herfindahl {hhi:.2f}) -- consider more even grades.")
-    if not hints:
-        hints.append("The back-test passes: no red grades, monotonic, evenly spread.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="grade_backtest",
-        block_type="output",
-        group="tests",
-        display_name="Grade PD back-test (binomial / Jeffreys)",
-        tags=("rating_scale", "calibration", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=grade_backtest,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("grade_col", "Grade column", "column"),
-            FieldSpec("target_col", "Default flag column", "column", auto_role="target"),
-            FieldSpec("pd_col", "Grade PD column (e.g. grade_pd)", "column"),
-            FieldSpec("confidence", "Confidence level", "number", step=0.005),
-        ),
-        hints=_grade_backtest_hints,
-    )
-)
 
 
 def compare_samples(
@@ -673,47 +553,3 @@ def compare_samples(
             )
         rows.append(row)
     return pl.DataFrame(rows)
-
-
-def _compare_samples_hints(outputs: dict[str, Any]) -> list[str]:
-    rows = h.rows(outputs.get("table"))
-    if not rows:
-        return []
-    hints = []
-    base = rows[0]
-    for key, limit in (("gini", h.OVERFIT_GINI_DROP), ("spearman", h.OVERFIT_SPEARMAN_DROP)):
-        for r in rows[1:]:
-            if h.num(base.get(key)) and h.num(r.get(key)) and base[key] - r[key] > limit:
-                hints.append(
-                    f"{key.title()} falls {base[key] - r[key]:.2f} from {base['sample']} ({base[key]:.2f}) to "
-                    f"{r['sample']} ({r[key]:.2f}) -- likely overfitting: try fewer features or stronger regularisation."
-                )
-    for r in rows:
-        actual, predicted = r.get("mean_actual"), r.get("mean_predicted")
-        if h.num(actual) and h.num(predicted) and actual:
-            gap = (predicted - actual) / abs(actual)
-            if abs(gap) > h.CALIBRATION_GAP:
-                hints.append(
-                    f"On {r['sample']} the mean prediction ({predicted:.4f}) is {abs(gap):.0%} "
-                    f"{'above' if gap > 0 else 'below'} the mean outcome ({actual:.4f}) -- calibrate the model."
-                )
-    if not hints:
-        hints.append("Performance holds across the samples and predictions match outcomes on average.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="compare_samples",
-        block_type="output",
-        group="tests",
-        display_name="Compare samples (train/test/OOT)",
-        tags=("performance", "stability"),
-        inputs=[PortSpec("sample_1"), PortSpec("sample_2", required=False), PortSpec("sample_3", required=False)],
-        outputs=[PortSpec("table")],
-        aggregate_outputs=("table",),
-        fn=compare_samples,
-        metadata_transform=infer_dtypes,
-        hints=_compare_samples_hints,
-    )
-)

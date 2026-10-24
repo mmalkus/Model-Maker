@@ -335,9 +335,6 @@ class ModelMakerTUI(App):
             self.notify("params JSON is invalid -- not saved", severity="error")
             return
         fields: dict[str, Any] = {"params": params}
-        code = self.inspector.code.collect_code()
-        if code is not None:
-            fields["code"] = code
         try:
             await self.client.update_block(self.selected_block_id, **fields)
         except APIError as e:
@@ -706,7 +703,7 @@ class ModelMakerTUI(App):
 
     def _show_draft(self, result: dict[str, Any]) -> None:
         self.pending_draft = {"block_id": self.selected_block_id, **result}
-        self.inspector.ai.show_proposal(result.get("code"), result.get("params"), result.get("explanation"))
+        self.inspector.ai.show_proposal(None, result.get("params"), result.get("explanation"))
         self.notify("proposal ready -- Ctrl+A apply, Esc discard")
 
     async def action_apply_draft(self) -> None:
@@ -716,10 +713,6 @@ class ModelMakerTUI(App):
         self.pending_draft = None
         self.inspector.ai.clear_proposal()
         fields: dict[str, Any] = {}
-        if draft.get("code") is not None:
-            fields["code"] = draft["code"]
-        if draft.get("metadata_transform") is not None:
-            fields["metadata_transform"] = draft["metadata_transform"]
         if draft.get("params") is not None:
             fields["params"] = draft["params"]
         try:

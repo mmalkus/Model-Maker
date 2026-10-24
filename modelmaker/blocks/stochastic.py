@@ -42,17 +42,304 @@ than a parquet-file handle).
 
 from __future__ import annotations
 
-from typing import Any
-
 import polars as pl
 
-from ..agent import hints as h
-from ..metadata_transforms import infer_dtypes, passthrough
-from .base import BlockSpec, FieldSpec, PortSpec, register_block
-
-# ---------------------------------------------------------------------------
-# Distribution fitting
-# ---------------------------------------------------------------------------
+BLOCKS = {
+    "fit_distribution": {
+        "display_name": "Fit distribution",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["distributions"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "distribution", "type": "distribution"}, {"name": "fit_table", "aggregate": True}],
+        "form": [{"key": "column", "label": "Column to fit", "kind": "column"}],
+        "meta": {"inherit": "none"},
+        "hints": "fit_distribution",
+    },
+    "sample_distribution": {
+        "display_name": "Sample distribution",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["distributions"],
+        "inputs": [{"name": "distribution", "type": "distribution"}],
+        "outputs": [{"name": "samples"}],
+        "form": [
+            {"key": "n", "label": "Number of samples", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "build_dependency": {
+        "display_name": "Build dependency",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation", "distributions"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "dependency", "type": "dependency"}],
+        "form": [
+            {"key": "columns", "label": "Columns", "kind": "columns"},
+            {
+                "key": "copula_type",
+                "label": "Copula",
+                "kind": "select",
+                "options": ["gaussian", "t", "clayton", "gumbel"],
+            },
+            {"key": "dof", "label": "Degrees of freedom (t copula)", "kind": "number"},
+            {"key": "theta", "label": "Theta (Clayton / Gumbel)", "kind": "number", "step": 0.1},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "simulate_op_risk_lda": {
+        "display_name": "Simulate op-risk LDA",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation"],
+        "inputs": [{"name": "severity_dist", "type": "distribution"}],
+        "outputs": [
+            {"name": "simulation_result", "type": "simulation_result"},
+            {"name": "quantile_table", "aggregate": True},
+            {"name": "paths", "required": False},
+        ],
+        "form": [
+            {"key": "n_paths", "label": "Number of paths", "kind": "number"},
+            {"key": "chunk_size", "label": "Chunk size", "kind": "number"},
+            {
+                "key": "frequency_family",
+                "label": "Frequency family",
+                "kind": "select",
+                "options": ["poisson", "negbinom"],
+            },
+            {"key": "frequency_mean", "label": "Frequency mean", "kind": "number", "step": 0.1},
+            {
+                "key": "frequency_dispersion",
+                "label": "Frequency dispersion (negbinom)",
+                "kind": "number",
+                "step": 0.1,
+            },
+            {"key": "n_bootstrap", "label": "Bootstrap replicates", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "risk_measures": {
+        "display_name": "Risk measures (VaR / TVaR)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation", "distributions"],
+        "inputs": [{"name": "df"}],
+        "outputs": [
+            {"name": "simulation_result", "type": "simulation_result"},
+            {"name": "quantile_table", "aggregate": True},
+        ],
+        "form": [
+            {"key": "column", "label": "Loss column", "kind": "column"},
+            {"key": "n_bootstrap", "label": "Bootstrap replicates", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "aggregate_simulation": {
+        "display_name": "Aggregate simulation (copula)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation"],
+        "inputs": [{"name": "components"}, {"name": "dependency", "type": "dependency"}],
+        "outputs": [
+            {"name": "simulation_result", "type": "simulation_result"},
+            {"name": "quantile_table", "aggregate": True},
+            {"name": "contributions", "aggregate": True},
+        ],
+        "form": [
+            {"key": "n_bootstrap", "label": "Bootstrap replicates", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "asrf_economic_capital": {
+        "display_name": "ASRF economic capital (closed form)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "simulation_result", "type": "simulation_result"}, {"name": "detail"}],
+        "form": [
+            {"key": "pd_col", "label": "PD column", "kind": "column"},
+            {"key": "lgd_col", "label": "LGD column", "kind": "column"},
+            {"key": "ead_col", "label": "EAD column", "kind": "column"},
+            {"key": "confidence", "label": "Confidence level", "kind": "number", "step": 0.001},
+        ],
+    },
+    "simulate_credit_portfolio": {
+        "display_name": "Simulate credit portfolio (multi-factor)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation"],
+        "inputs": [{"name": "df"}, {"name": "dependency", "type": "dependency"}],
+        "outputs": [
+            {"name": "simulation_result", "type": "simulation_result"},
+            {"name": "quantile_table", "aggregate": True},
+            {"name": "contributions"},
+        ],
+        "form": [
+            {"key": "pd_col", "label": "PD column", "kind": "column"},
+            {"key": "lgd_col", "label": "LGD column", "kind": "column"},
+            {"key": "ead_col", "label": "EAD column", "kind": "column"},
+            {
+                "key": "sector_col",
+                "label": "Sector column (must match the dependency labels)",
+                "kind": "column",
+            },
+            {"key": "name_col", "label": "Segment name column (optional)", "kind": "column"},
+            {"key": "n_paths", "label": "Number of paths", "kind": "number"},
+            {"key": "chunk_size", "label": "Chunk size", "kind": "number"},
+            {"key": "n_bootstrap", "label": "Bootstrap replicates", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "fit_proxy": {
+        "display_name": "Fit proxy function",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["proxy_models"],
+        "inputs": [{"name": "fitting"}],
+        "outputs": [{"name": "proxy", "type": "proxy_function"}],
+        "form": [
+            {"key": "value_col", "label": "Value column (polynomial)", "kind": "column"},
+            {
+                "key": "method",
+                "label": "Method",
+                "kind": "select",
+                "options": ["closed_form", "polynomial"],
+            },
+            {
+                "key": "expr",
+                "label": "Expression (closed_form)",
+                "kind": "text",
+                "placeholder": "x + 0.5 * y",
+            },
+            {"key": "degree", "label": "Degree (polynomial)", "kind": "number"},
+            {
+                "key": "regressor",
+                "label": "Regressor (polynomial)",
+                "kind": "select",
+                "options": ["ridge", "lasso", "ols"],
+            },
+            {
+                "key": "alpha",
+                "label": "Regularization (ridge / lasso)",
+                "kind": "number",
+                "step": 0.1,
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "evaluate_proxy": {
+        "display_name": "Evaluate proxy function",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["proxy_models"],
+        "inputs": [{"name": "proxy", "type": "proxy_function"}, {"name": "scenarios"}],
+        "outputs": [{"name": "valued"}],
+    },
+    "validate_proxy": {
+        "display_name": "Validate proxy function",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["proxy_models"],
+        "inputs": [{"name": "proxy", "type": "proxy_function"}, {"name": "validation"}],
+        "outputs": [{"name": "diagnostics", "type": "scalar_metric"}, {"name": "error_table"}],
+        "form": [{"key": "value_col", "label": "Actual value column", "kind": "column"}],
+        "hints": "validate_proxy",
+    },
+    "var_covar_aggregate": {
+        "display_name": "Var-covar aggregate",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "tags": ["capital_simulation", "proxy_models"],
+        "inputs": [
+            {"name": "proxy", "type": "proxy_function"},
+            {"name": "base"},
+            {"name": "dependency", "type": "dependency"},
+        ],
+        "outputs": [{"name": "aggregation_result", "type": "simulation_result"}, {"name": "contributions"}],
+        "form": [
+            {
+                "key": "method",
+                "label": "Method",
+                "kind": "select",
+                "options": ["normal", "cornish_fisher", "moment_matching", "delta_gamma_copula"],
+            },
+            {"key": "bump_size", "label": "Bump size", "kind": "number", "step": 0.001},
+            {"key": "n_mc", "label": "Monte Carlo draws (non-normal methods)", "kind": "number"},
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "iterate": {
+        "display_name": "Iterate (fan-out)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "n_iterations", "label": "Iterations", "kind": "number"},
+            {
+                "key": "iterator",
+                "label": "Iterator",
+                "kind": "select",
+                "options": ["bootstrap_resample", "scenario_row"],
+            },
+            {"key": "seed", "label": "Random seed", "kind": "number"},
+        ],
+    },
+    "collect": {
+        "display_name": "Collect (fan-out)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "stochastic",
+        "inputs": [{"name": "value"}],
+        "outputs": [
+            {"name": "table"},
+            {"name": "simulation_result", "type": "simulation_result", "required": False},
+        ],
+        "form": [
+            {
+                "key": "iterate_block",
+                "label": "Paired 'iterate' block id",
+                "kind": "text",
+                "placeholder": "b_042",
+            },
+            {
+                "key": "reducer",
+                "label": "Reducer",
+                "kind": "select",
+                "options": ["concat", "risk_measures"],
+            },
+            {"key": "value_col", "label": "Value column (risk_measures)", "kind": "column"},
+            {
+                "key": "n_bootstrap",
+                "label": "Bootstrap replicates (risk_measures)",
+                "kind": "number",
+            },
+            {"key": "seed", "label": "Random seed (risk_measures)", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+}
 
 
 def fit_distribution(
@@ -96,40 +383,6 @@ def fit_distribution(
     return dist, table
 
 
-def _fit_distribution_hints(outputs: dict[str, Any]) -> list[str]:
-    dist = h.metric(outputs, "distribution")
-    stats = dist.get("fit_stats") or {}
-    p = stats.get("ks_p")
-    if not dist.get("family") or not h.num(p):
-        return []
-    if p < h.GOOD_FIT_P:
-        return [
-            f"The best family ({dist['family']}) still fits poorly (KS p = {p:.3g}) -- try other families, or "
-            "spliced_tail for a heavy tail."
-        ]
-    return [f"{dist['family']} fits best (lowest AIC) and fits well (KS p = {p:.3g})."]
-
-
-register_block(
-    BlockSpec(
-        category="fit_distribution",
-        block_type="standard",
-        group="stochastic",
-        display_name="Fit distribution",
-        tags=("distributions",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("distribution", type="distribution"), PortSpec("fit_table")],
-        aggregate_outputs=("fit_table",),
-        fn=fit_distribution,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("column", "Column to fit", "column"),
-        ),
-        hints=_fit_distribution_hints,
-    )
-)
-
-
 def sample_distribution(distribution: dict, n: int = 100_000, seed: int = 0, block_id: str | None = None) -> pl.DataFrame:
     """Draws `n` random values (default 100,000) from the `distribution`
     input (a fit_distribution output) and emits them on the `samples` port
@@ -142,30 +395,6 @@ def sample_distribution(distribution: dict, n: int = 100_000, seed: int = 0, blo
 
     rng = seed_mod.spawn_rng(seed, [block_id or "sample_distribution"])
     return pl.DataFrame({"sample": distributions.sample(distribution, n, rng)})
-
-
-register_block(
-    BlockSpec(
-        category="sample_distribution",
-        block_type="standard",
-        group="stochastic",
-        display_name="Sample distribution",
-        tags=("distributions",),
-        inputs=[PortSpec("distribution", type="distribution")],
-        outputs=[PortSpec("samples")],
-        fn=sample_distribution,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("n", "Number of samples", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Dependency / copulas
-# ---------------------------------------------------------------------------
 
 
 def build_dependency(df: pl.DataFrame, columns: list[str], copula_type: str = "gaussian", dof: float = 5.0, theta: float = 2.0) -> dict:
@@ -199,32 +428,6 @@ def build_dependency(df: pl.DataFrame, columns: list[str], copula_type: str = "g
         "theta": theta,
         "psd_repaired": bool(not np.allclose(repaired, empirical_corr, atol=1e-8)),
     }
-
-
-register_block(
-    BlockSpec(
-        category="build_dependency",
-        block_type="standard",
-        group="stochastic",
-        display_name="Build dependency",
-        tags=("capital_simulation", "distributions"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("dependency", type="dependency")],
-        fn=build_dependency,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("columns", "Columns", "columns"),
-            FieldSpec("copula_type", "Copula", "select", options=("gaussian", "t", "clayton", "gumbel")),
-            FieldSpec("dof", "Degrees of freedom (t copula)", "number"),
-            FieldSpec("theta", "Theta (Clayton / Gumbel)", "number", step=0.1),
-        ),
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Simulation
-# ---------------------------------------------------------------------------
 
 
 def simulate_op_risk_lda(
@@ -304,35 +507,6 @@ def simulate_op_risk_lda(
     return result, quantile_table, paths_table
 
 
-register_block(
-    BlockSpec(
-        category="simulate_op_risk_lda",
-        block_type="standard",
-        group="stochastic",
-        display_name="Simulate op-risk LDA",
-        tags=("capital_simulation",),
-        inputs=[PortSpec("severity_dist", type="distribution")],
-        outputs=[
-            PortSpec("simulation_result", type="simulation_result"),
-            PortSpec("quantile_table"),
-            PortSpec("paths", required=False),
-        ],
-        aggregate_outputs=("quantile_table",),
-        fn=simulate_op_risk_lda,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("n_paths", "Number of paths", "number"),
-            FieldSpec("chunk_size", "Chunk size", "number"),
-            FieldSpec("frequency_family", "Frequency family", "select", options=("poisson", "negbinom")),
-            FieldSpec("frequency_mean", "Frequency mean", "number", step=0.1),
-            FieldSpec("frequency_dispersion", "Frequency dispersion (negbinom)", "number", step=0.1),
-            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
-
-
 def risk_measures(
     df: pl.DataFrame, column: str, alpha_levels: list[float] | None = None, n_bootstrap: int = 200, seed: int = 0
 ) -> tuple[dict, pl.DataFrame]:
@@ -361,27 +535,6 @@ def risk_measures(
         }
     )
     return result, table
-
-
-register_block(
-    BlockSpec(
-        category="risk_measures",
-        block_type="standard",
-        group="stochastic",
-        display_name="Risk measures (VaR / TVaR)",
-        tags=("capital_simulation", "distributions"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("simulation_result", type="simulation_result"), PortSpec("quantile_table")],
-        aggregate_outputs=("quantile_table",),
-        fn=risk_measures,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("column", "Loss column", "column"),
-            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
 
 
 def aggregate_simulation(
@@ -455,42 +608,6 @@ def aggregate_simulation(
     return result, quantile_table, contributions_table
 
 
-register_block(
-    BlockSpec(
-        category="aggregate_simulation",
-        block_type="standard",
-        group="stochastic",
-        display_name="Aggregate simulation (copula)",
-        tags=("capital_simulation",),
-        inputs=[PortSpec("components"), PortSpec("dependency", type="dependency")],
-        outputs=[
-            PortSpec("simulation_result", type="simulation_result"),
-            PortSpec("quantile_table"),
-            PortSpec("contributions"),
-        ],
-        aggregate_outputs=("quantile_table", "contributions"),
-        fn=aggregate_simulation,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Credit portfolio economic capital -- closed-form single-factor ASRF
-# (stochastic-engine-proposal.md S3.2 / S10 step 2: "land bank credit EC
-# on the spine ... closed-form ASRF gives a benchmark to validate the
-# simulation against"). Deterministic -- no simulation, no seed -- so it's
-# the cheap, exact answer wherever conditional independence actually
-# holds, and the number a future multi-factor obligor-level Monte Carlo
-# simulation (not built here) should reconcile to when run on the same
-# single-factor assumptions.
-# ---------------------------------------------------------------------------
-
-
 def asrf_economic_capital(
     df: pl.DataFrame,
     pd_col: str,
@@ -521,27 +638,6 @@ def asrf_economic_capital(
         pl.Series("economic_capital", ec_per_obligor),
     )
     return summary, detail
-
-
-register_block(
-    BlockSpec(
-        category="asrf_economic_capital",
-        block_type="standard",
-        group="stochastic",
-        display_name="ASRF economic capital (closed form)",
-        tags=("capital_simulation",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("simulation_result", type="simulation_result"), PortSpec("detail")],
-        fn=asrf_economic_capital,
-        metadata_transform=passthrough,
-        form=(
-            FieldSpec("pd_col", "PD column", "column"),
-            FieldSpec("lgd_col", "LGD column", "column"),
-            FieldSpec("ead_col", "EAD column", "column"),
-            FieldSpec("confidence", "Confidence level", "number", step=0.001),
-        ),
-    )
-)
 
 
 def simulate_credit_portfolio(
@@ -654,42 +750,6 @@ def simulate_credit_portfolio(
     return result, quantile_table, contributions_table
 
 
-register_block(
-    BlockSpec(
-        category="simulate_credit_portfolio",
-        block_type="standard",
-        group="stochastic",
-        display_name="Simulate credit portfolio (multi-factor)",
-        tags=("capital_simulation",),
-        inputs=[PortSpec("df"), PortSpec("dependency", type="dependency")],
-        outputs=[
-            PortSpec("simulation_result", type="simulation_result"),
-            PortSpec("quantile_table"),
-            PortSpec("contributions"),
-        ],
-        aggregate_outputs=("quantile_table",),
-        fn=simulate_credit_portfolio,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("pd_col", "PD column", "column"),
-            FieldSpec("lgd_col", "LGD column", "column"),
-            FieldSpec("ead_col", "EAD column", "column"),
-            FieldSpec("sector_col", "Sector column (must match the dependency labels)", "column"),
-            FieldSpec("name_col", "Segment name column (optional)", "column"),
-            FieldSpec("n_paths", "Number of paths", "number"),
-            FieldSpec("chunk_size", "Chunk size", "number"),
-            FieldSpec("n_bootstrap", "Bootstrap replicates", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Curve fitting / proxy functions
-# ---------------------------------------------------------------------------
-
-
 def fit_proxy(
     fitting: pl.DataFrame,
     risk_factors: list[str],
@@ -727,29 +787,6 @@ def fit_proxy(
     raise ValueError(f"unknown proxy method: {method!r} (use closed_form or polynomial)")
 
 
-register_block(
-    BlockSpec(
-        category="fit_proxy",
-        block_type="standard",
-        group="stochastic",
-        display_name="Fit proxy function",
-        tags=("proxy_models",),
-        inputs=[PortSpec("fitting")],
-        outputs=[PortSpec("proxy", type="proxy_function")],
-        fn=fit_proxy,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("value_col", "Value column (polynomial)", "column"),
-            FieldSpec("method", "Method", "select", options=("closed_form", "polynomial")),
-            FieldSpec("expr", "Expression (closed_form)", "text", placeholder="x + 0.5 * y"),
-            FieldSpec("degree", "Degree (polynomial)", "number"),
-            FieldSpec("regressor", "Regressor (polynomial)", "select", options=("ridge", "lasso", "ols")),
-            FieldSpec("alpha", "Regularization (ridge / lasso)", "number", step=0.1),
-        ),
-    )
-)
-
-
 def evaluate_proxy(proxy: dict, scenarios: pl.DataFrame) -> pl.DataFrame:
     """Applies the `proxy` input (a fit_proxy output) to every row of the
     `scenarios` input, emitting the scenarios plus a new "value" column on
@@ -760,21 +797,6 @@ def evaluate_proxy(proxy: dict, scenarios: pl.DataFrame) -> pl.DataFrame:
 
     values = proxy_mod.evaluate_proxy(proxy, scenarios)
     return scenarios.with_columns(pl.Series("value", values))
-
-
-register_block(
-    BlockSpec(
-        category="evaluate_proxy",
-        block_type="standard",
-        group="stochastic",
-        display_name="Evaluate proxy function",
-        tags=("proxy_models",),
-        inputs=[PortSpec("proxy", type="proxy_function"), PortSpec("scenarios")],
-        outputs=[PortSpec("valued")],
-        fn=evaluate_proxy,
-        metadata_transform=passthrough,
-    )
-)
 
 
 def validate_proxy(proxy: dict, validation: pl.DataFrame, value_col: str) -> tuple[dict, pl.DataFrame]:
@@ -797,42 +819,6 @@ def validate_proxy(proxy: dict, validation: pl.DataFrame, value_col: str) -> tup
         pl.Series("predicted", predicted), pl.Series("error", error), pl.Series("abs_error", np.abs(error))
     )
     return diagnostics, table
-
-
-def _validate_proxy_hints(outputs: dict[str, Any]) -> list[str]:
-    r2 = h.metric(outputs, "diagnostics").get("out_of_sample_r2")
-    if not h.num(r2):
-        return []
-    if r2 < h.PROXY_MIN_R2:
-        return [
-            f"Out-of-sample R^2 {r2:.3f} < {h.PROXY_MIN_R2} -- the proxy isn't accurate enough: fit on more scenarios "
-            "or a richer basis."
-        ]
-    return [f"Out-of-sample R^2 {r2:.3f}: the proxy is accurate enough to use."]
-
-
-register_block(
-    BlockSpec(
-        category="validate_proxy",
-        block_type="standard",
-        group="stochastic",
-        display_name="Validate proxy function",
-        tags=("proxy_models",),
-        inputs=[PortSpec("proxy", type="proxy_function"), PortSpec("validation")],
-        outputs=[PortSpec("diagnostics", type="scalar_metric"), PortSpec("error_table")],
-        fn=validate_proxy,
-        metadata_transform=passthrough,
-        form=(
-            FieldSpec("value_col", "Actual value column", "column"),
-        ),
-        hints=_validate_proxy_hints,
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Var-covar aggregation
-# ---------------------------------------------------------------------------
 
 
 def var_covar_aggregate(
@@ -888,62 +874,6 @@ def var_covar_aggregate(
     return result, contributions_table
 
 
-register_block(
-    BlockSpec(
-        category="var_covar_aggregate",
-        block_type="standard",
-        group="stochastic",
-        display_name="Var-covar aggregate",
-        tags=("capital_simulation", "proxy_models"),
-        inputs=[PortSpec("proxy", type="proxy_function"), PortSpec("base"), PortSpec("dependency", type="dependency")],
-        outputs=[PortSpec("aggregation_result", type="simulation_result"), PortSpec("contributions")],
-        fn=var_covar_aggregate,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("method", "Method", "select", options=("normal", "cornish_fisher", "moment_matching", "delta_gamma_copula")),
-            FieldSpec("bump_size", "Bump size", "number", step=0.001),
-            FieldSpec("n_mc", "Monte Carlo draws (non-normal methods)", "number"),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
-
-
-# ---------------------------------------------------------------------------
-# Graph fan-out (iterate / collect) -- stochastic-engine-proposal.md S4
-# ---------------------------------------------------------------------------
-#
-# An 'iterate' block and a matching 'collect' block (paired by the
-# collect's `iterate_block` param, naming the iterate block's id -- there's
-# no dedicated wire for the pairing itself, since a plain param is the same
-# convention every other block-execution modifier in this tool already
-# uses, e.g. group_by naming a column) bound a fan-out *region*: every
-# block on some path between them (see runner.Runner._iterate_region). The
-# region is re-run once per iteration, each in its own subprocess (see
-# Runner._run_region_iterations/_dispatch_iterations) -- the graph
-# fan-out engine primitive, as opposed to a vectorised simulation block's
-# in-process chunking (S5). Practical for N ~ 10^2-10^4 (bootstrap CIs,
-# scenario expansion); not the tool for N ~ 10^6+, which is what
-# simulate_op_risk_lda-style vectorised blocks are for.
-#
-# Both blocks are ordinary registry blocks with ordinary fn's -- there is
-# deliberately no engine magic in `iterate`/`collect` themselves. Run
-# outside a fan-out context (e.g. previewing the 'iterate' block on its
-# own), `iterate` just computes what iteration 0 looks like; the N-times
-# re-execution only happens when a 'collect' block wired to it actually
-# runs (see run_block's `block.category == "collect"` branch).
-#
-# Not yet supported (see stochastic-engine-proposal.md's Implementation
-# status): compiling a graph containing this pair to a standalone script
-# (compiler.compile_graph raises CompileError -- the seed hierarchy and
-# the loop shape both need their own compiled form, deferred); a
-# `group_by` block inside the region; an `iterator` other than
-# bootstrap_resample/scenario_row (a bare "reseed and rerun" iterator
-# doesn't fit this tool's params-are-literal-design-time-config model
-# without also inventing a way to wire a scalar into a param -- see the
-# proposal file for why that was scoped out).
-
-
 def iterate(
     df: pl.DataFrame,
     n_iterations: int = 100,
@@ -977,25 +907,6 @@ def iterate(
             raise ValueError(f"iteration index {i} is out of range for {df.height} scenario row(s) -- set n_iterations <= the scenario set's row count")
         return df[i : i + 1]
     raise ValueError(f"unknown iterator: {iterator!r} (use bootstrap_resample or scenario_row)")
-
-
-register_block(
-    BlockSpec(
-        category="iterate",
-        block_type="standard",
-        group="stochastic",
-        display_name="Iterate (fan-out)",
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=iterate,
-        metadata_transform=passthrough,
-        form=(
-            FieldSpec("n_iterations", "Iterations", "number"),
-            FieldSpec("iterator", "Iterator", "select", options=("bootstrap_resample", "scenario_row")),
-            FieldSpec("seed", "Random seed", "number"),
-        ),
-    )
-)
 
 
 def collect(
@@ -1034,24 +945,3 @@ def collect(
         result = {"kind": "simulation_result", "n_paths": len(estimates), **rm, "quantile_ci": {a: list(ci[a]) for a in levels}}
         return value, result
     raise ValueError(f"unknown reducer: {reducer!r} (use concat or risk_measures)")
-
-
-register_block(
-    BlockSpec(
-        category="collect",
-        block_type="standard",
-        group="stochastic",
-        display_name="Collect (fan-out)",
-        inputs=[PortSpec("value")],
-        outputs=[PortSpec("table"), PortSpec("simulation_result", type="simulation_result", required=False)],
-        fn=collect,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("iterate_block", "Paired 'iterate' block id", "text", placeholder="b_042"),
-            FieldSpec("reducer", "Reducer", "select", options=("concat", "risk_measures")),
-            FieldSpec("value_col", "Value column (risk_measures)", "column"),
-            FieldSpec("n_bootstrap", "Bootstrap replicates (risk_measures)", "number"),
-            FieldSpec("seed", "Random seed (risk_measures)", "number"),
-        ),
-    )
-)

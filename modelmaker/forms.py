@@ -1,6 +1,5 @@
-"""Params forms for registry blocks, served to the web UI and the TUI with
-each block (api._block_out). A block's own BlockSpec.form fields come
-first; every other param gets a field inferred from the function's
+"""Params forms for blocks, served to the web UI and the TUI with each
+block (api._block_out). A block's own BLOCKS "form" fields come first; every other param gets a field inferred from the function's
 signature, by its name and type annotation:
 
   - `<name>_col` (or target/col/column/feature), a str  -> column picker
@@ -8,9 +7,7 @@ signature, by its name and type annotation:
   - bool -> checkbox;  int/float -> number;  any other str -> text
 
 Anything else (dicts, rule lists, list[float]) can't be a flat field and
-is listed in `other_params`, for the UI's JSON box. Custom AI-authored
-blocks have no signature to read until they run, so the UIs derive their
-`_col` pickers from the block's params instead."""
+is listed in `other_params`, for the UI's JSON box."""
 
 from __future__ import annotations
 
@@ -20,8 +17,8 @@ import re
 from dataclasses import asdict
 from typing import Any
 
-from .agent.catalogue import INJECTED_PARAMS
-from .blocks.base import BlockSpec, FieldSpec
+from .block_library import INJECTED_PARAMS
+from .blocks.base import BlockDefinition, FieldSpec
 from .packet import ColumnRole
 from .util import ROLE_PARAM_NAMES, find_role_param
 
@@ -74,18 +71,17 @@ def _jsonable(value: Any) -> Any:
     return repr(value)
 
 
-def block_form(spec: BlockSpec) -> dict[str, Any]:
-    """{"fields": [...], "other_params": [...]} for a registry block. Each
-    field carries the param's signature default (null if required), so a
+def block_form(spec: BlockDefinition) -> dict[str, Any]:
+    """{"fields": [...], "other_params": [...]} for a block. Each field
+    carries the param's signature default (null if required), so a
     checkbox or number box can show what an unset param means."""
-    return _block_form(spec.category, spec.fn, spec.form, tuple(p.name for p in spec.inputs))
+    return _block_form(spec.sha, spec.fn, spec.form, tuple(p.name for p in spec.inputs))
 
 
-# Keyed on the spec's fixed parts (BlockSpec itself isn't hashable): a
-# registry block's form never changes after import, and it's asked for on
-# every /api/graph poll.
+# Keyed on the definition's sha (a definition's form never changes without
+# its sha changing) -- it's asked for on every /api/graph poll.
 @functools.lru_cache(maxsize=None)
-def _block_form(category: str, fn, form: tuple[FieldSpec, ...], port_names: tuple[str, ...]) -> dict[str, Any]:
+def _block_form(sha: str, fn, form: tuple[FieldSpec, ...], port_names: tuple[str, ...]) -> dict[str, Any]:
     auto_roles = {
         name: _AUTO_ROLES[role] for role in ROLE_PARAM_NAMES if (name := find_role_param(fn, role)) is not None
     }

@@ -1,6 +1,7 @@
 import pytest
 
 from modelmaker.cache import CacheStore
+from modelmaker.blocks.base import PortSpec
 from modelmaker.compiler import CompileError, compile_graph
 from modelmaker.graph import Graph, Wire
 from modelmaker.runner import Runner
@@ -209,14 +210,14 @@ def test_compile_bakes_in_the_role_tagged_predicted_column_when_param_left_unset
     assert "score_col='predicted_proba'" in call_line
 
 
-def test_custom_block_compiles_to_a_function_named_after_the_block_not_its_category(tmp_path):
+def test_library_block_compiles_under_its_id_with_its_helpers_and_provenance(tmp_path):
     graph, _ = _csv_graph(tmp_path)
-    graph.blocks["b_custom"] = make_block(
-        "b_custom",
-        "ai_block_lz3k9f",
-        code="def ai_block_lz3k9f(df):\n    return df\n",
-        x=3,
+    code = (
+        "_FACTOR = 3\n\n\n"
+        "def _scale(col):\n    return pl.col(col) * _FACTOR\n\n\n"
+        "def triple_a(df):\n    return df.with_columns(_scale('a').alias('a3'))\n"
     )
+    graph.blocks["b_custom"] = make_block("b_custom", "x", code=code, x=3, inputs=[PortSpec("df")], outputs=[PortSpec("out")])
     graph.blocks["b_custom"].name = "Score bucketer"
     graph.wires["w3"] = Wire("w3", "b_select", "out", "b_custom", "df")
 
@@ -225,8 +226,14 @@ def test_custom_block_compiles_to_a_function_named_after_the_block_not_its_categ
     assert runner.run_all()["b_custom"] == "green"
 
     source = compile_graph(graph, runner=runner)
-    assert "def Score_bucketer(" in source
-    assert "def ai_block_lz3k9f(" not in source
+    assert "def triple_a(" in source
+    assert "def _scale(" in source and "_FACTOR = 3" in source
+    assert source.index("def _scale(") < source.index("def triple_a(")
+    assert "# library (embedded) v1 | sha" in source
+    assert "# built-in, Model-Maker" in source
+    ns = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["Score_bucketer"]["a3"].to_list() == [6, 9]
 
 
 def test_compiled_grouped_block_matches_engine_output(tmp_path):
@@ -447,16 +454,13 @@ def test_stream_true_splits_around_a_non_fusable_custom_block(tmp_path):
     runner.run_all()
 
     source = compile_graph(graph, runner=runner, stream=True)
-    # b_custom is never fusable -- it stays a plain eager call, wired to
-    # the fused stretch's own exit variable exactly as an ordinary,
-    # non-streaming compile would. Custom blocks are compiled under their
-    # own block name (see compile_graph's fn-naming rule), not the
-    # function's own def name in the source.
-    assert "def b_custom(" in source
+    # b_custom's input isn't lazy, so it never fuses -- it stays a plain
+    # eager call, wired to the fused stretch's own exit variable exactly as
+    # an ordinary, non-streaming compile would.
+    assert "def double_a(" in source
     assert "pl.collect_all(" in source
 
     ns = {}
     exec(compile(source, "<compiled>", "exec"), ns)
     engine_out = runner.cache.get(runner.state["b_custom"].last_successful_key).outputs["out"]
-    # The function itself is named "b_custom", so its output is named by port.
-    assert ns["b_custom_out"].to_dicts() == engine_out.data.to_dicts()
+    assert ns["b_custom"].to_dicts() == engine_out.data.to_dicts()

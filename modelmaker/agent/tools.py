@@ -14,10 +14,9 @@ from typing import Any, Callable
 
 import polars as pl
 
-from ..blocks.base import BLOCK_REGISTRY
-from ..graph import _compile_code_to_fn
+from .. import block_library, library_store
+from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
 from ..llm.redact import column_info_for_llm
-from ..metadata_transforms import resolve_metadata_transform
 from ..packet import ColumnRole, DataFramePacket
 from ..runslot import RunBusy, RunFailed
 from ..session import new_id, wire_is_valid
@@ -59,13 +58,13 @@ def tool(name: str, description: str, properties: dict[str, Any], required: list
     return reg
 
 
-# The tools that write custom code -- left out when a build has custom
-# blocks turned off (BuildOptions.allow_custom_blocks).
-CUSTOM_TOOLS = frozenset({"add_custom_block", "update_custom_block"})
+# The tools that write new blocks (library drafts) -- left out when a build
+# has new blocks turned off (BuildOptions.allow_new_blocks).
+NEW_BLOCK_TOOLS = frozenset({"create_library_block", "update_library_block"})
 
 
-def tools_for_phase(phase: str, allow_custom: bool = True) -> list[Tool]:
-    return [t for t in TOOLS.values() if phase in t.phases and (allow_custom or t.name not in CUSTOM_TOOLS)]
+def tools_for_phase(phase: str, allow_new: bool = True) -> list[Tool]:
+    return [t for t in TOOLS.values() if phase in t.phases and (allow_new or t.name not in NEW_BLOCK_TOOLS)]
 
 
 # ---- shared helpers ----------------------------------------------------------
@@ -200,11 +199,12 @@ def run_report(b: AgentBuild, block_id: str) -> dict[str, Any]:
 
 
 def is_statistics_table(b: AgentBuild, block_id: str, port: str) -> bool:
-    """Whether a block's output port is one its registry spec declares a
-    statistics table. Never true for a custom block: the build writes
-    those, so it can't vouch for their rows."""
+    """Whether a block's output port is one its definition declares a
+    statistics table. Honored for built-ins only: a library block's flag
+    is its author's claim (or the build's own, for a draft), which can't
+    vouch for its rows."""
     block = b.session.graph.blocks.get(block_id)
-    if block is None or block.is_custom:
+    if block is None or block.definition is not None:
         return False
     spec = BLOCK_REGISTRY.get(block.category)
     return spec is not None and port in spec.aggregate_outputs
@@ -258,15 +258,13 @@ SUSPICIOUS_BAND = "suspicious"  # fit_binning's iv_band for IV >= 0.5
 def block_hints(b: AgentBuild, block_id: str) -> list[str]:
     """Decision hints (see hints.py) for a block that just ran green."""
     blk = b.session.graph.blocks[block_id]
-    if blk.is_custom:
-        return []
     outputs = {}
     for p in blk.outputs:
         try:
             outputs[p.name] = b.current_output(block_id, p.name)[1]
         except ToolError:
             continue
-    return decision_hints(blk.category, outputs)
+    return decision_hints(blk.resolve(), outputs)
 
 
 def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
@@ -275,7 +273,7 @@ def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
     outcome (leakage)."""
     out: dict[str, float | None] = {}
     for bid, blk in b.session.graph.blocks.items():
-        if blk.is_custom or blk.category != "fit_binning":
+        if blk.definition is not None or blk.category != "fit_binning":
             continue
         try:
             _, value = b.current_output(bid, "summary")
@@ -322,7 +320,7 @@ def flag_suspicious(b: AgentBuild, category: str, params: dict[str, Any], where:
 def check_code_excluded(b: AgentBuild, code: str) -> None:
     hits = sorted(c for c in b.excluded_columns() if f'"{c}"' in code or f"'{c}'" in code)
     if hits:
-        raise ToolError(f"custom code references {hits}, which the user tagged 'excluded' -- leave them out")
+        raise ToolError(f"the block's code references {hits}, which the user tagged 'excluded' -- leave them out")
 
 
 def resolve_lane(b: AgentBuild, lane: str) -> str:
@@ -356,7 +354,7 @@ def _block_brief(b: AgentBuild, bid: str) -> dict[str, Any]:
     out = {
         "id": bid,
         "name": block.name,
-        "category": "custom" if block.is_custom else block.category,
+        "category": block.category,
         "lane": block.lane,
         "status": status,
         "params": block.params,
@@ -364,6 +362,8 @@ def _block_brief(b: AgentBuild, bid: str) -> dict[str, Any]:
         "outputs": [f"{p.name}:{p.type}" for p in block.outputs],
         "owned_by_this_build": b.is_owned(bid),
     }
+    if block.definition is not None:
+        out["library_block"] = True
     if bid in b.anchors:
         out["anchor"] = True
     if bid in b.approved_changes:
@@ -467,7 +467,7 @@ def get_output_summary(b: AgentBuild, block: str, port: str | None = None) -> di
 
 @tool(
     "get_block_error",
-    "A block's last error, with its params -- and its code, for a custom block.",
+    "A block's last error, with its params -- and its code, for a library block.",
     {"block": _BLOCK},
     ["block"],
     READ,
@@ -476,9 +476,10 @@ def get_block_error(b: AgentBuild, block: str) -> dict[str, Any]:
     blk = b.require_block(block)
     st = b.session.runner.state.get(block)
     out = {"status": b.session.runner.status(block), "error": st.last_error if st else None, "params": blk.params}
-    if blk.is_custom:
-        out["code"] = blk.code
-        out["metadata_transform"] = blk.metadata_transform
+    if blk.definition is not None:
+        d = blk.resolve()
+        out["code"] = d.code
+        out["meta"] = d.metadata
     return out
 
 
@@ -635,8 +636,8 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
             continue
         if cat in catalogue.AGENT_DISALLOWED:
             errors.append(f"{where}: {cat} can't be added by an AI build ({catalogue.AGENT_DISALLOWED[cat]})")
-        if cat == "custom" and not b.options.allow_custom_blocks:
-            errors.append(f"{where}: custom blocks are turned off for this build -- use registry blocks")
+        if cat == "custom" and not b.options.allow_new_blocks:
+            errors.append(f"{where}: new blocks are turned off for this build -- use registry blocks")
         elif cat == "custom" and not step.get("instruction"):
             errors.append(f"{where}: custom steps need an instruction")
         if not step.get("lane") and stage is not None:
@@ -813,7 +814,7 @@ def plan_stage(b: AgentBuild, steps: list[dict[str, Any]], build: bool = True) -
     "build_stage",
     "Build (the rest of) the current stage's plan: adds, wires and runs every step not built yet in plan "
     "order, and re-runs any built step that isn't green -- e.g. after you fixed a failed step's params, or "
-    "added a custom step with add_custom_block(plan_step=...). Stops at the first step that fails or needs "
+    "added a custom step with create_library_block(plan_step=...). Stops at the first step that fails or needs "
     "custom code.",
     {},
     [],
@@ -876,7 +877,7 @@ def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool =
                 entry["status"] = "needs_code"
                 return stop(
                     entry,
-                    next=f"write it with add_custom_block (plan_step {ref!r}, lane {step['lane']!r}) and connect its "
+                    next=f"write it with create_library_block (plan_step {ref!r}, lane {step['lane']!r}) and connect its "
                     "inputs, then call build_stage to build the rest",
                 )
             try:
@@ -893,7 +894,7 @@ def _build_stage_plan(b: AgentBuild, stage: dict[str, Any], apply_params: bool =
         entry["block"] = bid
         block = b.session.graph.blocks[bid]
         changed = {k: v for k, v in (step.get("params") or {}).items() if block.params.get(k) != v}
-        if apply_params and changed and not block.is_custom:
+        if apply_params and changed:
             # A re-plan changed a built step's params: apply them.
             try:
                 set_params(b, bid, changed)
@@ -981,7 +982,7 @@ def add_block(
     b: AgentBuild, category: str, lane: str, name: str | None = None, params: dict | None = None, plan_step: str | None = None
 ) -> dict[str, Any]:
     if category not in BLOCK_REGISTRY:
-        custom = " (or add_custom_block for custom code)" if b.options.allow_custom_blocks else ""
+        custom = " (or create_library_block for a new block)" if b.options.allow_new_blocks else ""
         raise ToolError(f"unknown category {category!r}{catalogue.unknown_category_hint(category)}{custom}")
     if category in catalogue.AGENT_DISALLOWED:
         raise ToolError(f"{category} can't be added by an AI build: {catalogue.AGENT_DISALLOWED[category]}")
@@ -1002,130 +1003,155 @@ def add_block(
     return out
 
 
-def _validate_custom(b: AgentBuild, code: str, inputs: list[str], metadata_transform: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Compile the code and check it against the custom-block contract;
-    returns (function name, its extra params' defaults)."""
+def _drafts_file(b: AgentBuild) -> str:
+    """The library file this build's new blocks go to (see library_store:
+    listed under "AI drafts" until the user keeps or discards them)."""
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", str(b.id))
+    return f"{library_store.DRAFTS_DIR}/build_{stem}.py"
+
+
+def _draft_definition(
+    b: AgentBuild, code: str, inputs: list[str], meta: dict[str, Any] | None, name: str, version: int, own_id: str | None = None
+) -> tuple[BlockDefinition, dict[str, Any], dict[str, Any]]:
+    """Check a new block's code and build its BLOCKS entry; returns (the
+    definition, its entry, its extra params' defaults)."""
+    import ast
+
     try:
-        fn = _compile_code_to_fn(code)
+        tree = ast.parse(code)
     except SyntaxError as e:
         raise ToolError(f"code doesn't parse: {e}") from None
-    except ValueError as e:
-        raise ToolError(str(e)) from None
-    sig = inspect.signature(fn)
+    public = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")]
+    if len(public) != 1:
+        raise ToolError(f"the code must define exactly one public function (the block); helpers start with _ -- got {public}")
+    if any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in tree.body):
+        raise ToolError("import modules inside the function, not at the top of the code (pl is already available)")
+    block_id = public[0]
+    if block_id in BLOCK_REGISTRY:
+        raise ToolError(f"function name {block_id!r} is a registry block's -- pick another")
+    hit = library_store.find_by_id(block_id)
+    if hit is not None and block_id != own_id:
+        raise ToolError(f"the library already has a block named {block_id!r} -- rename the function")
+    entry = {
+        "display_name": name,
+        "version": version,
+        "block_type": "standard",
+        "inputs": [{"name": n} for n in inputs],
+        "outputs": [{"name": "out"}],
+    }
+    if meta:
+        entry["meta"] = meta
+    definition = BlockDefinition(
+        id=block_id, meta=entry, code=code, source="library", origin=_drafts_file(b),
+        sha=block_library._sha(entry, code), description="",
+    )
+    errors = block_library.validate_definition(definition)
+    if errors:
+        raise ToolError("; ".join(errors))
+    sig = inspect.signature(definition.fn)
     names = list(sig.parameters)
     if names[: len(inputs)] != inputs:
         raise ToolError(f"the function's first parameters must be the input ports {inputs} in order; got {names}")
-    if fn.__name__ in BLOCK_REGISTRY:
-        raise ToolError(f"function name {fn.__name__!r} clashes with a registry block -- pick another")
-    if metadata_transform.get("kind") not in ("passthrough", "narrow", "declared"):
-        raise ToolError("metadata_transform.kind must be passthrough, narrow or declared")
-    try:
-        resolve_metadata_transform(metadata_transform)
-    except Exception as e:  # noqa: BLE001
-        raise ToolError(f"bad metadata_transform: {e}") from None
-    defaults = {
-        n: p.default
-        for n, p in sig.parameters.items()
-        if n not in inputs and p.default is not inspect.Parameter.empty
-    }
+    defaults = {n: p.default for n, p in sig.parameters.items() if n not in inputs and p.default is not inspect.Parameter.empty}
     check_code_excluded(b, code)
-    return fn.__name__, defaults
+    return definition, entry, defaults
 
 
-_CUSTOM_PROPS = {
+def _write_draft(b: AgentBuild, entry: dict[str, Any], block_id: str, code: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Save a block to this build's drafts file; returns (embedded
+    definition, library_ref) for placing it."""
+    try:
+        library_store.add_block(_drafts_file(b), entry, block_id, code, doc=f"Blocks AI build {b.id} created.")
+        return library_store.placeable(_drafts_file(b), block_id)
+    except library_store.LibraryError as e:
+        raise ToolError(str(e)) from None
+
+
+_NEW_BLOCK_PROPS = {
     "code": {
         "type": "string",
-        "description": "One top-level polars function (see the custom block contract in your instructions).",
+        "description": "One public polars function (the block), plus optional _helpers (see the new block contract).",
     },
-    "metadata_transform": {
+    "meta": {
         "type": "object",
-        "description": "{kind: passthrough|narrow|declared, base?, drops?, adds?: [{name, dtype, role}]}",
+        "description": "Column metadata rules: {inherit?: 'all'|'none', new_role?: role, roles?: [{column, role}]}.",
     },
     "params": {"type": "object", "description": "Values for the function's extra parameters."},
 }
 
 
 @tool(
-    "add_custom_block",
-    "Add a block with your own polars code, for steps no registry block covers. The function's first "
-    "parameters are its dataframe inputs (named as in `inputs`, default ['df']); it returns one dataframe "
-    "on output port 'out'.",
+    "create_library_block",
+    "Create a new block for a step no registry block covers: it's saved to the user's block library (as an AI "
+    "draft) and placed in the lane. The function's first parameters are its dataframe inputs (named as in "
+    "`inputs`, default ['df']); it returns one dataframe on output port 'out'.",
     {
         "lane": _STR,
         "name": _STR,
         "inputs": {"type": "array", "items": _STR},
-        **_CUSTOM_PROPS,
+        **_NEW_BLOCK_PROPS,
         "plan_step": _STR,
     },
-    ["lane", "name", "code", "metadata_transform"],
+    ["lane", "name", "code"],
     WRITE,
 )
-def add_custom_block(
+def create_library_block(
     b: AgentBuild,
     lane: str,
     name: str,
     code: str,
-    metadata_transform: dict[str, Any],
+    meta: dict[str, Any] | None = None,
     inputs: list[str] | None = None,
     params: dict | None = None,
     plan_step: str | None = None,
 ) -> dict[str, Any]:
-    limit = b.options.limits.custom_blocks
-    if b.counters["custom_blocks"] >= limit:
-        raise ToolError(f"this build already has {limit} custom blocks (the limit) -- use a registry block or ask_user")
+    limit = b.options.limits.new_blocks
+    if b.counters["new_blocks"] >= limit:
+        raise ToolError(f"this build already created {limit} blocks (the limit) -- use a registry block or ask_user")
     inputs = inputs or ["df"]
-    fn_name, defaults = _validate_custom(b, code, inputs, metadata_transform)
-    if any(blk.category == fn_name for blk in b.session.graph.blocks.values()):
-        fn_name_hint = f"{fn_name}_2"
-        raise ToolError(f"a block with function name {fn_name!r} already exists -- rename the function, e.g. {fn_name_hint}")
+    definition, entry, defaults = _draft_definition(b, code, inputs, meta, name, version=1)
     params = {**defaults, **(params or {})}
     check_excluded(b, params, name)
+    embedded, ref = _write_draft(b, entry, definition.id, code)
     lane_id = resolve_lane(b, lane)
     x, y = Placer(b.session.graph).place(lane_id)
     with b.session.edit():
-        block = b.session.add_block(
-            fn_name,
-            block_type="standard",
-            name=name,
-            lane=lane_id,
-            x=x,
-            y=y,
-            params=params,
-            code=code,
-            inputs=[{"name": n, "type": "dataframe"} for n in inputs],
-            outputs=[{"name": "out", "type": "dataframe"}],
-            metadata_transform=metadata_transform,
-        )
-    b.counters["custom_blocks"] += 1
+        block = b.session.add_block(definition.id, name=name, lane=lane_id, x=x, y=y, params=params, definition=embedded, library_ref=ref)
+    b.counters["new_blocks"] += 1
     return _finish_add(b, block, plan_step)
 
 
 @tool(
-    "update_custom_block",
-    "Replace a custom block's code, metadata_transform and/or params -- e.g. to fix an error. The input "
-    "ports stay as they are.",
-    {"block": _BLOCK, **_CUSTOM_PROPS},
+    "update_library_block",
+    "Replace a block this build created -- its code, meta and/or params -- e.g. to fix an error. Saves a new "
+    "version to the library draft and updates the placed block. The input ports stay as they are.",
+    {"block": _BLOCK, **_NEW_BLOCK_PROPS},
     ["block"],
     WRITE,
 )
-def update_custom_block(
-    b: AgentBuild, block: str, code: str | None = None, metadata_transform: dict | None = None, params: dict | None = None
+def update_library_block(
+    b: AgentBuild, block: str, code: str | None = None, meta: dict | None = None, params: dict | None = None
 ) -> dict[str, Any]:
     blk = b.require_modifiable(block, "update")
-    if not blk.is_custom:
-        raise ToolError("not a custom block -- use set_params")
+    if blk.definition is None or not (blk.library_ref or {}).get("file", "").startswith(f"{library_store.DRAFTS_DIR}/"):
+        raise ToolError("not a block this build created -- use set_params")
+    current = blk.resolve()
     inputs = [p.name for p in blk.inputs]
-    new_code = code or blk.code or ""
-    new_transform = metadata_transform or blk.metadata_transform or {"kind": "passthrough"}
-    fn_name, defaults = _validate_custom(b, new_code, inputs, new_transform)
+    new_code = code or current.code
+    new_meta = meta if meta is not None else current.metadata
+    definition, entry, defaults = _draft_definition(
+        b, new_code, inputs, new_meta, current.display_name, version=current.version + 1, own_id=current.id
+    )
+    if definition.id != current.id:
+        raise ToolError(f"keep the function name {current.id!r} when updating")
     new_params = {**{k: v for k, v in defaults.items() if k not in blk.params}, **blk.params, **(params or {})}
     check_excluded(b, new_params, blk.name)
+    embedded, ref = _write_draft(b, entry, definition.id, new_code)
     with b.session.edit():
-        b.session.update_block(block, actor="agent", code=new_code, metadata_transform=new_transform, params=new_params)
-        blk.category = fn_name
-    b.record_approved_change(block, "updated custom code")
+        b.session.set_definition(block, embedded, library_ref=ref, params=new_params)
+    b.record_approved_change(block, "updated its code")
     b.failures.pop(block, None)
-    return {"ok": True, "block": block}
+    return {"ok": True, "block": block, "version": definition.version}
 
 
 @tool(
@@ -1201,11 +1227,10 @@ def delete_block(b: AgentBuild, block: str) -> dict[str, Any]:
 )
 def set_params(b: AgentBuild, block: str, params: dict[str, Any]) -> dict[str, Any]:
     blk = b.require_modifiable(block, "change params of")
-    if not blk.is_custom:
-        known = {p["name"] for p in catalogue.block_params(BLOCK_REGISTRY[blk.category])}
-        unknown = sorted(set(params) - known)
-        if unknown:
-            raise ToolError(f"{blk.category} has no params {unknown}; its params are {sorted(known)}")
+    known = {p["name"] for p in catalogue.block_params(blk.resolve())}
+    unknown = sorted(set(params) - known)
+    if unknown:
+        raise ToolError(f"{blk.category} has no params {unknown}; its params are {sorted(known)}")
     merged = {**blk.params, **params}
     merged = {k: v for k, v in merged.items() if v is not None}
     check_excluded(b, merged, blk.name)
@@ -1215,7 +1240,7 @@ def set_params(b: AgentBuild, block: str, params: dict[str, Any]) -> dict[str, A
     b.failures.pop(block, None)
     _sync_plan_params(b, blk, params)
     out = {"ok": True, "params": merged}
-    warning = flag_suspicious(b, blk.category, merged, blk.name) if not blk.is_custom else None
+    warning = flag_suspicious(b, blk.category, merged, blk.name)
     if warning:
         out["warning"] = warning
     return out

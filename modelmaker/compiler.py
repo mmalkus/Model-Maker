@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import ast
 import builtins
-import inspect
 import keyword
 import textwrap
 from datetime import datetime, timezone
+from importlib import metadata
 
-from .blocks.base import BLOCK_REGISTRY, BlockSpec
+from .blocks.base import BlockDefinition
 from .graph import Graph
 from .packet import ColumnRole, DataFramePacket, resolve_role_column
-from .runner import FusionGroup, _is_fusable_block
+from .runner import FusionGroup, _fusable_block
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 
@@ -87,15 +88,12 @@ def _alloc_output_vars(
     for a multi-output block), numbered `_2`, `_3`, ... only when that's
     already taken. Shared between the ordinary per-block call emission and
     a fused group's exit(s) (see _fused_group_call_lines) so a name picked
-    for a streaming exit reads exactly like any other block's output would.
-    A custom block's function is itself named after the block (see
-    compile_graph), so its output always takes the port-name form instead
-    of ending up numbered: `Double_A_out = Double_A(...)`."""
+    for a streaming exit reads exactly like any other block's output would."""
     varlist = []
     for p in out_ports:
         var = claimed.get((bid, p))
         if var is None:
-            plain = len(out_ports) == 1 and not block.is_custom
+            plain = len(out_ports) == 1
             base = _sanitize(block.name) if plain else _sanitize(f"{block.name}_{p}")
             var = _unique_name(base, used_var_names)
         var_names[(bid, p)] = var
@@ -119,9 +117,9 @@ def _build_compile_fusion_groups(graph: Graph, order: list[str], must_exit: set[
     also being compiled -- the whole point of naming a block in
     `output_blocks` is to get its own variable in the script."""
     candidate_set = set(order)
-    fusable: dict[str, BlockSpec] = {}
+    fusable: dict[str, BlockDefinition] = {}
     for bid in order:
-        spec = _is_fusable_block(graph.blocks[bid])
+        spec = _fusable_block(graph.blocks[bid])
         if spec is not None:
             fusable[bid] = spec
 
@@ -215,7 +213,10 @@ def _fused_group_call_lines(
         lines.append(f"{lazy_var[bid]} = {call}")
 
     exits = [bid for bid in group.members if bid in group.exits]
-    exit_vars = [_alloc_output_vars(bid, graph.blocks[bid], ["out"], var_names, used_var_names, claimed)[0] for bid in exits]
+    exit_vars = [
+        _alloc_output_vars(bid, graph.blocks[bid], [graph.blocks[bid].outputs[0].name], var_names, used_var_names, claimed)[0]
+        for bid in exits
+    ]
     collect_call = f"pl.collect_all([{', '.join(lazy_var[bid] for bid in exits)}], engine='streaming')"
     if len(exit_vars) == 1:
         lines.append(f"({exit_vars[0]},) = {collect_call}")
@@ -264,8 +265,8 @@ def compile_graph(
     implemented.
 
     `stream=True` mirrors Runner.run_all_streaming for a compiled script:
-    whatever connected stretch of fusable blocks (filter/select/
-    groupby_agg/join/read_csv -- see BlockSpec.lazy_fn, and
+    whatever connected stretch of fusable blocks (lazy port flags -- see
+    runner._fusable_block, and
     _build_compile_fusion_groups for the exact same grouping rule the
     live engine uses) is emitted as one polars lazy plan, collected once
     via `pl.collect_all(..., engine="streaming")`, instead of one eager
@@ -312,56 +313,50 @@ def compile_graph(
     wants_output_dir: dict[str, bool] = {}
     wants_block_id: dict[str, bool] = {}
     wants_role_params: dict[str, dict[ColumnRole, str]] = {}
+    lazy_outputs: dict[str, list[str]] = {}
     def_lines: list[str] = []
-    # Two blocks that run the same code (same category, for registry blocks;
-    # same category *and* code text, for custom ones) get exactly one
-    # function definition, shared across every instance's call site below --
-    # e.g. two WoE blocks compile to one `woe_transform` function called
-    # twice with each instance's own params, not two near-identical copies.
-    # A fused member's def uses its lazy_fn instead of the eager fn (see
-    # BlockSpec.lazy_fn) -- for filter/select/groupby_agg/join that's
-    # literally the same function object, so the emitted source is
-    # unchanged; only read_csv's separate lazy twin actually differs, and
-    # naturally gets its own def (different source text -> different key
-    # below) alongside any non-fused read_csv elsewhere in the script.
-    seen_fns: dict[tuple[str, str], str] = {}
+    helper_lines: list[str] = []
+    requirements: dict[str, None] = {}
+    # Two blocks that run the same definition get exactly one function
+    # definition, shared across every instance's call site below -- e.g.
+    # two WoE blocks compile to one `woe_transform` function called twice
+    # with each instance's own params. A library block's private helpers
+    # are emitted once each, ahead of the block functions.
+    seen_fns: dict[str, str] = {}
+    seen_helpers: dict[str, str] = {}
     used_fn_names: set[str] = set(_RESERVED_FN_NAMES)
     for bid in order:
         block = graph.blocks[bid]
-        group = fused_group_of.get(bid)
-        if group is not None:
-            fn = BLOCK_REGISTRY[block.category].lazy_fn
-        else:
-            fn = block.resolved_fn()
+        definition = block.resolve()
+        fn = definition.fn
         wants_output_dir[bid] = accepts_param(fn, "output_dir")
         wants_block_id[bid] = accepts_param(fn, "block_id")
         wants_role_params[bid] = {
             role: role_param for role in ROLE_PARAM_NAMES if (role_param := find_role_param(fn, role)) is not None
         }
-        src = block.code if block.is_custom else inspect.getsource(fn)
-        src = textwrap.dedent(src).strip("\n")
-        fn_sig = (block.category, src)
-        existing_fn_name = seen_fns.get(fn_sig)
+        lazy_outputs[bid] = [p.name for p in definition.outputs if p.lazy]
+        requirements.update(dict.fromkeys(definition.requires))
+        existing_fn_name = seen_fns.get(definition.sha)
         if existing_fn_name is not None:
             fn_names[bid] = existing_fn_name
             continue
 
-        # A custom (AI-authored) block's function is named after the block
-        # itself -- the same human-chosen name already used for its call-site
-        # variable below -- rather than its auto-generated category (e.g.
-        # "ai_block_lz3k9f"), so the compiled def reads like the block does
-        # in the UI. Registry blocks keep the plain category name (a stable,
-        # well-known function name shared by every instance); a different
-        # *bodied* block already claiming it only bites two custom blocks
-        # that happen to share a category but were drafted with different
-        # bodies, where a `_2`, `_3`, ... suffix disambiguates them.
-        base_name = _sanitize(block.name) if block.is_custom else _sanitize(block.category)
-        fn_name = _unique_name(base_name, used_fn_names)
-        seen_fns[fn_sig] = fn_name
+        main_src, helpers = _split_code(definition)
+        for name, helper_src in helpers:
+            if name in seen_helpers:
+                if seen_helpers[name] != helper_src:
+                    raise CompileError(f"two blocks bring different helpers named {name!r} -- rename one of them")
+                continue
+            seen_helpers[name] = helper_src
+            used_fn_names.add(name)
+            helper_lines += [helper_src, "", ""]
+        fn_name = _unique_name(_sanitize(definition.id), used_fn_names)
+        seen_fns[definition.sha] = fn_name
         fn_names[bid] = fn_name
-        src = src.replace(f"def {fn.__name__}(", f"def {fn_name}(", 1)
+        main_src = main_src.replace(f"def {definition.id}(", f"def {fn_name}(", 1)
         def_lines.append(f"# === Function: {fn_name} | type={block.block_type} | category={block.category} ===")
-        def_lines.append(src)
+        def_lines.append(f"# {_provenance(definition)}")
+        def_lines.append(main_src)
         def_lines.append("")
         def_lines.append("")
 
@@ -440,12 +435,21 @@ def compile_graph(
                 call_lines.append(call)
             else:
                 call_lines.append(f"{', '.join(varlist)} = {call}" if len(varlist) > 1 else f"{varlist[0]} = {call}")
+            # A lazy output (e.g. read_csv's scan) is collected right away:
+            # every other block in the script expects a DataFrame.
+            for port, var in zip(out_ports, varlist):
+                if port in lazy_outputs[bid]:
+                    call_lines.append(f"{var} = {var}.collect()")
         call_lines.append("")
 
     header = [
         "# Generated by Model-Maker. Do not edit function bodies here directly --",
         "# edit the source blocks in the project and recompile.",
-        f"# Compiled: {datetime.now(timezone.utc).isoformat()}",
+        f"# Compiled: {datetime.now(timezone.utc).isoformat()} with Model-Maker {_version()}",
+    ]
+    if requirements:
+        header.append(f"# Requires: {', '.join(requirements)}")
+    header += [
         "",
         "import os",
         "import polars as pl",
@@ -463,7 +467,42 @@ def compile_graph(
         header.append(_COMBINE_GROUP_RESULTS_SRC)
         header.append("")
 
-    return "\n".join(header + def_lines + call_lines) + "\n"
+    return "\n".join(header + helper_lines + def_lines + call_lines) + "\n"
+
+
+def _version() -> str:
+    try:
+        return metadata.version("quantology-modelmaker")
+    except metadata.PackageNotFoundError:
+        return "dev"
+
+
+def _provenance(definition: BlockDefinition) -> str:
+    """Where an emitted function came from, for whoever reads the script."""
+    if definition.source == "builtin":
+        return f"built-in, Model-Maker {_version()} | sha {definition.sha}"
+    return f"library {definition.origin or '(embedded)'} v{definition.version} | sha {definition.sha}"
+
+
+def _split_code(definition: BlockDefinition) -> tuple[str, list[tuple[str, str]]]:
+    """A definition's code as (the block function's source, [(helper name,
+    helper source)]) -- helpers are a library file's private functions and
+    constants the block uses (see block_library.parse_source)."""
+    code = textwrap.dedent(definition.code)
+    lines = code.splitlines()
+    main = ""
+    helpers: list[tuple[str, str]] = []
+    for node in ast.parse(code).body:
+        start = node.decorator_list[0].lineno if getattr(node, "decorator_list", None) else node.lineno
+        src = "\n".join(lines[start - 1 : node.end_lineno])
+        name = getattr(node, "name", None) or next(
+            (t.id for t in getattr(node, "targets", []) if isinstance(t, ast.Name)), None
+        )
+        if name == definition.id:
+            main = src
+        else:
+            helpers.append((name or src, src))
+    return main, helpers
 
 
 # A grouped block's per-group calls each return whatever the block normally

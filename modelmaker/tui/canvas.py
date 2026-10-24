@@ -125,8 +125,8 @@ class BlockChip(Static, can_focus=True):
         text.append(f"{status_glyph} {status}", style=STATUS_COLORS.get(status, "white"))
         if block.get("group_by"):
             text.append(f"  by:{block['group_by']}", style="dim")
-        if block.get("is_custom"):
-            text.append("  AI", style="magenta")
+        if (block.get("definition_info") or {}).get("source") == "library":
+            text.append("  LIB", style="magenta")
         inputs = block.get("inputs") or []
         outputs = block.get("outputs") or []
         if inputs or outputs:

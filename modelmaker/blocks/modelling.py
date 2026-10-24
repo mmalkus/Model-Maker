@@ -9,34 +9,435 @@ never needs a special deserializer downstream.
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Any, Callable
-
 import polars as pl
 
-from ..agent import hints as h
-from ..packet import ColumnMeta, ColumnRole, DataFramePacket
-from .base import BlockSpec, FieldSpec, PortSpec, register_block
-
-
-def _predictions_meta(new_col_roles: dict[str, ColumnRole]):
-    """Tag each of this block's own new output columns with the given role;
-    every other output column is just the input passed through unchanged.
-    `predicted` is a unique role (see packet.UNIQUE_ROLES) -- a block that
-    emits more than one prediction-shaped column (logistic_regression's
-    predicted_proba/predicted_class) can only give PREDICTED to the one
-    that's actually the model's score; the rest fall back to FEATURE, same
-    as any other derived column."""
-
-    def _fn(input_metas, outputs, params):
-        (in_meta,) = input_metas.values()
-        (df,) = outputs.values()
-        result = dict(in_meta)
-        for name, role in new_col_roles.items():
-            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=role)
-        return {"predictions": {name: result[name] for name in df.columns if name in result}}
-
-    return _fn
+BLOCKS = {
+    "glm_fit": {
+        "display_name": "GLM fit",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["regression"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "predictions"}, {"name": "model", "type": "model", "required": False}],
+        "form": [
+            {"key": "target", "label": "Target column", "kind": "column", "auto_role": "target"},
+            {"key": "features", "label": "Feature columns", "kind": "columns"},
+            {
+                "key": "family",
+                "label": "Family",
+                "kind": "select",
+                "options": ["gaussian", "poisson", "gamma", "inverse_gaussian"],
+            },
+            {"key": "alpha", "label": "Regularization (alpha)", "kind": "number", "step": 0.01},
+        ],
+        "meta": {"roles": [{"column": "predicted", "role": "predicted"}]},
+    },
+    "logistic_regression": {
+        "display_name": "Logistic regression",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["regression", "scorecard", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "predictions"}, {"name": "model", "type": "model", "required": False}],
+        "form": [
+            {
+                "key": "target",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "features", "label": "Feature columns", "kind": "columns"},
+            {"key": "C", "label": "Inverse regularization (C)", "kind": "number", "step": 0.1},
+            {"key": "max_iter", "label": "Max iterations", "kind": "number"},
+        ],
+        "meta": {
+            "roles": [
+                {"column": "predicted_proba", "role": "predicted"},
+                {"column": "predicted_class", "role": "feature"},
+            ],
+        },
+        "hints": "logistic_regression",
+    },
+    "lgd_regression": {
+        "display_name": "LGD / CCF regression (fractional logit)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["regression", "lgd", "ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "predictions"}, {"name": "model", "type": "model", "required": False}],
+        "form": [
+            {
+                "key": "target",
+                "label": "Target column (LGD or CCF, in [0, 1])",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "features", "label": "Feature columns", "kind": "columns"},
+            {"key": "max_iter", "label": "Max iterations", "kind": "number"},
+            {"key": "tol", "label": "Convergence tolerance", "kind": "number", "step": 1e-08},
+        ],
+        "meta": {"roles": [{"column": "predicted", "role": "predicted"}]},
+        "hints": "lgd_regression",
+    },
+    "predict": {
+        "display_name": "Predict",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["regression"],
+        "inputs": [{"name": "df"}, {"name": "model", "type": "model"}],
+        "outputs": [{"name": "predictions"}],
+        "meta": {
+            "inherit": {"port": "df"},
+            "roles": [
+                {"column": "predicted", "role": "predicted"},
+                {"column": "predicted_proba", "role": "predicted"},
+                {"column": "predicted_class", "role": "feature"},
+            ],
+        },
+    },
+    "fit_master_scale": {
+        "display_name": "Fit master scale",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["rating_scale", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "master_scale", "type": "master_scale"}],
+        "form": [
+            {
+                "key": "score_col",
+                "label": "Score column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {
+                "key": "target_col",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "n_grades", "label": "Number of grades", "kind": "number"},
+            {
+                "key": "algorithm",
+                "label": "Algorithm",
+                "kind": "select",
+                "options": ["quantile", "equal_width", "monotonic_default_rate"],
+            },
+            {
+                "key": "min_grade_share",
+                "label": "Minimum grade share (e.g. 0.03)",
+                "kind": "number",
+                "step": 0.01,
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "fit_master_scale",
+    },
+    "assign_rating_grade": {
+        "display_name": "Assign rating grade",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["rating_scale", "pd"],
+        "inputs": [{"name": "df"}, {"name": "master_scale", "type": "master_scale"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {
+                "key": "score_col",
+                "label": "Score column (defaults to the scale's own)",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+        ],
+        "meta": {
+            "roles": [{"column": "grade", "role": "segment"}, {"column": "grade_pd", "role": "feature"}],
+        },
+    },
+    "woe_transform": {
+        "display_name": "Weight of evidence",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["binning_woe", "scorecard"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "col", "label": "Column to transform", "kind": "column"},
+            {
+                "key": "target",
+                "label": "Target column (binary)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "bins", "label": "Bins (numeric columns)", "kind": "number"},
+        ],
+        "meta": {"new_role": "feature"},
+    },
+    "forward_default_flag": {
+        "display_name": "Forward default flag (PD target)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["data_prep", "pd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "id_col", "label": "Account id column", "kind": "column"},
+            {"key": "date_col", "label": "Month column (date or YYYYMM)", "kind": "column"},
+            {"key": "default_col", "label": "Current default status column", "kind": "column"},
+            {"key": "horizon", "label": "Horizon (months)", "kind": "number"},
+            {
+                "key": "flag_col",
+                "label": "Flag column name (optional)",
+                "kind": "text",
+                "placeholder": "default_12m",
+            },
+            {
+                "key": "incomplete",
+                "label": "Incomplete outcome windows",
+                "kind": "select",
+                "options": ["drop", "null"],
+            },
+        ],
+        "meta": {
+            "roles": [
+                {
+                    "column_param": "flag_col",
+                    "fallback": "default_{horizon}m",
+                    "role": "target",
+                    "displaced": "excluded",
+                },
+                {"column_param": "default_col", "role": "excluded"},
+            ],
+        },
+        "hints": "forward_default_flag",
+    },
+    "compute_lgd": {
+        "display_name": "Compute LGD",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["lgd"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "ead_col", "label": "EAD column", "kind": "column"},
+            {"key": "recovered_col", "label": "Recovered amount column", "kind": "column"},
+            {"key": "cost_col", "label": "Workout cost column (optional)", "kind": "column"},
+            {"key": "floor", "label": "Floor", "kind": "number", "step": 0.05},
+            {"key": "cap", "label": "Cap", "kind": "number", "step": 0.05},
+        ],
+        "meta": {"roles": [{"column": "lgd", "role": "target", "if_taken": "feature"}]},
+        "hints": "computed_lgd",
+    },
+    "compute_ccf": {
+        "display_name": "Compute CCF",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "limit_col", "label": "Limit column", "kind": "column"},
+            {
+                "key": "balance_ref_col",
+                "label": "Balance at reference date column",
+                "kind": "column",
+            },
+            {"key": "balance_default_col", "label": "Balance at default column", "kind": "column"},
+            {"key": "floor", "label": "Floor", "kind": "number", "step": 0.05},
+            {"key": "cap", "label": "Cap", "kind": "number", "step": 0.05},
+            {
+                "key": "no_headroom",
+                "label": "No undrawn headroom at reference",
+                "kind": "select",
+                "options": ["zero", "null"],
+            },
+        ],
+        "meta": {
+            "roles": [
+                {"column": "undrawn_at_reference", "role": "feature"},
+                {"column": "ccf", "role": "target", "if_taken": "feature"},
+            ],
+        },
+        "hints": "computed_ccf",
+    },
+    "scorecard_scale": {
+        "display_name": "Scorecard scaling",
+        "version": 1,
+        "block_type": "output",
+        "group": "modelling",
+        "tags": ["scorecard"],
+        "inputs": [{"name": "model", "type": "model"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "meta": {"inherit": "none"},
+    },
+    "stepwise_selection": {
+        "display_name": "Stepwise feature selection",
+        "version": 1,
+        "block_type": "output",
+        "group": "modelling",
+        "tags": ["feature_selection", "regression"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {
+                "key": "target",
+                "label": "Target column (binary, or LGD/CCF in [0, 1])",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "features", "label": "Candidate features", "kind": "columns"},
+            {
+                "key": "direction",
+                "label": "Direction",
+                "kind": "select",
+                "options": ["both", "forward", "backward"],
+            },
+            {"key": "p_enter", "label": "p-value to enter", "kind": "number", "step": 0.01},
+            {"key": "p_remove", "label": "p-value to remove", "kind": "number", "step": 0.01},
+            {"key": "max_features", "label": "Max features (optional)", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "stepwise_selection",
+    },
+    "calibrate_model": {
+        "display_name": "Calibrate to central tendency",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["regression", "calibration", "pd", "lgd"],
+        "inputs": [{"name": "df"}, {"name": "model", "type": "model"}],
+        "outputs": [{"name": "model", "type": "model"}],
+        "form": [
+            {
+                "key": "central_tendency",
+                "label": "Central tendency (target mean, e.g. long-run default rate)",
+                "kind": "number",
+                "step": 0.001,
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "calibrate_model",
+    },
+    "margin_of_conservatism": {
+        "display_name": "Margin of conservatism / downturn",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["calibration", "pd", "lgd", "ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {
+                "key": "predicted_col",
+                "label": "Estimate column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {"key": "add_on", "label": "Add-on", "kind": "number", "step": 0.01},
+            {"key": "multiplier", "label": "Multiplier", "kind": "number", "step": 0.05},
+            {"key": "floor", "label": "Floor (optional)", "kind": "number", "step": 0.0001},
+            {"key": "cap", "label": "Cap (optional)", "kind": "number", "step": 0.05},
+            {
+                "key": "output_col",
+                "label": "Output column",
+                "kind": "text",
+                "placeholder": "predicted_moc",
+            },
+        ],
+        "meta": {"roles": [{"column_param": "output_col", "role": "predicted", "displaced": "feature"}]},
+    },
+    "discount_recoveries": {
+        "display_name": "Discount recoveries",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["lgd"],
+        "inputs": [{"name": "facilities"}, {"name": "cashflows"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "id_col", "label": "Facility id column (both inputs)", "kind": "column"},
+            {
+                "key": "default_date_col",
+                "label": "Default date column (facilities)",
+                "kind": "column",
+            },
+            {"key": "cf_date_col", "label": "Cash-flow date column (cash flows)", "kind": "column"},
+            {"key": "recovery_col", "label": "Recovery amount column", "kind": "column"},
+            {"key": "cost_col", "label": "Workout cost column (optional)", "kind": "column"},
+            {"key": "annual_rate", "label": "Annual discount rate", "kind": "number", "step": 0.005},
+            {
+                "key": "rate_col",
+                "label": "Per-facility rate column (optional, overrides the rate)",
+                "kind": "column",
+            },
+        ],
+        "meta": {"inherit": {"port": "facilities"}, "new_role": "feature"},
+    },
+    "compute_ead": {
+        "display_name": "Compute EAD from CCF",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "balance_col", "label": "Drawn balance column", "kind": "column"},
+            {"key": "limit_col", "label": "Limit column", "kind": "column"},
+            {
+                "key": "predicted_col",
+                "label": "CCF column",
+                "kind": "column",
+                "auto_role": "predicted",
+            },
+            {
+                "key": "output_col",
+                "label": "Output column",
+                "kind": "text",
+                "placeholder": "ead_predicted",
+            },
+        ],
+        "meta": {"new_role": "feature"},
+    },
+    "long_run_average": {
+        "display_name": "Long-run average (LGD/CCF/DR)",
+        "version": 1,
+        "block_type": "output",
+        "group": "modelling",
+        "tags": ["calibration", "pd", "lgd", "ccf_ead"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "table", "aggregate": True}, {"name": "metric", "type": "scalar_metric"}],
+        "form": [
+            {
+                "key": "target_col",
+                "label": "Realised value column (LGD, CCF or default flag)",
+                "kind": "column",
+                "auto_role": "target",
+            },
+            {"key": "date_col", "label": "Default date column", "kind": "column"},
+            {
+                "key": "weight_col",
+                "label": "Exposure weight column (optional, e.g. EAD)",
+                "kind": "column",
+            },
+            {
+                "key": "period",
+                "label": "Period",
+                "kind": "select",
+                "options": ["year", "quarter", "month"],
+            },
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "long_run_average",
+    },
+}
 
 
 def glm_fit(
@@ -79,27 +480,6 @@ def glm_fit(
         "alpha": alpha,
     }
     return predictions, artifact
-
-
-register_block(
-    BlockSpec(
-        category="glm_fit",
-        block_type="standard",
-        group="modelling",
-        display_name="GLM fit",
-        tags=("regression",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
-        fn=glm_fit,
-        metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
-        form=(
-            FieldSpec("target", "Target column", "column", auto_role="target"),
-            FieldSpec("features", "Feature columns", "columns"),
-            FieldSpec("family", "Family", "select", options=("gaussian", "poisson", "gamma", "inverse_gaussian")),
-            FieldSpec("alpha", "Regularization (alpha)", "number", step=0.01),
-        ),
-    )
-)
 
 
 def logistic_regression(
@@ -170,63 +550,6 @@ def logistic_regression(
         "statistics": statistics,
     }
     return predictions, artifact
-
-
-def _coefficient_hints(model: Any, woe_signs: bool) -> list[str]:
-    if not isinstance(model, dict):
-        return []
-    stats = {k: v for k, v in (model.get("statistics") or {}).items() if k != "intercept"}
-    coefs = model.get("coefficients") or {k: v.get("estimate") for k, v in stats.items()}
-    hints = []
-    if model.get("converged") is False:
-        hints.append("The fit didn't converge -- try fewer features, or check for collinear or constant ones.")
-    # WoE is higher where the outcome is rarer, so every WoE coefficient
-    # of a PD model should be negative (logistic_regression's docstring).
-    wrong = (
-        [f for f, c in coefs.items() if f.endswith("_woe") and h.num(c) and c > 0] if woe_signs else []
-    )
-    if wrong:
-        hints.append(
-            f"Positive coefficient on WoE feature(s) {h.names(wrong)} -- the wrong sign, usually collinearity. "
-            "Drop them (or the feature they overlap with) and refit."
-        )
-    weak = [f for f, s in stats.items() if (s.get("p_value") or 0.0) > h.MAX_P_VALUE and f not in wrong]
-    if weak:
-        hints.append(f"Not significant (p > {h.MAX_P_VALUE}): {h.names(weak)} -- consider dropping them and refitting.")
-    if coefs and not hints:
-        woe = woe_signs and all(f.endswith("_woe") for f in coefs)
-        hints.append(
-            "Coefficients look sound: signs as expected and all significant." if woe else "All coefficients are significant."
-        )
-    return hints
-
-
-def _logistic_regression_hints(outputs: dict[str, Any]) -> list[str]:
-    return _coefficient_hints(outputs.get("model"), woe_signs=True)
-
-
-register_block(
-    BlockSpec(
-        category="logistic_regression",
-        block_type="standard",
-        group="modelling",
-        display_name="Logistic regression",
-        tags=("regression", "scorecard", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
-        fn=logistic_regression,
-        metadata_transform=_predictions_meta(
-            {"predicted_proba": ColumnRole.PREDICTED, "predicted_class": ColumnRole.FEATURE}
-        ),
-        form=(
-            FieldSpec("target", "Target column (binary)", "column", auto_role="target"),
-            FieldSpec("features", "Feature columns", "columns"),
-            FieldSpec("C", "Inverse regularization (C)", "number", step=0.1),
-            FieldSpec("max_iter", "Max iterations", "number"),
-        ),
-        hints=_logistic_regression_hints,
-    )
-)
 
 
 def lgd_regression(
@@ -323,32 +646,6 @@ def lgd_regression(
     return predictions, artifact
 
 
-def _lgd_regression_hints(outputs: dict[str, Any]) -> list[str]:
-    return _coefficient_hints(outputs.get("model"), woe_signs=False)
-
-
-register_block(
-    BlockSpec(
-        category="lgd_regression",
-        block_type="standard",
-        group="modelling",
-        display_name="LGD / CCF regression (fractional logit)",
-        tags=("regression", "lgd", "ccf_ead"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("predictions"), PortSpec("model", type="model", required=False)],
-        fn=lgd_regression,
-        metadata_transform=_predictions_meta({"predicted": ColumnRole.PREDICTED}),
-        form=(
-            FieldSpec("target", "Target column (LGD or CCF, in [0, 1])", "column", auto_role="target"),
-            FieldSpec("features", "Feature columns", "columns"),
-            FieldSpec("max_iter", "Max iterations", "number"),
-            FieldSpec("tol", "Convergence tolerance", "number", step=1e-08),
-        ),
-        hints=_lgd_regression_hints,
-    )
-)
-
-
 def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
     """Applies a model artifact produced by glm_fit/logistic_regression (see
     their `model` output port) to a different dataframe -- the held-out/test
@@ -385,36 +682,6 @@ def predict(df: pl.DataFrame, model: dict) -> pl.DataFrame:
     raise ValueError(f"unsupported model kind for predict: {kind!r}")
 
 
-def _predict_meta(input_metas, outputs, params):
-    in_meta = input_metas.get("df", {})
-    (df,) = outputs.values()
-    result = dict(in_meta)
-    role_by_col = {
-        "predicted": ColumnRole.PREDICTED,
-        "predicted_proba": ColumnRole.PREDICTED,
-        "predicted_class": ColumnRole.FEATURE,
-    }
-    for name, role in role_by_col.items():
-        if name in df.columns:
-            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=role)
-    return {"predictions": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="predict",
-        block_type="standard",
-        group="modelling",
-        display_name="Predict",
-        tags=("regression",),
-        inputs=[PortSpec("df"), PortSpec("model", type="model")],
-        outputs=[PortSpec("predictions")],
-        fn=predict,
-        metadata_transform=_predict_meta,
-    )
-)
-
-
 def woe_transform(df: pl.DataFrame, col: str, target: str, bins: int = 10) -> pl.DataFrame:
     """Weight-of-evidence encoding of `col` against a binary `target`
     (1 = event/bad, 0 = non-event/good), the standard credit-scoring
@@ -448,15 +715,6 @@ def woe_transform(df: pl.DataFrame, col: str, target: str, bins: int = 10) -> pl
     result = bucketed.join(stats.select("_bucket", "_woe"), on="_bucket", how="left")
     result = result.rename({"_woe": out_col}).drop("_bucket")
     return result
-
-
-def _woe_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    out_col = f"{params['col']}_woe"
-    result = dict(in_meta)
-    result[out_col] = ColumnMeta(dtype=str(df.schema[out_col]), role=ColumnRole.FEATURE)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
 
 
 def fit_master_scale(
@@ -618,46 +876,6 @@ def fit_master_scale(
     return {"kind": "master_scale", "score_col": score_col, "algorithm": algorithm, "grades": grades}
 
 
-def _fit_master_scale_hints(outputs: dict[str, Any]) -> list[str]:
-    grades = h.metric(outputs, "master_scale").get("grades") or []
-    if not grades:
-        return []
-    hints = []
-    rates = [g.get("observed_rate") for g in grades]
-    if all(h.num(r) for r in rates) and any(b < a for a, b in zip(rates, rates[1:])):
-        hints.append("Observed rates aren't monotonic across grades -- refit with algorithm 'monotonic_default_rate'.")
-    total = sum(g.get("n") or 0 for g in grades)
-    thin = [str(g["grade"]) for g in grades if total and (g.get("n") or 0) / total < h.THIN_GRADE]
-    if thin:
-        hints.append(f"Thin grades ({h.names(thin)}, < {h.THIN_GRADE:.0%} of the population) -- set min_grade_share.")
-    if not hints:
-        hints.append(f"{len(grades)} grades, monotonic and none too thin.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="fit_master_scale",
-        block_type="standard",
-        group="modelling",
-        display_name="Fit master scale",
-        tags=("rating_scale", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("master_scale", type="master_scale")],
-        fn=fit_master_scale,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("score_col", "Score column", "column", auto_role="predicted"),
-            FieldSpec("target_col", "Target column (binary)", "column", auto_role="target"),
-            FieldSpec("n_grades", "Number of grades", "number"),
-            FieldSpec("algorithm", "Algorithm", "select", options=("quantile", "equal_width", "monotonic_default_rate")),
-            FieldSpec("min_grade_share", "Minimum grade share (e.g. 0.03)", "number", step=0.01),
-        ),
-        hints=_fit_master_scale_hints,
-    )
-)
-
-
 def assign_rating_grade(df: pl.DataFrame, master_scale: dict, score_col: str | None = None) -> pl.DataFrame:
     """Buckets `score_col` (defaults to whichever column the master scale
     was fit on) into the grades `master_scale` describes -- the apply half
@@ -675,54 +893,6 @@ def assign_rating_grade(df: pl.DataFrame, master_scale: dict, score_col: str | N
         pd_map = {str(g["grade"]): float(g["pd"]) for g in grades}
         out = out.with_columns(pl.col("grade").replace_strict(pd_map, default=None, return_dtype=pl.Float64).alias("grade_pd"))
     return out
-
-
-def _rating_grade_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    result = dict(in_meta)
-    result["grade"] = ColumnMeta(dtype=str(df.schema["grade"]), role=ColumnRole.SEGMENT)
-    if "grade_pd" in df.columns:
-        result["grade_pd"] = ColumnMeta(dtype=str(df.schema["grade_pd"]), role=ColumnRole.FEATURE)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="assign_rating_grade",
-        block_type="standard",
-        group="modelling",
-        display_name="Assign rating grade",
-        tags=("rating_scale", "pd"),
-        inputs=[PortSpec("df"), PortSpec("master_scale", type="master_scale")],
-        outputs=[PortSpec("out")],
-        fn=assign_rating_grade,
-        metadata_transform=_rating_grade_meta,
-        form=(
-            FieldSpec("score_col", "Score column (defaults to the scale's own)", "column", auto_role="predicted"),
-        ),
-    )
-)
-
-
-register_block(
-    BlockSpec(
-        category="woe_transform",
-        block_type="standard",
-        group="modelling",
-        display_name="Weight of evidence",
-        tags=("binning_woe", "scorecard"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=woe_transform,
-        metadata_transform=_woe_meta,
-        form=(
-            FieldSpec("col", "Column to transform", "column"),
-            FieldSpec("target", "Target column (binary)", "column", auto_role="target"),
-            FieldSpec("bins", "Bins (numeric columns)", "number"),
-        ),
-    )
-)
 
 
 def forward_default_flag(
@@ -796,74 +966,6 @@ def forward_default_flag(
     return work.with_columns(flag.alias(flag_col)).drop("__row", "__m", "__d", "__next", "__last", "__hit", "__complete")
 
 
-def _forward_default_flag_meta(input_metas, outputs, params):
-    """The new flag is the modelling target. Target is a unique role, so an
-    input column already tagged target gives it up (to excluded), and so does
-    `default_col` itself -- the current-month default status is the outcome
-    the flag is built from, never a feature."""
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    flag_col = params.get("flag_col") or f"default_{params.get('horizon', 12)}m"
-    default_col = params.get("default_col")
-    result = {}
-    for name in df.columns:
-        if name == flag_col:
-            result[name] = ColumnMeta(dtype=str(df.schema[name]), role=ColumnRole.TARGET)
-        elif name in in_meta:
-            meta = in_meta[name]
-            if name == default_col or meta.role == ColumnRole.TARGET:
-                meta = replace(meta, role=ColumnRole.EXCLUDED)
-            result[name] = meta
-    return {"out": result}
-
-
-def _forward_default_flag_hints(outputs: dict[str, Any]) -> list[str]:
-    packet = outputs.get("out")
-    target = h.target_column(packet)
-    if target is None:
-        return []
-    flag = packet.data[target]
-    if flag.len() == 0:
-        return ["No rows left -- check id_col/date_col/default_col and the horizon against the data's span."]
-    hints = []
-    nulls = flag.null_count()
-    if nulls:
-        hints.append(
-            f"{nulls} rows have an incomplete outcome window (null {target}) -- filter them out "
-            f"({target} IS NOT NULL) before fitting."
-        )
-    events = int(flag.sum() or 0)
-    if events < h.MIN_EVENTS:
-        hints.append(f"Only {events} defaults (< {h.MIN_EVENTS}) -- a PD model on this will be unstable.")
-    else:
-        hints.append(f"{target}: {events} defaults in {flag.len() - nulls} rows ({events / (flag.len() - nulls):.2%}).")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="forward_default_flag",
-        block_type="standard",
-        group="modelling",
-        display_name="Forward default flag (PD target)",
-        tags=("data_prep", "pd"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=forward_default_flag,
-        metadata_transform=_forward_default_flag_meta,
-        form=(
-            FieldSpec("id_col", "Account id column", "column"),
-            FieldSpec("date_col", "Month column (date or YYYYMM)", "column"),
-            FieldSpec("default_col", "Current default status column", "column"),
-            FieldSpec("horizon", "Horizon (months)", "number"),
-            FieldSpec("flag_col", "Flag column name (optional)", "text", placeholder="default_12m"),
-            FieldSpec("incomplete", "Incomplete outcome windows", "select", options=("drop", "null")),
-        ),
-        hints=_forward_default_flag_hints,
-    )
-)
-
-
 def compute_lgd(
     df: pl.DataFrame,
     ead_col: str,
@@ -891,60 +993,6 @@ def compute_lgd(
     if cap is not None:
         lgd = lgd.clip(upper_bound=cap)
     return df.with_columns(lgd.alias("lgd"))
-
-
-def _target_role_unless_taken(in_meta: dict, new_col: str) -> ColumnRole:
-    """The realised LGD/CCF is the modelling target -- tag it so, so
-    target/actual_col params auto-fill downstream -- unless the input
-    already has a target column (target is a unique role)."""
-    taken = any(m.role == ColumnRole.TARGET for name, m in in_meta.items() if name != new_col)
-    return ColumnRole.FEATURE if taken else ColumnRole.TARGET
-
-
-def _compute_lgd_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    result = dict(in_meta)
-    result["lgd"] = ColumnMeta(dtype=str(df.schema["lgd"]), role=_target_role_unless_taken(in_meta, "lgd"))
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-def _computed_target_hints(column: str) -> Callable[[dict[str, Any]], list[str]]:
-    def hints(outputs: dict[str, Any]) -> list[str]:
-        packet = outputs.get("out")
-        if not isinstance(packet, DataFramePacket) or column not in packet.data.columns or packet.data.height == 0:
-            return []
-        nulls = packet.data[column].null_count() / packet.data.height
-        if nulls > h.MAX_NULL_SHARE:
-            return [
-                f"{nulls:.0%} of rows have a null {column} -- filter them out ({column} IS NOT NULL) before fitting."
-            ]
-        return []
-
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="compute_lgd",
-        block_type="standard",
-        group="modelling",
-        display_name="Compute LGD",
-        tags=("lgd",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=compute_lgd,
-        metadata_transform=_compute_lgd_meta,
-        form=(
-            FieldSpec("ead_col", "EAD column", "column"),
-            FieldSpec("recovered_col", "Recovered amount column", "column"),
-            FieldSpec("cost_col", "Workout cost column (optional)", "column"),
-            FieldSpec("floor", "Floor", "number", step=0.05),
-            FieldSpec("cap", "Cap", "number", step=0.05),
-        ),
-        hints=_computed_target_hints("lgd"),
-    )
-)
 
 
 def compute_ccf(
@@ -987,39 +1035,6 @@ def compute_ccf(
     return df.with_columns(undrawn.alias("undrawn_at_reference"), ccf.alias("ccf"))
 
 
-def _compute_ccf_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    result = dict(in_meta)
-    result["undrawn_at_reference"] = ColumnMeta(dtype=str(df.schema["undrawn_at_reference"]), role=ColumnRole.FEATURE)
-    result["ccf"] = ColumnMeta(dtype=str(df.schema["ccf"]), role=_target_role_unless_taken(in_meta, "ccf"))
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="compute_ccf",
-        block_type="standard",
-        group="modelling",
-        display_name="Compute CCF",
-        tags=("ccf_ead",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=compute_ccf,
-        metadata_transform=_compute_ccf_meta,
-        form=(
-            FieldSpec("limit_col", "Limit column", "column"),
-            FieldSpec("balance_ref_col", "Balance at reference date column", "column"),
-            FieldSpec("balance_default_col", "Balance at default column", "column"),
-            FieldSpec("floor", "Floor", "number", step=0.05),
-            FieldSpec("cap", "Cap", "number", step=0.05),
-            FieldSpec("no_headroom", "No undrawn headroom at reference", "select", options=("zero", "null")),
-        ),
-        hints=_computed_target_hints("ccf"),
-    )
-)
-
-
 def scorecard_scale(model: dict, base_score: float = 600.0, base_odds: float = 50.0, pdo: float = 20.0) -> dict:
     """Turns a fitted logistic_regression model's coefficients into a
     points-based scorecard: the standard points-to-double-odds (PDO)
@@ -1056,21 +1071,6 @@ def scorecard_scale(model: dict, base_score: float = 600.0, base_odds: float = 5
         "intercept_points": intercept_points,
         "rows": rows,
     }
-
-
-register_block(
-    BlockSpec(
-        category="scorecard_scale",
-        block_type="output",
-        group="modelling",
-        display_name="Scorecard scaling",
-        tags=("scorecard",),
-        inputs=[PortSpec("model", type="model")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=scorecard_scale,
-        metadata_transform=lambda *_a, **_k: {},
-    )
-)
 
 
 def stepwise_selection(
@@ -1168,49 +1168,6 @@ def stepwise_selection(
     }
 
 
-def _stepwise_selection_hints(outputs: dict[str, Any]) -> list[str]:
-    metric = h.metric(outputs)
-    selected = metric.get("selected")
-    if selected is None:
-        return []
-    if not selected:
-        return ["Nothing passed p_enter -- revisit the candidate features (or loosen p_enter) before fitting."]
-    hints = [f"Use these as the model's features: {h.names(selected)}."]
-    if metric.get("dropped"):
-        hints.append(f"Dropped along the way: {h.names(metric['dropped'])}.")
-    if metric.get("target_type") == "binary":
-        wrong = [
-            c["feature"] for c in metric.get("coefficients") or [] if c["feature"].endswith("_woe") and c.get("sign") == "+"
-        ]
-        if wrong:
-            hints.append(f"Wrong (positive) sign on {h.names(wrong)} -- drop them before fitting the final model.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="stepwise_selection",
-        block_type="output",
-        group="modelling",
-        display_name="Stepwise feature selection",
-        tags=("feature_selection", "regression"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("metric", type="scalar_metric")],
-        fn=stepwise_selection,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("target", "Target column (binary, or LGD/CCF in [0, 1])", "column", auto_role="target"),
-            FieldSpec("features", "Candidate features", "columns"),
-            FieldSpec("direction", "Direction", "select", options=("both", "forward", "backward")),
-            FieldSpec("p_enter", "p-value to enter", "number", step=0.01),
-            FieldSpec("p_remove", "p-value to remove", "number", step=0.01),
-            FieldSpec("max_features", "Max features (optional)", "number"),
-        ),
-        hints=_stepwise_selection_hints,
-    )
-)
-
-
 def calibrate_model(df: pl.DataFrame, model: dict, central_tendency: float) -> dict:
     """Calibrates a logit-link model (logistic_regression for PD, or
     lgd_regression for LGD/CCF) to a target level by shifting its
@@ -1257,38 +1214,6 @@ def calibrate_model(df: pl.DataFrame, model: dict, central_tendency: float) -> d
     return out
 
 
-def _calibrate_model_hints(outputs: dict[str, Any]) -> list[str]:
-    cal = h.metric(outputs, "model").get("calibration") or {}
-    shift, before, after = cal.get("intercept_shift"), cal.get("mean_prediction_before"), cal.get("mean_prediction_after")
-    if not (h.num(shift) and h.num(before) and h.num(after)):
-        return []
-    if abs(shift) > h.BIG_INTERCEPT_SHIFT:
-        return [
-            f"A large shift (log-odds {shift:+.2f}, mean {before:.4f} -> {after:.4f}) -- check the central tendency "
-            "is the right one, and mention it in the stage summary."
-        ]
-    return [f"Calibrated: mean prediction {before:.4f} -> {after:.4f}. Use this model for prediction from here on."]
-
-
-register_block(
-    BlockSpec(
-        category="calibrate_model",
-        block_type="standard",
-        group="modelling",
-        display_name="Calibrate to central tendency",
-        tags=("regression", "calibration", "pd", "lgd"),
-        inputs=[PortSpec("df"), PortSpec("model", type="model")],
-        outputs=[PortSpec("model", type="model")],
-        fn=calibrate_model,
-        metadata_transform=lambda *_a, **_k: {},
-        form=(
-            FieldSpec("central_tendency", "Central tendency (target mean, e.g. long-run default rate)", "number", step=0.001),
-        ),
-        hints=_calibrate_model_hints,
-    )
-)
-
-
 def margin_of_conservatism(
     df: pl.DataFrame,
     predicted_col: str,
@@ -1310,41 +1235,6 @@ def margin_of_conservatism(
     if cap is not None:
         value = value.clip(upper_bound=cap)
     return df.with_columns(value.alias(output_col))
-
-
-def _moc_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    out_col = params.get("output_col", "predicted_moc")
-    result = {
-        name: (ColumnMeta(dtype=m.dtype, role=ColumnRole.FEATURE, description=m.description, tags=m.tags) if m.role == ColumnRole.PREDICTED else m)
-        for name, m in in_meta.items()
-    }
-    result[out_col] = ColumnMeta(dtype=str(df.schema[out_col]), role=ColumnRole.PREDICTED)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="margin_of_conservatism",
-        block_type="standard",
-        group="modelling",
-        display_name="Margin of conservatism / downturn",
-        tags=("calibration", "pd", "lgd", "ccf_ead"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=margin_of_conservatism,
-        metadata_transform=_moc_meta,
-        form=(
-            FieldSpec("predicted_col", "Estimate column", "column", auto_role="predicted"),
-            FieldSpec("add_on", "Add-on", "number", step=0.01),
-            FieldSpec("multiplier", "Multiplier", "number", step=0.05),
-            FieldSpec("floor", "Floor (optional)", "number", step=0.0001),
-            FieldSpec("cap", "Cap (optional)", "number", step=0.05),
-            FieldSpec("output_col", "Output column", "text", placeholder="predicted_moc"),
-        ),
-    )
-)
 
 
 def discount_recoveries(
@@ -1408,39 +1298,6 @@ def discount_recoveries(
     )
 
 
-def _discount_recoveries_meta(input_metas, outputs, params):
-    in_meta = input_metas.get("facilities", {})
-    (df,) = outputs.values()
-    result = dict(in_meta)
-    for name in ("pv_recovery", "pv_cost", "n_cashflows", "workout_years"):
-        result[name] = ColumnMeta(dtype=str(df.schema[name]), role=ColumnRole.FEATURE)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="discount_recoveries",
-        block_type="standard",
-        group="modelling",
-        display_name="Discount recoveries",
-        tags=("lgd",),
-        inputs=[PortSpec("facilities"), PortSpec("cashflows")],
-        outputs=[PortSpec("out")],
-        fn=discount_recoveries,
-        metadata_transform=_discount_recoveries_meta,
-        form=(
-            FieldSpec("id_col", "Facility id column (both inputs)", "column"),
-            FieldSpec("default_date_col", "Default date column (facilities)", "column"),
-            FieldSpec("cf_date_col", "Cash-flow date column (cash flows)", "column"),
-            FieldSpec("recovery_col", "Recovery amount column", "column"),
-            FieldSpec("cost_col", "Workout cost column (optional)", "column"),
-            FieldSpec("annual_rate", "Annual discount rate", "number", step=0.005),
-            FieldSpec("rate_col", "Per-facility rate column (optional, overrides the rate)", "column"),
-        ),
-    )
-)
-
-
 def compute_ead(
     df: pl.DataFrame,
     balance_col: str,
@@ -1456,36 +1313,6 @@ def compute_ead(
     continuous_accuracy."""
     undrawn = (pl.col(limit_col) - pl.col(balance_col)).clip(lower_bound=0.0)
     return df.with_columns((pl.col(balance_col) + pl.col(predicted_col) * undrawn).alias(output_col))
-
-
-def _compute_ead_meta(input_metas, outputs, params):
-    (in_meta,) = input_metas.values()
-    (df,) = outputs.values()
-    out_col = params.get("output_col", "ead_predicted")
-    result = dict(in_meta)
-    result[out_col] = ColumnMeta(dtype=str(df.schema[out_col]), role=ColumnRole.FEATURE)
-    return {"out": {name: result[name] for name in df.columns if name in result}}
-
-
-register_block(
-    BlockSpec(
-        category="compute_ead",
-        block_type="standard",
-        group="modelling",
-        display_name="Compute EAD from CCF",
-        tags=("ccf_ead",),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("out")],
-        fn=compute_ead,
-        metadata_transform=_compute_ead_meta,
-        form=(
-            FieldSpec("balance_col", "Drawn balance column", "column"),
-            FieldSpec("limit_col", "Limit column", "column"),
-            FieldSpec("predicted_col", "CCF column", "column", auto_role="predicted"),
-            FieldSpec("output_col", "Output column", "text", placeholder="ead_predicted"),
-        ),
-    )
-)
 
 
 def long_run_average(
@@ -1535,46 +1362,3 @@ def long_run_average(
     if weight_col and data.height:
         metric["exposure_weighted"] = float((data[target_col] * data[weight_col]).sum() / data[weight_col].sum())
     return table, metric
-
-
-def _long_run_average_hints(outputs: dict[str, Any]) -> list[str]:
-    metric = h.metric(outputs)
-    hints = []
-    periods = metric.get("n_periods")
-    if h.num(periods) and periods < h.SHORT_HISTORY:
-        hints.append(
-            f"Only {periods} period(s) -- likely short of a full cycle. Say so in the stage summary; a margin of "
-            "conservatism may be needed."
-        )
-    dw, tw = metric.get("default_weighted"), metric.get("time_weighted")
-    if h.num(dw) and h.num(tw) and dw and abs(tw - dw) / abs(dw) > h.LRA_GAP:
-        hints.append(
-            f"Default-weighted ({dw:.4f}) and time-weighted ({tw:.4f}) averages differ by more than {h.LRA_GAP:.0%} -- "
-            "the choice matters; state which you use as the central tendency and why."
-        )
-    if not hints and h.num(periods):
-        hints.append(f"{periods} periods, and the default- and time-weighted averages agree.")
-    return hints
-
-
-register_block(
-    BlockSpec(
-        category="long_run_average",
-        block_type="output",
-        group="modelling",
-        display_name="Long-run average (LGD/CCF/DR)",
-        tags=("calibration", "pd", "lgd", "ccf_ead"),
-        inputs=[PortSpec("df")],
-        outputs=[PortSpec("table"), PortSpec("metric", type="scalar_metric")],
-        aggregate_outputs=("table",),
-        fn=long_run_average,
-        metadata_transform=lambda _im, outputs, _p: {k: {c: ColumnMeta(dtype=str(v.schema[c])) for c in v.columns} for k, v in outputs.items()},
-        form=(
-            FieldSpec("target_col", "Realised value column (LGD, CCF or default flag)", "column", auto_role="target"),
-            FieldSpec("date_col", "Default date column", "column"),
-            FieldSpec("weight_col", "Exposure weight column (optional, e.g. EAD)", "column"),
-            FieldSpec("period", "Period", "select", options=("year", "quarter", "month")),
-        ),
-        hints=_long_run_average_hints,
-    )
-)

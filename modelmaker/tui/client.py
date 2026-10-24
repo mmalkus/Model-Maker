@@ -147,30 +147,14 @@ class ModelMakerClient:
     async def create_block(
         self,
         category: str,
-        block_type: str | None = None,
         name: str | None = None,
         lane: str | None = None,
         x: float = 0,
         y: float = 0,
         params: dict[str, Any] | None = None,
-        code: str | None = None,
-        inputs: list[dict] | None = None,
-        outputs: list[dict] | None = None,
-        metadata_transform: dict[str, Any] | None = None,
+        library: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        body = {
-            "category": category,
-            "block_type": block_type,
-            "name": name,
-            "lane": lane,
-            "x": x,
-            "y": y,
-            "params": params or {},
-            "code": code,
-            "inputs": inputs,
-            "outputs": outputs,
-            "metadata_transform": metadata_transform,
-        }
+        body = {"category": category, "name": name, "lane": lane, "x": x, "y": y, "params": params or {}, "library": library}
         return await self._post("/api/blocks", json=body)
 
     async def update_block(self, block_id: str, **fields: Any) -> dict[str, Any]:

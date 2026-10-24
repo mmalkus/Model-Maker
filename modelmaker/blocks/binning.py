@@ -19,14 +19,67 @@ inspect.getsource(fn) (see compiler.py).
 
 from __future__ import annotations
 
-from typing import Any
-
 import polars as pl
 
-from ..agent import hints as h
-from ..metadata_transforms import infer_dtypes
-from ..packet import ColumnMeta, ColumnRole
-from .base import BlockSpec, FieldSpec, PortSpec, register_block
+BLOCKS = {
+    "fit_binning": {
+        "display_name": "Univariate analysis & binning",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["binning_woe", "feature_selection", "scorecard"],
+        "inputs": [{"name": "df"}],
+        "outputs": [
+            {"name": "binning", "type": "binning"},
+            {"name": "bins", "required": False, "aggregate": True},
+            {"name": "summary", "required": False, "aggregate": True},
+        ],
+        "meta": {"inherit": "none"},
+        "hints": "fit_binning",
+    },
+    "apply_binning": {
+        "display_name": "Apply binning (WoE)",
+        "version": 1,
+        "block_type": "standard",
+        "group": "modelling",
+        "tags": ["binning_woe", "scorecard"],
+        "inputs": [{"name": "df"}, {"name": "binning", "type": "binning"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {
+                "key": "output",
+                "label": "Output",
+                "kind": "select",
+                "options": ["woe", "target_mean", "bin", "both"],
+            },
+            {
+                "key": "features",
+                "label": "Features (optional -- defaults to every binned feature)",
+                "kind": "columns",
+            },
+        ],
+        "meta": {
+            "inherit": {"port": "df"},
+            "new_role": "feature",
+            "roles": [{"column_suffix": "_bin", "role": "segment"}],
+        },
+    },
+    "scorecard_table": {
+        "display_name": "Scorecard points table",
+        "version": 1,
+        "block_type": "output",
+        "group": "modelling",
+        "tags": ["scorecard"],
+        "inputs": [{"name": "model", "type": "model"}, {"name": "binning", "type": "binning"}],
+        "outputs": [{"name": "table", "aggregate": True}],
+        "form": [
+            {"key": "base_score", "label": "Base score", "kind": "number"},
+            {"key": "base_odds", "label": "Base odds (good:bad)", "kind": "number"},
+            {"key": "pdo", "label": "Points to double the odds", "kind": "number"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+}
 
 
 def fit_binning(
@@ -344,35 +397,6 @@ def fit_binning(
     return artifact, bins_df, summary_df
 
 
-def _fit_binning_meta(input_metas, outputs, params):
-    return infer_dtypes(input_metas, {k: v for k, v in outputs.items() if isinstance(v, pl.DataFrame)}, params)
-
-
-def _fit_binning_hints(outputs: dict[str, Any]) -> list[str]:
-    return h.iv_rows(h.rows(outputs.get("summary")), keep_monotonic=True)
-
-
-register_block(
-    BlockSpec(
-        category="fit_binning",
-        block_type="standard",
-        group="modelling",
-        display_name="Univariate analysis & binning",
-        tags=("binning_woe", "feature_selection", "scorecard"),
-        inputs=[PortSpec("df")],
-        outputs=[
-            PortSpec("binning", type="binning"),
-            PortSpec("bins", required=False),
-            PortSpec("summary", required=False),
-        ],
-        aggregate_outputs=("bins", "summary"),
-        fn=fit_binning,
-        metadata_transform=_fit_binning_meta,
-        hints=_fit_binning_hints,
-    )
-)
-
-
 def apply_binning(df: pl.DataFrame, binning: dict, output: str = "woe", features: list[str] | None = None) -> pl.DataFrame:
     """Applies a binning fitted by fit_binning to any sample (train, test,
     out-of-time, or new applications) without refitting -- every sample
@@ -433,38 +457,6 @@ def apply_binning(df: pl.DataFrame, binning: dict, output: str = "woe", features
     return df.with_columns(new_cols)
 
 
-def _apply_binning_meta(input_metas, outputs, params):
-    in_meta = input_metas.get("df", {})
-    (out_df,) = outputs.values()
-    result = {}
-    for name in out_df.columns:
-        if name in in_meta:
-            result[name] = in_meta[name]
-        else:
-            role = ColumnRole.SEGMENT if name.endswith("_bin") else ColumnRole.FEATURE
-            result[name] = ColumnMeta(dtype=str(out_df.schema[name]), role=role)
-    return {"out": result}
-
-
-register_block(
-    BlockSpec(
-        category="apply_binning",
-        block_type="standard",
-        group="modelling",
-        display_name="Apply binning (WoE)",
-        tags=("binning_woe", "scorecard"),
-        inputs=[PortSpec("df"), PortSpec("binning", type="binning")],
-        outputs=[PortSpec("out")],
-        fn=apply_binning,
-        metadata_transform=_apply_binning_meta,
-        form=(
-            FieldSpec("output", "Output", "select", options=("woe", "target_mean", "bin", "both")),
-            FieldSpec("features", "Features (optional -- defaults to every binned feature)", "columns"),
-        ),
-    )
-)
-
-
 def scorecard_table(model: dict, binning: dict, base_score: float = 600.0, base_odds: float = 50.0, pdo: float = 20.0) -> pl.DataFrame:
     """The points-based scorecard itself: points per feature per bin, from
     a logistic_regression fitted on apply_binning's `<feature>_woe` columns
@@ -497,24 +489,3 @@ def scorecard_table(model: dict, binning: dict, base_score: float = 600.0, base_
             points = -(coef * woe + model["intercept"] / n) * factor + offset / n
             rows.append({"feature": feat, "bin": b["bin"], "label": b["label"], "woe": woe, "coefficient": coef, "points": round(points, 2)})
     return pl.DataFrame(rows)
-
-
-register_block(
-    BlockSpec(
-        category="scorecard_table",
-        block_type="output",
-        group="modelling",
-        display_name="Scorecard points table",
-        tags=("scorecard",),
-        inputs=[PortSpec("model", type="model"), PortSpec("binning", type="binning")],
-        outputs=[PortSpec("table")],
-        aggregate_outputs=("table",),
-        fn=scorecard_table,
-        metadata_transform=infer_dtypes,
-        form=(
-            FieldSpec("base_score", "Base score", "number"),
-            FieldSpec("base_odds", "Base odds (good:bad)", "number"),
-            FieldSpec("pdo", "Points to double the odds", "number"),
-        ),
-    )
-)

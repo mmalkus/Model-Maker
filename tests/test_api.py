@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 import modelmaker.api as api_module
 from modelmaker.session import ProjectSession
 
+from .helpers import write_library_file
+
 
 @pytest.fixture
 def client(tmp_path):
@@ -369,46 +371,35 @@ def test_image_endpoint_rejects_a_dataframe_block(client, tmp_path):
     assert resp.status_code == 400
 
 
-def test_custom_block_can_be_an_input_block(client):
-    # An AI-authored block isn't forced into "standard" (mid-pipeline
-    # transform) role -- block_type is orthogonal to is_custom, so a custom
-    # block can be a real input block: no upstream required, and eligible
-    # for refresh/check_for_changes like read_csv.
-    block = client.post(
-        "/api/blocks",
-        json={
-            "category": "synthetic_source",
-            "block_type": "input",
-            "inputs": [],
-            "outputs": [{"name": "out", "type": "dataframe"}],
-            "code": "def synthetic_source():\n    import polars as pl\n    return pl.DataFrame({'x': [1, 2, 3]})\n",
-            "metadata_transform": {"kind": "infer_dtypes"},
-        },
-    ).json()
+def test_library_block_can_be_an_input_block(client):
+    # A library block isn't forced into "standard" (mid-pipeline transform)
+    # role -- it can be a real input block: no upstream required, and
+    # eligible for refresh/check_for_changes like read_csv.
+    write_library_file(
+        "sources.py",
+        {"synthetic_source": {"block_type": "input", "outputs": [{"name": "out"}], "meta": {"inherit": "none"}}},
+        "def synthetic_source():\n    return pl.DataFrame({'x': [1, 2, 3]})\n",
+    )
+    block = client.post("/api/blocks", json={"library": {"file": "sources.py", "id": "synthetic_source"}}).json()
     assert block["block_type"] == "input"
-    assert block["is_custom"] is True
+    assert block["definition_info"]["source"] == "library"
+    assert block["definition_info"]["file"] == "sources.py"
 
     resp = client.post(f"/api/blocks/{block['id']}/refresh")
     assert resp.status_code == 200
     assert resp.json()["status"] == "green"
 
 
-def test_custom_block_can_be_an_output_block(client, tmp_path):
+def test_library_block_can_be_an_output_block(client, tmp_path):
     read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(tmp_path / "x.csv")}}).json()
     (tmp_path / "x.csv").write_text("a\n1\n2\n")
-    custom = client.post(
-        "/api/blocks",
-        json={
-            "category": "row_count_report",
-            "block_type": "output",
-            "inputs": [{"name": "df", "type": "dataframe"}],
-            "outputs": [],
-            "code": "def row_count_report(df, output_dir='.'):\n    pass\n",
-            "metadata_transform": {"kind": "passthrough"},
-        },
-    ).json()
+    write_library_file(
+        "reports.py",
+        {"row_count_report": {"block_type": "output", "inputs": [{"name": "df"}]}},
+        "def row_count_report(df, output_dir='.'):\n    pass\n",
+    )
+    custom = client.post("/api/blocks", json={"library": {"file": "reports.py", "id": "row_count_report"}}).json()
     assert custom["block_type"] == "output"
-    assert custom["is_custom"] is True
     client.post(
         "/api/wires",
         json={"from_block": read["id"], "from_port": "out", "to_block": custom["id"], "to_port": "df"},
@@ -417,6 +408,17 @@ def test_custom_block_can_be_an_output_block(client, tmp_path):
     resp = client.post(f"/api/blocks/{custom['id']}/run")
     assert resp.status_code == 200
     assert resp.json()["status"] == "green"
+
+
+def test_a_broken_library_block_cant_be_placed(client):
+    write_library_file(
+        "broken.py",
+        {"broken": {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}], "form": [{"key": "nope", "kind": "text"}]}},
+        "def broken(df):\n    return df\n",
+    )
+    resp = client.post("/api/blocks", json={"library": {"file": "broken.py", "id": "broken"}})
+    assert resp.status_code == 400
+    assert "nope" in resp.json()["detail"]
 
 
 def _wired_classification_csv(client, tmp_path, target_id, target_port="df"):
@@ -884,17 +886,12 @@ def test_running_seconds_is_null_normally_and_a_number_while_running(client, tmp
     read = client.post("/api/blocks", json={"category": "read_csv", "params": {"path": str(csv_path)}}).json()
     assert read["running_seconds"] is None
 
-    slow = client.post(
-        "/api/blocks",
-        json={
-            "category": "ai_slow",
-            "block_type": "standard",
-            "code": "def slow(df):\n    import time\n    time.sleep(2)\n    return df\n",
-            "inputs": [{"name": "df", "type": "dataframe"}],
-            "outputs": [{"name": "out", "type": "dataframe"}],
-            "metadata_transform": {"kind": "passthrough"},
-        },
-    ).json()
+    write_library_file(
+        "slow.py",
+        {"slow": {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}]}},
+        "def slow(df):\n    import time\n    time.sleep(2)\n    return df\n",
+    )
+    slow = client.post("/api/blocks", json={"library": {"file": "slow.py", "id": "slow"}}).json()
     client.post(
         "/api/wires",
         json={"from_block": read["id"], "from_port": "out", "to_block": slow["id"], "to_port": "df"},

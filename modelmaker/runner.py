@@ -13,10 +13,11 @@ from typing import Any, Literal
 
 import polars as pl
 
-from .blocks.base import BLOCK_REGISTRY, BlockSpec
+from .blocks.base import BlockDefinition
 from .cache import CacheStore
 from .graph import BlockInstance, Graph
-from .metadata_transforms import resolve_metadata_transform
+from .metadata_transforms import schema_diff
+from .sources import SOURCE_PARAMS, fingerprint
 from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
 from .worker_pool import WorkerPool, pool_size_from_env
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
@@ -80,10 +81,15 @@ class RunPlan:
         if block_id in _stack:
             raise RuntimeError(f"cycle detected in graph at block '{block_id}'")
         block = self.graph.blocks[block_id]
+        definition = _try_resolve(block)
+        # The definition's sha: an edited library block, or a built-in an
+        # upgrade changed, never serves a stale cached result.
+        code = definition.sha if definition is not None else None
         if block.block_type == "input":
             basis: dict[str, Any] = {
                 "category": block.category,
                 "code_version": block.code_version,
+                "code": code,
                 "params": block.params,
                 "column_role_overrides": block.column_role_overrides,
                 "read_counter": self.read_counters.get(block_id, 0),
@@ -105,23 +111,20 @@ class RunPlan:
             "code_version": block.code_version,
             "params": block.params,
             "column_role_overrides": block.column_role_overrides,
-            "code": block.code if block.is_custom else None,
+            "code": code,
             "upstream": upstream,
             "group_by": block.group_by,
             "max_workers": block.max_workers,
         }
-        # A registry block whose fn accepts `block_id` (see run_block's
-        # block_id injection) has output that genuinely depends on its own
-        # identity -- a stochastic block deriving its RNG from it (see
+        # A block whose fn accepts `block_id` (see run_block's block_id
+        # injection) has output that genuinely depends on its own identity
+        # -- a stochastic block deriving its RNG from it (see
         # stochastic.seed.spawn_rng), e.g. -- not just on category/params/
         # upstream. Without this, two such blocks with otherwise-identical
         # params (and no upstream) would hash to the same cache key and
         # silently share one cache slot, each overwriting the other's
-        # result. Scoped to registry blocks only (a plain dict/attribute
-        # lookup, no compilation) so this never has to compile a custom
-        # block's code just to answer a routine status poll.
-        spec = BLOCK_REGISTRY.get(block.category)
-        if spec is not None and accepts_param(spec.fn, "block_id"):
+        # result.
+        if definition is not None and _accepts(definition, "block_id"):
             basis["block_id"] = block_id
         return basis
 
@@ -151,48 +154,88 @@ def _short(value: Any, limit: int = 24) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-def _is_fusable_block(block: BlockInstance) -> BlockSpec | None:
-    """The registry spec for `block` if it's eligible to join a streaming
-    run's fusion (see Runner._build_fusion_groups), else None. Fusable
-    means: a registry block (never custom/AI-authored code -- the LLM
-    contract in llm/prompts.py keeps assuming plain eager pl.DataFrame)
-    with a lazy_fn (see BlockSpec.lazy_fn), no group_by (grouping needs
-    materialized data to partition_by), and no role/output_dir/block_id
-    auto-fill -- fusable blocks (filter/select/groupby_agg/join/read_csv
-    today) only ever take plain params, and this also guards against a
-    future lazy_fn'd block that actually needs one of these, which
-    _run_fused_group doesn't resolve.
+def _try_resolve(block: BlockInstance) -> BlockDefinition | None:
+    try:
+        return block.resolve()
+    except KeyError:
+        return None
+
+
+def _accepts(definition: BlockDefinition, name: str) -> bool:
+    try:
+        return accepts_param(definition.fn, name)
+    except Exception:  # noqa: BLE001 -- a library block whose code doesn't define: it fails when run
+        return False
+
+
+def _task_code(definition: BlockDefinition) -> str | None:
+    """What a worker needs to rebuild the function: nothing for a built-in
+    (it imports the package), the code for a library block."""
+    return definition.code if definition.source == "library" else None
+
+
+def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
+    """The definition for `block` if it may join a streaming run's fusion
+    (see Runner._build_fusion_groups), else None. Decided from the block's
+    declared port flags alone: an input block whose single output is
+    `lazy` (it returns a LazyFrame), or a block with exactly one dataframe
+    output whose every dataframe input is `lazy` (its function also works
+    on a LazyFrame). Never a grouped block (grouping needs materialized
+    data to partition), and never one that needs role/output_dir/block_id
+    auto-fill, which _run_fused_group doesn't resolve.
 
     A module-level function (not a Runner method) because it needs no
-    instance state -- Runner._fusable_spec just delegates to it, and
-    compiler.py's streaming-mode compile (see
-    compiler._build_compile_fusion_groups) imports it directly, so the
-    live engine and a compiled script agree on exactly what fuses."""
-    if block.is_custom or block.group_by:
+    instance state -- compiler.py's streaming-mode compile imports it
+    directly, so the live engine and a compiled script agree on exactly
+    what fuses."""
+    if block.group_by:
         return None
-    spec = BLOCK_REGISTRY.get(block.category)
-    if spec is None or spec.lazy_fn is None:
+    definition = _try_resolve(block)
+    if definition is None or len(definition.outputs) != 1 or definition.outputs[0].type != "dataframe":
         return None
-    fn = spec.fn
-    if accepts_param(fn, "output_dir") or accepts_param(fn, "block_id"):
+    df_inputs = [p for p in definition.inputs if p.type == "dataframe"]
+    if definition.block_type == "input":
+        if not definition.outputs[0].lazy:
+            return None
+    elif not df_inputs or not all(p.lazy for p in df_inputs) or len(df_inputs) != len(definition.inputs):
         return None
-    if any(find_role_param(fn, role) for role in ROLE_PARAM_NAMES):
+    if _accepts(definition, "output_dir") or _accepts(definition, "block_id"):
         return None
-    return spec
+    if any(find_role_param(definition.fn, role) for role in ROLE_PARAM_NAMES):
+        return None
+    return definition
+
+
+def _sink_block(block: BlockInstance) -> BlockDefinition | None:
+    """The definition for `block` if a streaming run may fold it onto a
+    fusion group's tail as a terminal write: an output block with no
+    outputs and exactly one input, a `lazy` dataframe one -- its function
+    writes a LazyFrame straight to disk (e.g. write_csv's sink_csv)."""
+    if block.group_by:
+        return None
+    definition = _try_resolve(block)
+    if definition is None or definition.block_type != "output" or definition.outputs:
+        return None
+    if len(definition.inputs) != 1 or definition.inputs[0].type != "dataframe" or not definition.inputs[0].lazy:
+        return None
+    return definition
+
+
+def metadata_transform(definition: BlockDefinition):
+    """The block's declared metadata rules as a transform (see
+    metadata_transforms.schema_diff)."""
+    return schema_diff(definition.metadata, definition.param_defaults())
 
 
 class _SchemaView:
     """Duck-types just enough of pl.DataFrame (`.columns`, `.schema[name]`)
-    for a metadata_transform to run against a plain `{name: dtype_str}`
+    for a metadata transform to run against a plain `{name: dtype_str}`
     schema snapshot (see run_worker.run_fused_group_entry's
     `LazyFrame.collect_schema()`) instead of a real, materialized
     DataFrame -- used only by Runner._run_fused_group, so a streaming
-    run's fused, uncached interior blocks still get full metadata_transform
+    run's fused, uncached interior blocks still get full metadata
     treatment (role propagation, dtype inference) without ever touching
-    their actual data. Every registry metadata_transform only ever reads
-    these two attributes (confirmed against metadata_transforms.py and
-    library.py's _groupby_meta/_join_meta), so no transform code needs to
-    know this isn't a real DataFrame."""
+    their actual data. schema_diff only reads these two attributes."""
 
     def __init__(self, schema: dict[str, str]):
         self.columns = list(schema.keys())
@@ -217,7 +260,7 @@ class FusionGroup:
     "fused").
 
     `sinks` maps a terminal-write block id (e.g. write_csv, folded onto
-    the group's tail -- see BlockSpec.lazy_sink_fn) to the group member
+    the group's tail -- see _sink_block) to the group member
     whose output it writes straight to disk via the streaming engine,
     without that member ever needing a collected DataFrame. A sink
     produces no DataFrame and is never in `exits`."""
@@ -541,13 +584,9 @@ class Runner:
             return value.data, value.schema_meta
         return value, {}
 
-    def _fusable_spec(self, block: BlockInstance) -> BlockSpec | None:
-        """The registry spec for `block` if it's eligible to join a
-        streaming run's fusion (see _build_fusion_groups), else None --
-        see module-level _is_fusable_block, which this just delegates to
-        (it needs no Runner state; compiler.py's streaming-mode compile
-        reuses the exact same rule via that free function)."""
-        return _is_fusable_block(block)
+    def _fusable_spec(self, block: BlockInstance) -> BlockDefinition | None:
+        """See module-level _fusable_block, which this delegates to."""
+        return _fusable_block(block)
 
     def run_block(self, block_id: str, plan: RunPlan | None = None) -> Status:
         """Requires all of this block's inputs to currently be green.
@@ -580,8 +619,9 @@ class Runner:
             plain_inputs = {
                 port: (p.data if isinstance(p, DataFramePacket) else p) for port, p in input_packets.items()
             }
-            fn = block.resolved_fn()
-            call_kwargs = dict(plain_inputs, **block.params)
+            definition = block.resolve()
+            fn = definition.fn
+            call_kwargs = dict(plain_inputs, **{k: v for k, v in block.params.items() if k not in SOURCE_PARAMS})
             # Dynamic defaults: for every role a block's signature opts into
             # (target via target/target_col, predicted via
             # score_col/predicted_col, ...), resolve it fresh on every run
@@ -609,19 +649,18 @@ class Runner:
             # here changes nothing for them.
             if accepts_param(fn, "block_id"):
                 call_kwargs["block_id"] = block_id
-            # Same injection pattern as output_dir/block_id above: an input
-            # block that names a `sample_rows` parameter (e.g. read_csv, via
-            # a lazy scan) gets sample mode's row cap pushed to its source
-            # instead of reading everything and truncating after the fact
-            # (the fallback below, for input blocks that don't opt in).
-            if block.block_type == "input" and plan.sample_rows is not None and accepts_param(fn, "sample_rows"):
-                call_kwargs["sample_rows"] = plan.sample_rows
+            # Sample mode truncates at the source, so every downstream
+            # block sees the sample without needing to know it exists. The
+            # worker applies it (see run_worker_entry): a LazyFrame output
+            # gets .head(n) before it's collected, which polars pushes down
+            # into the scan.
+            sample_rows = plan.sample_rows if block.block_type == "input" else None
 
             group_col = block.group_by
             if group_col:
                 raw = self._run_grouped(block_id, block, group_col, call_kwargs)
             else:
-                results = self._dispatch(block_id, block, {None: call_kwargs}, max_workers=1)
+                results = self._dispatch(block_id, block, {None: call_kwargs}, max_workers=1, sample_rows=sample_rows)
                 raw = results[None]
 
             out_names = [p.name for p in block.outputs]
@@ -632,23 +671,10 @@ class Runner:
             else:
                 raw_outputs = dict(zip(out_names, raw))
 
-            if block.block_type == "input" and plan.sample_rows is not None:
-                # Sample mode truncates at the source, so every downstream
-                # block sees the sample without needing to know it exists.
-                # A no-op for a block that already honored `sample_rows`
-                # above (its output is at most this many rows already) --
-                # this stays the backstop for any input block that doesn't
-                # accept the param, custom AI-authored ones included.
-                raw_outputs = {
-                    k: (v.head(plan.sample_rows) if isinstance(v, pl.DataFrame) else v)
-                    for k, v in raw_outputs.items()
-                }
-
             data_outputs = {k: v for k, v in raw_outputs.items() if isinstance(v, pl.DataFrame)}
-            transform = block.resolved_metadata_transform()
             metas: dict[str, dict] = {}
-            if transform is not None and data_outputs:
-                metas = resolve_metadata_transform(transform)(
+            if data_outputs:
+                metas = metadata_transform(definition)(
                     {port: p.schema_meta for port, p in input_packets.items() if isinstance(p, DataFramePacket)},
                     data_outputs,
                     block.params,
@@ -711,7 +737,12 @@ class Runner:
         return self.status(block_id)
 
     def _dispatch(
-        self, block_id: str, block: BlockInstance, tasks: dict[Any, dict[str, Any]], max_workers: int
+        self,
+        block_id: str,
+        block: BlockInstance,
+        tasks: dict[Any, dict[str, Any]],
+        max_workers: int,
+        sample_rows: int | None = None,
     ) -> dict[Any, Any]:
         """Run each of `tasks` (an arbitrary key -> call kwargs) in its own
         subprocess, up to `max_workers` at a time, and return {key: result}.
@@ -730,12 +761,10 @@ class Runner:
         including a group_by fan-out with far more groups or memory use
         than expected -- happens in a child process, so it can only take
         itself down, never this one."""
+        code = _task_code(block.resolve())
         results, errors = self._run_tasks(
             [block_id],
-            {
-                key: ("run_worker_entry", (block.category, block.is_custom, block.code, kwargs))
-                for key, kwargs in tasks.items()
-            },
+            {key: ("run_worker_entry", (block.category, code, kwargs, sample_rows)) for key, kwargs in tasks.items()},
             max_workers,
         )
         if errors:
@@ -980,7 +1009,8 @@ class Runner:
         steps: list[dict[str, Any]] = []
         for rid in region:
             rblock = plan.graph.blocks[rid]
-            fn = rblock.resolved_fn()
+            rdef = rblock.resolve()
+            fn = rdef.fn
             kwargs: dict[str, Any] = dict(rblock.params)
             chain_inputs: dict[str, tuple[str, int]] = {}
             input_schema_metas: list[dict] = []
@@ -1014,8 +1044,7 @@ class Runner:
                 {
                     "id": rid,
                     "category": rblock.category,
-                    "is_custom": rblock.is_custom,
-                    "code": rblock.code,
+                    "code": _task_code(rdef),
                     "kwargs": kwargs,
                     "chain_inputs": chain_inputs,
                     "n_outputs": len(rblock.outputs),
@@ -1077,8 +1106,8 @@ class Runner:
         fan-out/fan-in no longer force a checkpoint, see FusionGroup --
         gets a real cache entry/RunState update; every other member is
         marked "fused" and left otherwise untouched. A sink member (e.g.
-        write_csv folded onto the group's tail -- see
-        BlockSpec.lazy_sink_fn) gets a RunState update too, but no cache
+        write_csv folded onto the group's tail -- see _sink_block) gets a
+        RunState update too, but no cache
         entry, since it produces no DataFrame -- exactly like write_csv's
         ordinary (non-streaming) run."""
         member_set = set(group.members)
@@ -1089,17 +1118,17 @@ class Runner:
         for bid in group.members:
             block = plan.graph.blocks[bid]
             is_sink = bid in group.sinks
+            definition = block.resolve()
             if not is_sink:
                 assert self._fusable_spec(block) is not None, f"non-fusable block {bid!r} in a fusion group"
-            kwargs: dict[str, Any] = dict(block.params)
+            kwargs: dict[str, Any] = {k: v for k, v in block.params.items() if k not in SOURCE_PARAMS}
             if is_sink:
                 # Same output_dir/block_id auto-fill run_block does for an
                 # ordinary output block (see accepts_param) -- a sink step
                 # never goes through run_block, so it has to happen here.
-                sink_spec = BLOCK_REGISTRY[block.category]
-                if block.block_type == "output" and accepts_param(sink_spec.lazy_sink_fn, "output_dir"):
+                if accepts_param(definition.fn, "output_dir"):
                     kwargs["output_dir"] = self.output_dir
-                if block.block_type == "output" and accepts_param(sink_spec.lazy_sink_fn, "block_id"):
+                if accepts_param(definition.fn, "block_id"):
                     kwargs["block_id"] = bid
             chain_inputs: dict[str, str] = {}
             input_metas: dict[str, dict[str, ColumnMeta]] = {}
@@ -1114,6 +1143,7 @@ class Runner:
                 {
                     "id": bid,
                     "category": block.category,
+                    "code": _task_code(definition),
                     "kwargs": kwargs,
                     "chain_inputs": chain_inputs,
                     "is_exit": bid in group.exits,
@@ -1158,9 +1188,10 @@ class Runner:
             input_metas = dict(input_metas_per_step[bid])
             for port, src_id in chain_inputs_per_step[bid].items():
                 input_metas[port] = out_meta_by_id[src_id]
-            spec = BLOCK_REGISTRY[block.category]
-            metas = spec.metadata_transform(input_metas, {"out": _SchemaView(schemas[bid])}, block.params)
-            out_meta = dict(metas.get("out", {}))
+            definition = block.resolve()
+            port = definition.outputs[0].name
+            metas = metadata_transform(definition)(input_metas, {port: _SchemaView(schemas[bid])}, block.params)
+            out_meta = dict(metas.get(port, {}))
             if block.column_role_overrides:
                 for name, role_value in block.column_role_overrides.items():
                     if name in out_meta:
@@ -1190,7 +1221,7 @@ class Runner:
         for eid in group.exits:
             key = plan.key(eid)
             packet = DataFramePacket(data=results[eid], schema_meta=out_meta_by_id[eid]).with_lineage(eid)
-            self.cache.set(key, {"out": packet})
+            self.cache.set(key, {plan.graph.blocks[eid].resolve().outputs[0].name: packet})
             st = self._st(eid)
             st.last_attempt_key = key
             st.last_attempt_at = now
@@ -1287,7 +1318,7 @@ class Runner:
 
     def _streaming_blocked(self, block_id: str, plan: RunPlan) -> bool:
         """Like _blocked_on_unread_input, but a fusable input ancestor (its
-        source can be re-scanned live -- see _fusable_spec/BlockSpec.lazy_fn)
+        source can be re-scanned live -- see _fusable_block)
         never blocks, even if it's never been explicitly refreshed: forcing
         an eager refresh() first would defeat the point of streaming for
         exactly the large-source case it exists for. A non-fusable input
@@ -1344,13 +1375,13 @@ class Runner:
         Every other member is purely interior, reported as "fused".
 
         A trailing sink-capable block (write_csv today -- see
-        BlockSpec.lazy_sink_fn) is folded onto a group as a terminal
+        _sink_block) is folded onto a group as a terminal
         write, replacing what would otherwise be its predecessor's
         collected exit, whenever that predecessor's *only* dataframe
         consumer anywhere in the graph is this one sink -- see the second
         pass below."""
         to_run_set = set(to_run)
-        fusable: dict[str, BlockSpec] = {}
+        fusable: dict[str, BlockDefinition] = {}
         for bid in to_run:
             spec = self._fusable_spec(plan.graph.blocks[bid])
             if spec is not None:
@@ -1431,11 +1462,7 @@ class Runner:
                 sink_idx = group_index.get(sink_id)
                 if sink_idx is None or groups[sink_idx] is group or len(groups[sink_idx].members) != 1:
                     continue
-                sink_block = plan.graph.blocks[sink_id]
-                if sink_block.is_custom or sink_block.group_by:
-                    continue
-                sink_spec = BLOCK_REGISTRY.get(sink_block.category)
-                if sink_spec is None or sink_spec.lazy_sink_fn is None:
+                if _sink_block(plan.graph.blocks[sink_id]) is None:
                     continue
                 if len(plan.graph.input_wires(sink_id)) != 1:
                     continue
@@ -1468,8 +1495,8 @@ class Runner:
         fully materializing at every step.
 
         Mutually exclusive with sample mode: sample mode already makes
-        interactive iteration on a huge source cheap (see read_csv's
-        sample_rows), and streaming is for the opposite case -- a full,
+        interactive iteration on a huge source cheap (the runner's .head(n)
+        on input blocks), and streaming is for the opposite case -- a full,
         production-scale run."""
         if self.sample_rows is not None:
             raise ValueError("streaming runs are for full data -- turn off sample mode first")
@@ -1503,14 +1530,17 @@ class Runner:
         return {bid: self.refresh(bid) for bid, b in self.graph.blocks.items() if b.block_type == "input"}
 
     def check_for_changes(self, block_id: str) -> bool:
-        """Cheap read-only probe (e.g. file mtime) — does not touch the
-        cached packet or cascade anything."""
+        """Cheap read-only probe (see sources.fingerprint: a file's mtime
+        and size, a probe query) -- does not touch the cached packet or
+        cascade anything."""
         block = self.graph.blocks[block_id]
-        spec = BLOCK_REGISTRY.get(block.category)
-        if not spec or not spec.probe:
+        definition = _try_resolve(block)
+        if definition is None:
             return False
         st = self._st(block_id)
-        current = spec.probe(block.params)
+        current = fingerprint(definition, block.params)
+        if current is None:
+            return False
         changed = st.last_probe_value is not None and current != st.last_probe_value
         st.last_probe_value = current
         return changed

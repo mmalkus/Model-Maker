@@ -10,9 +10,10 @@ suggestion, not a guard: the model may depart from one with a reason
 thumb; they are the modelling policy a hinted build follows, so they're
 kept together here, named, to be read and changed in one place.
 
-Each block's own hint function sits next to it in its block module
-(BlockSpec.hints) and reads its thresholds and helpers from here, as
-`h.MIN_EVENTS`, `h.names(...)` and so on.
+The rules themselves are in agent/hint_rules.py, keyed by name; a block
+picks one with `"hints": "<rule>"` in its BLOCKS entry. Rules read their
+thresholds and helpers from here, as `h.MIN_EVENTS`, `h.names(...)` and
+so on.
 
 Blocks with nothing to judge (reads, joins, transforms, plots, fitted
 artifacts used only by wiring) get no hints; neither does glm_fit, whose
@@ -22,7 +23,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..blocks.base import BLOCK_REGISTRY
 from ..packet import ColumnRole, DataFramePacket
 
 # ---- thresholds ----------------------------------------------------------------
@@ -140,11 +140,13 @@ def iv_rows(rows: list[dict[str, Any]], keep_monotonic: bool) -> list[str]:
     return hints
 
 
-def decision_hints(category: str, outputs: dict[str, Any]) -> list[str]:
-    """Hints for a block of `category` from its raw output values
-    ({port: value}); empty when the block declares none (BlockSpec.hints)."""
-    from .catalogue import ensure_blocks_registered
+def decision_hints(block: Any, outputs: dict[str, Any]) -> list[str]:
+    """Hints for a block from its raw output values ({port: value}): `block`
+    is a BlockDefinition or a built-in's id. Empty when the block names no
+    rule (see hint_rules.RULES)."""
+    from ..blocks.base import BLOCK_REGISTRY
+    from .hint_rules import RULES
 
-    ensure_blocks_registered()
-    spec = BLOCK_REGISTRY.get(category)
-    return spec.hints(outputs) if spec is not None and spec.hints is not None else []
+    definition = BLOCK_REGISTRY.get(block) if isinstance(block, str) else block
+    rule = RULES.get(definition.hints) if definition is not None and definition.hints else None
+    return rule(outputs) if rule is not None else []
