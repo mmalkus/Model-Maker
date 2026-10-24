@@ -304,7 +304,7 @@ def test_lmstudio_loop_caps_long_tool_results(planning_build, monkeypatch):
     from modelmaker.agent import catalogue
 
     b, _ = planning_build
-    monkeypatch.setattr(catalogue, "list_tags", lambda: [{"tag": f"t{i}", "blocks": 1, "about": "x" * 100} for i in range(100)])
+    monkeypatch.setattr(catalogue, "list_tags", lambda include_library=True: [{"tag": f"t{i}", "blocks": 1, "about": "x" * 100} for i in range(100)])
     fake = FakeEndpoint([_oa_message(None, [("c1", "list_block_types", "{}")]), _oa_message("done")], models=LOCAL_MODELS)
     try:
         loop = make_loop("lmstudio", None, api_base_url="", token="", base_url=fake.url)

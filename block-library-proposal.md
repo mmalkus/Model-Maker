@@ -28,8 +28,10 @@ Model-Maker customizable without touching the package source.
 >   setting, which is never passed to the function.
 > - **Decisions on the open questions:** the library lives in
 >   `~/.modelmaker/blocks/` (`MODELMAKER_BLOCK_LIBRARY` overrides it); AI
->   drafts stay until the user keeps or discards them; agent builds don't
->   *use* library blocks yet; there are no project-local block files.
+>   drafts stay until the user keeps or discards them; agent builds *use*
+>   library blocks (the user's own and earlier AI drafts; input blocks and
+>   invalid blocks excluded) unless the build turns that off; there are no
+>   project-local block files.
 > - **Not done yet (phase 8):** a TUI library view, several search paths.
 
 **Design rules**

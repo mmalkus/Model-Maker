@@ -515,7 +515,7 @@ export interface BuildOut {
   ended_at: string | null
   plan_llm: { provider: string | null; model: string | null }
   build_llm: { provider: string | null; model: string | null }
-  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_new_blocks: boolean; small_context?: boolean; decision_hints?: boolean }
+  options: { final_full_run: boolean; sample_rows: number | null; auto_build: boolean; allow_new_blocks: boolean; use_library_blocks?: boolean; small_context?: boolean; decision_hints?: boolean }
   // Where the build's full log is saved (see AgentBuild.save_log).
   log_path: string | null
   preflight: { blocking: PreflightIssue[]; warnings: PreflightIssue[]; max_rows?: number | null }

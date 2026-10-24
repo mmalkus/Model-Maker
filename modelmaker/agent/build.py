@@ -100,6 +100,9 @@ class BuildOptions:
     # registry blocks only, and those tools aren't offered at all
     # (tools.tools_for_phase).
     allow_new_blocks: bool = True
+    # Let the build use blocks from the user's block library (their own,
+    # or ones earlier AI builds created) alongside the built-ins.
+    use_library_blocks: bool = True
     # Small context: each stage starts a fresh conversation (the stage
     # prompt carries what it needs -- the outline, what's built, and the
     # decisions so far) instead of continuing one that grows stage by
@@ -504,6 +507,7 @@ class AgentBuild:
                 "sample_rows": self.options.sample_rows,
                 "auto_build": self.options.auto_build,
                 "allow_new_blocks": self.options.allow_new_blocks,
+                "use_library_blocks": self.options.use_library_blocks,
                 "small_context": self.options.small_context,
                 "decision_hints": self.options.decision_hints,
             },

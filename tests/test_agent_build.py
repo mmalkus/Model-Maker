@@ -1126,3 +1126,93 @@ def test_a_tag_used_as_a_block_gets_its_blocks_named(prepared):
     assert "that's a tag, not a block; its blocks are: train_test_split, time_split" in r["error"]
     assert "did you mean logistic_regression" in r["error"]
     assert "its blocks are" in b.call_tool("add_block", {"category": "sampling", "lane": "est"})["error"]
+
+
+# ---- the user's library blocks ------------------------------------------------------------
+
+_RATIO = (
+    'def loan_to_income(df, loan_col: str = "loan_amount", income_col: str = "annual_income"):\n'
+    '    """Adds loan_to_income: the loan amount over annual income."""\n'
+    '    return df.with_columns((pl.col(loan_col) / pl.col(income_col)).alias("loan_to_income"))\n'
+)
+
+
+def _user_library_block():
+    from .helpers import write_library_file
+
+    write_library_file(
+        "ratios.py",
+        {
+            "loan_to_income": {
+                "display_name": "Loan to income",
+                "tags": ["data_prep"],
+                "inputs": [{"name": "df"}],
+                "outputs": [{"name": "out"}],
+                "meta": {"new_role": "feature"},
+            },
+            # Input blocks stay the user's to place; broken blocks are never offered.
+            "my_source": {"block_type": "input", "outputs": [{"name": "out"}]},
+            "broken": {"inputs": [{"name": "df"}], "outputs": [{"name": "out"}], "form": [{"key": "nope", "kind": "text"}]},
+        },
+        _RATIO + "\n\ndef my_source():\n    return pl.DataFrame()\n\n\ndef broken(df):\n    return df\n",
+    )
+
+
+def test_a_build_can_find_and_use_the_users_library_blocks(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = building(session, anchor)
+    tags = {t["tag"]: t for t in b.call_tool("list_block_types", {})["tags"]}
+    assert tags["library"]["blocks"] == 1
+    listed = b.call_tool("list_block_types", {"tag": "library"})["blocks"]
+    assert listed == [{"category": "loan_to_income", "summary": "Adds loan_to_income: the loan amount over annual income.", "library": True}]
+    assert "loan_to_income" in {x["category"] for x in b.call_tool("list_block_types", {"tag": "data_prep"})["blocks"]}
+    doc = b.call_tool("describe_block_type", {"category": "loan_to_income"})
+    assert doc["library_file"] == "ratios.py" and [p["name"] for p in doc["params"]] == ["loan_col", "income_col"]
+    assert "unknown" in b.call_tool("add_block", {"category": "my_source", "lane": "est"})["error"]
+    assert "unknown" in b.call_tool("add_block", {"category": "broken", "lane": "est"})["error"]
+
+    added = b.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})
+    assert added["library_block"] == "ratios.py"
+    blk = session.graph.blocks[added["block"]]
+    assert blk.definition is not None and blk.library_ref["file"] == "ratios.py" and blk.name == "Loan to income"
+    b.call_tool("connect", {"from_block": anchor, "from_port": "out", "to_block": blk.id, "to_port": "df"})
+    ran = b.call_tool("run_to", {"block": blk.id})
+    assert ran["status"] == "green" and "loan_to_income" in ran["outputs"]["out"]["columns"]
+
+    from modelmaker.agent import prompts
+
+    assert "## The user's library blocks" in prompts.plan_system(b) and "- loan_to_income" in prompts.plan_system(b)
+
+
+def test_a_stage_plan_can_use_library_blocks(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = staged(session, anchor)
+    steps = [{"ref": "est1", "category": "loan_to_income", "name": "ratio", "why": "",
+              "inputs": [{"port": "df", "from": anchor, "from_port": "out"}]}]
+    r = b.call_tool("plan_stage", {"steps": steps})
+    assert r["ok"] and r["steps"][0]["status"] == "green", r
+
+
+def test_blocks_an_earlier_build_created_are_reused_not_recreated(prepared):
+    session, anchor = prepared
+    first = building(session, anchor)
+    first.call_tool("create_library_block", {"lane": "est", "name": "ratio", "code": _RATIO})
+    later = building(session, anchor)
+    later.id = "later"
+    again = later.call_tool("create_library_block", {"lane": "est", "name": "ratio", "code": _RATIO})
+    assert "add it with add_block" in again["error"]
+    assert later.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})["library_block"].startswith("drafts/")
+
+
+def test_library_blocks_can_be_turned_off_for_a_build(prepared):
+    session, anchor = prepared
+    _user_library_block()
+    b = building(session, anchor)
+    b.options.use_library_blocks = False
+    assert "library" not in {t["tag"] for t in b.call_tool("list_block_types", {})["tags"]}
+    assert "unknown" in b.call_tool("add_block", {"category": "loan_to_income", "lane": "est"})["error"]
+    from modelmaker.agent import prompts
+
+    assert "loan_to_income" not in prompts.plan_system(b)

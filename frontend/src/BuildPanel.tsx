@@ -173,6 +173,7 @@ function StartForm({
   const [fullRun, setFullRun] = useState(true)
   const [autoBuild, setAutoBuild] = useState(false)
   const [allowCustom, setAllowCustom] = useState(true)
+  const [useLibrary, setUseLibrary] = useState(true)
   const [sample, setSample] = useState<'auto' | 'off' | 'custom'>('auto')
   const [sampleRows, setSampleRows] = useState(50000)
   const anchors = selectedIds.filter((id) => graph.blocks[id])
@@ -221,6 +222,13 @@ function StartForm({
           <input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} />
           Allow new blocks (saved as library drafts)
         </label>
+        <label
+          style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
+          title="Let the AI use blocks from your block library -- ones you wrote, or ones earlier AI builds created -- alongside the built-ins."
+        >
+          <input type="checkbox" checked={useLibrary} onChange={(e) => setUseLibrary(e.target.checked)} />
+          Use my library blocks
+        </label>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           Build on a sample:
           <select value={sample} onChange={(e) => setSample(e.target.value as typeof sample)}>
@@ -248,6 +256,7 @@ function StartForm({
             sample_rows: sample === 'auto' ? null : sample === 'off' ? 0 : sampleRows,
             auto_build: autoBuild,
             allow_new_blocks: allowCustom,
+            use_library_blocks: useLibrary,
           })
         }
       >

@@ -268,9 +268,10 @@ Guardrails are enforced by the tools, not just the prompt:
   the plan listed and you approved.
 - **Excluded means excluded.** Columns tagged `excluded` are refused as
   features.
-- **New blocks go to your library.** When no built-in block does the
-  job, the build writes one to `drafts/` in your block library, where you
-  keep or discard it.
+- **Your library is part of the toolbox.** The build can use your library
+  blocks, including ones earlier builds created, alongside the built-ins.
+  When nothing fits, it writes a new block to `drafts/` in your block
+  library, where you keep or discard it.
 - **Limits.** Tool calls, new blocks, repeated failures and wall time
   are all capped.
 

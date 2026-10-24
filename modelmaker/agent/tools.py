@@ -291,7 +291,7 @@ def flag_suspicious(b: AgentBuild, category: str, params: dict[str, Any], where:
     'suspicious' (directly or as its _woe column), record a concern the
     user will see at the stage review and in the report -- whatever the
     model says about it -- and return a warning for the tool result."""
-    spec = BLOCK_REGISTRY.get(category)
+    spec = catalogue.lookup(category)
     if spec is None or "regression" not in spec.tags:
         return None
     suspicious = suspicious_features(b)
@@ -382,33 +382,33 @@ def _block_brief(b: AgentBuild, bid: str) -> dict[str, Any]:
 
 @tool(
     "list_block_types",
-    "List the registry blocks with a given tag (e.g. pd, regression, calibration): category and a "
-    "one-sentence summary. Without a tag, lists the tags. Call describe_block_type for a block's ports "
-    "and parameters before adding it.",
+    "List the blocks with a given tag (e.g. pd, regression, calibration; 'library' lists the user's own "
+    "library blocks): category and a one-sentence summary. Without a tag, lists the tags. Call "
+    "describe_block_type for a block's ports and parameters before adding it.",
     {"tag": _STR},
     [],
     READ,
 )
 def list_block_types(b: AgentBuild, tag: str | None = None) -> dict[str, Any]:
     if not tag:
-        return {"tags": catalogue.list_tags(), "next": "call list_block_types with one of these tags"}
+        return {"tags": catalogue.list_tags(_lib(b)), "next": "call list_block_types with one of these tags"}
     try:
-        return {"tag": tag, "blocks": catalogue.list_blocks_for_tag(tag)}
+        return {"tag": tag, "blocks": catalogue.list_blocks_for_tag(tag, _lib(b))}
     except KeyError as e:
         raise ToolError(str(e.args[0])) from None
 
 
 @tool(
     "describe_block_type",
-    "Full documentation for one registry block: docstring, parameters (types, defaults, which auto-fill "
-    "from a column role), and ports.",
+    "Full documentation for one block (built-in or from the user's library): docstring, parameters "
+    "(types, defaults, which auto-fill from a column role), and ports.",
     {"category": _STR},
     ["category"],
     READ,
 )
 def describe_block_type(b: AgentBuild, category: str) -> dict[str, Any]:
     try:
-        return catalogue.describe_block_type(category)
+        return catalogue.describe_block_type(category, _lib(b))
     except KeyError as e:
         raise ToolError(str(e)) from None
 
@@ -565,12 +565,18 @@ _STEP_SCHEMA = {
 }
 
 
+def _lib(b: AgentBuild | None) -> bool:
+    """Whether this build may use the user's library blocks (yes, for a
+    catalogue read outside a build)."""
+    return b is None or b.options.use_library_blocks
+
+
 def _step_ports(step: dict[str, Any]) -> tuple[dict[str, str] | None, dict[str, str] | None]:
     """(inputs, outputs) as {port: type} for a plan step, or None when not
     knowable (custom steps' inputs are whatever they declare)."""
     if step.get("category") == "custom":
         return None, {"out": "dataframe"}
-    spec = BLOCK_REGISTRY[step["category"]]
+    spec = catalogue.lookup(step["category"])
     return {p.name: p.type for p in spec.inputs}, {p.name: p.type for p in spec.outputs}
 
 
@@ -593,14 +599,15 @@ def validate_plan(b: AgentBuild, plan: dict[str, Any]) -> list[str]:
             errors.append(f"{where}: needs a goal")
         if not stage.get("blocks"):
             errors.append(f"{where}: list the registry blocks it will most likely use in `blocks`")
-        unknown = [c for c in stage.get("blocks") or [] if c not in BLOCK_REGISTRY or c in catalogue.AGENT_DISALLOWED]
+        known = catalogue.available(_lib(b))
+        unknown = [c for c in stage.get("blocks") or [] if c not in known or c in catalogue.AGENT_DISALLOWED]
         if unknown:
-            hints = "; ".join(f"{c!r}{catalogue.unknown_category_hint(c)}" for c in unknown)
-            errors.append(f"{where}: blocks {unknown} aren't registry blocks an AI build can add ({hints})")
+            hints = "; ".join(f"{c!r}{catalogue.unknown_category_hint(c, _lib(b))}" for c in unknown)
+            errors.append(f"{where}: blocks {unknown} aren't blocks an AI build can add ({hints})")
         lane = stage.get("lane")
         if lane is not None and lane not in graph.lanes:
             errors.append(f"{where}: lane {lane!r} isn't an existing lane id -- leave it out to create a new lane")
-    errors += leakage.outline_order_problems(stages, BLOCK_REGISTRY)
+    errors += leakage.outline_order_problems(stages, catalogue.available(_lib(b)))
     for change in plan.get("changes_to_existing") or []:
         if change.get("block") not in graph.blocks:
             errors.append(f"changes_to_existing: no such block {change.get('block')!r}")
@@ -630,8 +637,8 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
         elif ref in taken:
             errors.append(f"{where}: ref {ref!r} was used by an earlier stage -- pick a new one")
         cat = step.get("category")
-        if cat != "custom" and cat not in BLOCK_REGISTRY:
-            errors.append(f"{where}: unknown category {cat!r}{catalogue.unknown_category_hint(cat)}")
+        if cat != "custom" and catalogue.lookup(cat, _lib(b)) is None:
+            errors.append(f"{where}: unknown category {cat!r}{catalogue.unknown_category_hint(cat, _lib(b))}")
             refs[ref] = step
             continue
         if cat in catalogue.AGENT_DISALLOWED:
@@ -650,7 +657,7 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
             src = inp.get("from")
             if src in refs:
                 src_step = refs[src]
-                valid_src = src_step.get("category") == "custom" or src_step.get("category") in BLOCK_REGISTRY
+                valid_src = src_step.get("category") == "custom" or catalogue.lookup(src_step.get("category"), _lib(b)) is not None
                 src_out = _step_ports(src_step)[1] if valid_src else None
             elif src in graph.blocks:
                 src_out = {p.name: p.type for p in graph.blocks[src].outputs}
@@ -694,7 +701,7 @@ def _leak_graph(
         built = _step_blocks(b)
         for step in steps:
             cat = step.get("category")
-            if cat != "custom" and cat not in BLOCK_REGISTRY:
+            if cat != "custom" and catalogue.lookup(cat, _lib(b)) is None:
                 continue
             nid = built.get(step["ref"], step["ref"])
             planned[nid] = step["ref"]
@@ -966,8 +973,9 @@ def _finish_add(b: AgentBuild, block, plan_step: str | None) -> dict[str, Any]:
 
 @tool(
     "add_block",
-    "Add a registry block. It's placed automatically in the given lane. Params you leave out keep their "
-    "defaults; params that auto-fill from a column role (e.g. target_col) can usually be left out.",
+    "Add a block -- a built-in, or one from the user's block library. It's placed automatically in the given "
+    "lane. Params you leave out keep their defaults; params that auto-fill from a column role (e.g. "
+    "target_col) can usually be left out.",
     {
         "category": _STR,
         "lane": {"type": "string", "description": "An existing lane id or name, or a plan lane key."},
@@ -981,22 +989,36 @@ def _finish_add(b: AgentBuild, block, plan_step: str | None) -> dict[str, Any]:
 def add_block(
     b: AgentBuild, category: str, lane: str, name: str | None = None, params: dict | None = None, plan_step: str | None = None
 ) -> dict[str, Any]:
-    if category not in BLOCK_REGISTRY:
+    spec = catalogue.lookup(category, _lib(b))
+    if spec is None:
         custom = " (or create_library_block for a new block)" if b.options.allow_new_blocks else ""
-        raise ToolError(f"unknown category {category!r}{catalogue.unknown_category_hint(category)}{custom}")
+        raise ToolError(f"unknown category {category!r}{catalogue.unknown_category_hint(category, _lib(b))}{custom}")
     if category in catalogue.AGENT_DISALLOWED:
         raise ToolError(f"{category} can't be added by an AI build: {catalogue.AGENT_DISALLOWED[category]}")
     params = params or {}
-    known = {p["name"] for p in catalogue.block_params(BLOCK_REGISTRY[category])}
+    known = {p["name"] for p in catalogue.block_params(spec)}
     unknown = sorted(set(params) - known)
     if unknown:
         raise ToolError(f"{category} has no params {unknown}; its params are {sorted(known)}")
     check_excluded(b, params, category)
+    definition = ref = None
+    if spec.source == "library":
+        # A library block is placed like the user would: with its own copy
+        # of the definition, linked back to its library file.
+        try:
+            definition, ref = library_store.placeable(spec.origin, category)
+        except library_store.LibraryError as e:
+            raise ToolError(str(e)) from None
     lane_id = resolve_lane(b, lane)
     x, y = Placer(b.session.graph).place(lane_id)
     with b.session.edit():
-        block = b.session.add_block(category, name=name, lane=lane_id, x=x, y=y, params=params)
+        block = b.session.add_block(
+            category, name=name or (spec.display_name if definition else None), lane=lane_id, x=x, y=y,
+            params=params, definition=definition, library_ref=ref,
+        )
     out = _finish_add(b, block, plan_step)
+    if ref is not None:
+        out["library_block"] = ref["file"]
     warning = flag_suspicious(b, category, params, block.name)
     if warning:
         out["warning"] = warning
@@ -1031,7 +1053,10 @@ def _draft_definition(
         raise ToolError(f"function name {block_id!r} is a registry block's -- pick another")
     hit = library_store.find_by_id(block_id)
     if hit is not None and block_id != own_id:
-        raise ToolError(f"the library already has a block named {block_id!r} -- rename the function")
+        raise ToolError(
+            f"the library already has a block named {block_id!r} ({hit[0].name}) -- add it with add_block "
+            "if it does the job, or rename the function"
+        )
     entry = {
         "display_name": name,
         "version": version,

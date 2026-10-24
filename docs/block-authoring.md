@@ -238,6 +238,13 @@ exits 1 on any failure, so a team's library repo can run it in CI.
   `drafts/build_<id>.py` in your library. The library lists it under *AI
   drafts*, where you **Keep** (move into a file) or **Discard** it.
   Discarding never breaks a model, because placed blocks embed their code.
+- **AI builds use your library.** A build sees your library blocks next to
+  the built-ins: under their own tags, and all of them under the `library`
+  tag. That includes blocks earlier builds drafted. It places them like you
+  would, as embedded copies linked to their file, and reuses an existing
+  block rather than writing a duplicate. Input blocks, blocks with errors
+  and blocks with unmet requirements are never offered. The build panel's
+  *Use my library blocks* switch turns this off for one build.
 
 ## Create with AI
 

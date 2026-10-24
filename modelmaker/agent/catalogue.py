@@ -64,32 +64,80 @@ TAGS: dict[str, str] = {
 }
 
 
-def _tagged(tag: str) -> list[BlockDefinition]:
+# The pseudo-tag listing every block in the user's own block library --
+# blocks they wrote, or that earlier AI builds created (drafts included).
+# Library blocks also appear under whatever real tags they declare.
+LIBRARY_TAG = "library"
+LIBRARY_ABOUT = "the user's own block library: blocks they (or earlier AI builds) wrote -- check here before creating a new block"
+
+
+def library_blocks() -> dict[str, BlockDefinition]:
+    """Library blocks an AI build may add: valid, requirements installed,
+    not an input block (inputs are the user's to prepare). Keyed by id;
+    their `origin` is their library file."""
+    from .. import block_library, library_store
+
+    out: dict[str, BlockDefinition] = {}
+    for f in library_store.list_files():
+        if f.parsed.file_errors:
+            continue
+        for d in f.parsed.definitions:
+            if f.parsed.errors.get(d.id) or d.block_type == "input" or d.id in BLOCK_REGISTRY or d.id in out:
+                continue
+            if block_library.check_requirements(d):
+                continue
+            out[d.id] = d
+    return out
+
+
+def available(include_library: bool = True) -> dict[str, BlockDefinition]:
+    """Every block an AI build can know about: the built-ins, plus (unless
+    the build turned it off) the user's library blocks."""
+    ensure_blocks_registered()
+    return {**BLOCK_REGISTRY, **(library_blocks() if include_library else {})}
+
+
+def lookup(category: str, include_library: bool = True) -> BlockDefinition | None:
+    ensure_blocks_registered()
+    if category in BLOCK_REGISTRY:
+        return BLOCK_REGISTRY[category]
+    return library_blocks().get(category) if include_library else None
+
+
+def _tagged(tag: str, include_library: bool = True) -> list[BlockDefinition]:
+    if tag == LIBRARY_TAG:
+        return list(library_blocks().values()) if include_library else []
     return [
-        spec for spec in BLOCK_REGISTRY.values() if tag in spec.tags and spec.category not in AGENT_DISALLOWED
+        spec
+        for spec in available(include_library).values()
+        if tag in spec.tags and spec.category not in AGENT_DISALLOWED
     ]
 
 
-def list_tags() -> list[dict[str, Any]]:
+def list_tags(include_library: bool = True) -> list[dict[str, Any]]:
     ensure_blocks_registered()
-    return [{"tag": tag, "blocks": len(_tagged(tag)), "about": about} for tag, about in TAGS.items()]
+    tags = [{"tag": tag, "blocks": len(_tagged(tag, include_library)), "about": about} for tag, about in TAGS.items()]
+    n = len(_tagged(LIBRARY_TAG, include_library))
+    if n:
+        tags.append({"tag": LIBRARY_TAG, "blocks": n, "about": LIBRARY_ABOUT})
+    return tags
 
 
-def tag_block_names(tag: str) -> list[str]:
+def tag_block_names(tag: str, include_library: bool = True) -> list[str]:
     """A tag's addable block categories, by name only."""
     ensure_blocks_registered()
-    return [spec.category for spec in _tagged(tag)]
+    return [spec.category for spec in _tagged(tag, include_library)]
 
 
-def unknown_category_hint(category: str) -> str:
+def unknown_category_hint(category: str, include_library: bool = True) -> str:
     """Why a category isn't a block, and what to use instead: a tag name
     (a common mix-up) lists its blocks; anything else, the closest names."""
     import difflib
 
     ensure_blocks_registered()
-    if category in TAGS:
-        return f" -- that's a tag, not a block; its blocks are: {', '.join(tag_block_names(category))}"
-    names = [c for c in BLOCK_REGISTRY if c not in AGENT_DISALLOWED]
+    if category in TAGS or category == LIBRARY_TAG:
+        return f" -- that's a tag, not a block; its blocks are: {', '.join(tag_block_names(category, include_library))}"
+    names = [c for c in available(include_library) if c not in AGENT_DISALLOWED]
     close = difflib.get_close_matches(str(category), names, n=3, cutoff=0.5)
     return f" -- did you mean {', '.join(close)}?" if close else " -- list_block_types(tag=...) lists the blocks"
 
@@ -173,6 +221,9 @@ def catalogue_entry(spec: BlockDefinition, detail: bool = False) -> dict[str, An
             for p in spec.outputs
         ],
     }
+    if spec.source == "library":
+        entry["library_file"] = spec.origin
+        entry["version"] = spec.version
     if spec.category in AGENT_DISALLOWED:
         entry["agent_can_add"] = False
         entry["why_not"] = AGENT_DISALLOWED[spec.category]
@@ -182,10 +233,12 @@ def catalogue_entry(spec: BlockDefinition, detail: bool = False) -> dict[str, An
     return entry
 
 
-def list_block_types(group: str | None = None, include_disallowed: bool = False) -> list[dict[str, Any]]:
+def list_block_types(
+    group: str | None = None, include_disallowed: bool = False, include_library: bool = True
+) -> list[dict[str, Any]]:
     ensure_blocks_registered()
     out = []
-    for spec in BLOCK_REGISTRY.values():
+    for spec in available(include_library).values():
         if not include_disallowed and spec.category in AGENT_DISALLOWED:
             continue
         if group is not None and (spec.group or spec.block_type) != group:
@@ -194,21 +247,25 @@ def list_block_types(group: str | None = None, include_disallowed: bool = False)
     return out
 
 
-def list_blocks_for_tag(tag: str) -> list[dict[str, Any]]:
+def list_blocks_for_tag(tag: str, include_library: bool = True) -> list[dict[str, Any]]:
     """One tag's blocks, each with a one-sentence summary -- ports and
     params come from describe_block_type."""
-    if tag not in TAGS:
-        raise KeyError(f"unknown tag {tag!r}; tags are: {', '.join(TAGS)}")
+    if tag not in TAGS and not (tag == LIBRARY_TAG and include_library):
+        raise KeyError(f"unknown tag {tag!r}; tags are: {', '.join(t['tag'] for t in list_tags(include_library))}")
     ensure_blocks_registered()
     return [
-        {"category": spec.category, "summary": _first_sentence(spec.summary)}
-        for spec in _tagged(tag)
+        {
+            "category": spec.category,
+            "summary": _first_sentence(spec.summary or spec.display_name),
+            **({"library": True} if spec.source == "library" else {}),
+        }
+        for spec in _tagged(tag, include_library)
     ]
 
 
-def describe_block_type(category: str) -> dict[str, Any]:
+def describe_block_type(category: str, include_library: bool = True) -> dict[str, Any]:
     ensure_blocks_registered()
-    spec = BLOCK_REGISTRY.get(category)
+    spec = lookup(category, include_library)
     if spec is None:
         raise KeyError(f"unknown block category {category!r}")
     return catalogue_entry(spec, detail=True)

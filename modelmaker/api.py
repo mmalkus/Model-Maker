@@ -1532,8 +1532,10 @@ class AgentBuildStart(BaseModel):
     sample_rows: int | None = None
     # Build straight after planning, without waiting for approval.
     auto_build: bool = False
-    # Let the build write custom code blocks (else registry blocks only).
+    # Let the build create new blocks (saved to the library as AI drafts).
     allow_new_blocks: bool = True
+    # Let the build use the user's library blocks alongside the built-ins.
+    use_library_blocks: bool = True
     # A fresh conversation per stage; None = Settings' AI-builder choice.
     small_context: bool | None = None
     # Next-step hints in run results; None = Settings' AI-builder choice.
@@ -1578,6 +1580,7 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         sample_rows=req.sample_rows,
         auto_build=req.auto_build,
         allow_new_blocks=req.allow_new_blocks,
+        use_library_blocks=req.use_library_blocks,
         small_context=LLM_SETTINGS.agent_small_context if req.small_context is None else req.small_context,
         decision_hints=LLM_SETTINGS.agent_decision_hints if req.decision_hints is None else req.decision_hints,
     )

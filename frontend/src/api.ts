@@ -183,6 +183,7 @@ export const api = {
     sample_rows?: number | null
     auto_build?: boolean
     allow_new_blocks?: boolean
+    use_library_blocks?: boolean
     small_context?: boolean | null
     decision_hints?: boolean | null
   }) => request<BuildOut>('/agent/builds', { method: 'POST', body: JSON.stringify(body) }),
