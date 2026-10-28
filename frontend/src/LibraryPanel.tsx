@@ -13,6 +13,7 @@ import type {
   LibraryOut,
   TryOut,
 } from './types'
+import { host } from './host'
 
 // Where Create with AI starts from: a fresh block, an existing library
 // block (Edit with AI), or a red placed block (Fix with AI).
@@ -54,12 +55,7 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 function download(url: string) {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
+  host.downloadUrl(url).catch((e) => host.notify((e as Error).message))
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -398,8 +394,8 @@ function Browser({
                   <span style={{ ...mono, fontSize: 11, color: '#6d28d9', flex: 1 }}>{f.name.slice(7)}</span>
                   <button
                     style={{ fontSize: 10, padding: '1px 6px', color: '#b91c1c' }}
-                    onClick={() => {
-                      if (!confirm(`Discard ${f.name}? Placed blocks keep working: they embed their code.`)) return
+                    onClick={async () => {
+                      if (!(await host.confirm(`Discard ${f.name}? Placed blocks keep working: they embed their code.`))) return
                       api.libraryDiscardDraft(f.name).then(onChanged).catch((e) => onError(e.message))
                     }}
                   >
@@ -488,10 +484,10 @@ function BlockDetail({
   const placeable = problems.length === 0 && block.unmet_requirements.length === 0
   const arch = block.architecture
 
-  const duplicate = () => {
-    const newId = prompt('Id for the copy (a Python function name):', `${block.id}_copy`)
+  const duplicate = async () => {
+    const newId = await host.prompt('Id for the copy (a Python function name):', `${block.id}_copy`)
     if (!newId) return
-    const to = prompt('Library file to put it in:', userFiles[0]?.name ?? 'my_blocks.py')
+    const to = await host.prompt('Library file to put it in:', userFiles[0]?.name ?? 'my_blocks.py')
     if (!to) return
     api
       .libraryDuplicate({ id: block.id, file: file?.name ?? null, new_id: newId, to })
@@ -563,8 +559,8 @@ function BlockDetail({
             <button onClick={() => download(api.libraryExportUrl({ file: file.name }))}>Export file</button>
             {file.is_draft && (
               <button
-                onClick={() => {
-                  const to = prompt('Keep it in which library file?', userFiles[0]?.name ?? 'my_blocks.py')
+                onClick={async () => {
+                  const to = await host.prompt('Keep it in which library file?', userFiles[0]?.name ?? 'my_blocks.py')
                   if (to)
                     api
                       .libraryKeepDraft(file.name, block.id, to)
@@ -580,8 +576,8 @@ function BlockDetail({
             )}
             <button
               style={{ color: '#b91c1c', borderColor: '#fecaca', marginLeft: 'auto' }}
-              onClick={() => {
-                if (!confirm(`Delete ${block.id} from ${file.name}? Placed copies keep working.`)) return
+              onClick={async () => {
+                if (!(await host.confirm(`Delete ${block.id} from ${file.name}? Placed copies keep working.`))) return
                 api
                   .libraryDeleteBlock(file.name, block.id)
                   .then(() => {

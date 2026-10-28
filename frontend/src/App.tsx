@@ -26,6 +26,7 @@ import { UpdateDialog } from './UpdateDialog'
 import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
 import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
+import { host } from './host'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -156,7 +157,7 @@ function AppInner() {
       // can fail on a precondition (e.g. "Run" clicked on a block whose
       // upstream isn't green) before any block state changes -- surfaced
       // here once, the server clears it as soon as this read happens.
-      if (g.run_error) alert(g.run_error)
+      if (g.run_error) host.notify(g.run_error)
     })
   }, [collapsedLanes, fitView, onViewPort])
 
@@ -203,6 +204,38 @@ function AppInner() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [undo, redo])
+
+  // VS Code (see host.ts): its Save and Revert commands, and a reload after
+  // the project file changed on disk (git checkout, another editor).
+  const projectPathRef = useRef<string | null>(null)
+  projectPathRef.current = graph?.project_path ?? null
+  useEffect(
+    () =>
+      host.onEvent(({ name }) => {
+        const path = projectPathRef.current
+        if (name === 'save' && path)
+          api
+            .save()
+            .then(reload)
+            .catch((e) => host.notify((e as Error).message))
+        else if (name === 'reload' && path) api.load(path).then(reload).catch((e) => host.notify((e as Error).message))
+      }),
+    [reload],
+  )
+  useEffect(() => {
+    if (host.kind !== 'vscode') return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && projectPathRef.current) {
+        e.preventDefault()
+        api
+          .save()
+          .then(reload)
+          .catch((err) => host.notify((err as Error).message))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [reload])
 
   // Edits are always snapshotted server-side for crash recovery, and
   // autosave (below) catches up the project file itself within a couple of
@@ -292,8 +325,8 @@ function AppInner() {
   )
 
   const deleteLane = useCallback(
-    (laneId: string) => {
-      if (confirm('Delete this lane? Blocks in it become unassigned, not deleted.')) {
+    async (laneId: string) => {
+      if (await host.confirm('Delete this lane? Blocks in it become unassigned, not deleted.')) {
         api.deleteLane(laneId).then(reload)
       }
     },
@@ -522,15 +555,15 @@ function AppInner() {
           to_port: conn.targetHandle,
         })
         .then(reload)
-        .catch((e) => alert(e.message))
+        .catch((e) => host.notify(e.message))
     },
     [reload],
   )
 
   const onEdgeClick = useCallback(
-    (_: unknown, edge: DataWireEdgeType) => {
+    async (_: unknown, edge: DataWireEdgeType) => {
       if (edge.id.startsWith('ghostedge_')) return
-      if (confirm('Delete this wire?')) {
+      if (await host.confirm('Delete this wire?')) {
         api.deleteWire(edge.id).then(reload)
       }
     },
@@ -547,7 +580,7 @@ function AppInner() {
           setSelectedId(b.id)
           setSelectedPort(null)
         })
-        .catch((e) => alert(e.message))
+        .catch((e) => host.notify(e.message))
     },
     [reload],
   )
@@ -580,7 +613,7 @@ function AppInner() {
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       const dropped = JSON.parse(raw) as DragPayload
       if (dropped.kind === 'registry') addBlock(dropped.category, at)
-      else addLibraryBlock(dropped.file, dropped.id, at).catch((err) => alert(err.message))
+      else addLibraryBlock(dropped.file, dropped.id, at).catch((err) => host.notify(err.message))
     },
     [screenToFlowPosition, addBlock, addLibraryBlock],
   )
@@ -671,7 +704,7 @@ function AppInner() {
                 .recover()
                 .then(reload)
                 .then(() => setRecovery(null))
-                .catch((e) => alert(e.message))
+                .catch((e) => host.notify(e.message))
             }}
           >
             Restore
@@ -682,7 +715,7 @@ function AppInner() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette
           onAdd={addBlock}
-          onAddLibrary={(file, id) => addLibraryBlock(file, id).catch((e) => alert(e.message))}
+          onAddLibrary={(file, id) => addLibraryBlock(file, id).catch((e) => host.notify(e.message))}
           onOpenLibrary={() => setLibraryView({ kind: 'browse' })}
           onCreateWithAI={() => setLibraryView({ kind: 'ai', start: { addToCanvas: true, contextBlock: selectedBlockContext } })}
           onAddLane={addLane}

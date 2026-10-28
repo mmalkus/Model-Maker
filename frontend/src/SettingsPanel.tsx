@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import type { LLMSettingsOut } from './types'
+import { host } from './host'
 
 const PROVIDER_HELP: Record<string, string> = {
   lmstudio: 'Local LM Studio server -- start it from Developer > Start Server, then Fetch models below.',
@@ -9,6 +10,7 @@ const PROVIDER_HELP: Record<string, string> = {
   openai:
     'Calls the OpenAI API, or any OpenAI-compatible endpoint (Groq, Together, OpenRouter, Fireworks, a self-hosted server, ...) -- set a custom Base URL below to point elsewhere.',
   gemini: 'Calls the Google Gemini API directly -- needs an API key below.',
+  copilot: 'Your GitHub Copilot models, relayed by the Model-Maker VS Code extension -- only available inside VS Code.',
   stub: 'No LLM calls -- returns the input unchanged. Useful for testing.',
 }
 
@@ -54,7 +56,7 @@ export function SettingsPanel({
     try {
       onChange(await api.updateLlmSettings(body))
     } catch (e) {
-      alert((e as Error).message)
+      host.notify((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -118,6 +120,7 @@ export function SettingsPanel({
               {settings.providers.map((p) => (
                 <option key={p} value={p}>
                   {p}
+                  {settings.settings[p]?.available === false ? ' (unavailable here)' : ''}
                 </option>
               ))}
             </select>

@@ -3,6 +3,7 @@ import { api } from './api'
 import { DataModal } from './DataModal'
 import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { Artifact, PortType, PreviewOut } from './types'
+import { host } from './host'
 
 // The actual look at a port's data (dataframe preview, image, or plain
 // value) -- rendered by PortInspector for whichever output port badge the
@@ -103,7 +104,7 @@ export function PortDataView({
           delete next[column]
           return next
         })
-        alert((e as Error).message)
+        host.notify((e as Error).message)
       })
   }
 
@@ -122,7 +123,7 @@ export function PortDataView({
         setTitleInput(a.title)
         setShowDocument(true)
       })
-      .catch((e) => alert((e as Error).message))
+      .catch((e) => host.notify((e as Error).message))
       .finally(() => setAnalyzing(false))
   }
 
@@ -145,9 +146,9 @@ export function PortDataView({
       })
   }
 
-  const deleteArtifact = () => {
+  const deleteArtifact = async () => {
     if (!artifact) return
-    if (!confirm('Delete this data analysis? This does not affect the block or its tags.')) return
+    if (!(await host.confirm('Delete this data analysis? This does not affect the block or its tags.'))) return
     api
       .deleteArtifact(artifact.id)
       .then(() => setArtifact(null))

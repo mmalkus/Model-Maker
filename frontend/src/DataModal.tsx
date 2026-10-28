@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from './api'
 import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { PreviewOut } from './types'
+import { host } from './host'
 
 export function DataModal({
   blockName,
@@ -51,7 +52,7 @@ export function DataModal({
         setShowDocument(true)
         onChanged?.()
       })
-      .catch((e) => alert((e as Error).message))
+      .catch((e) => host.notify((e as Error).message))
       .finally(() => setAnalyzing(false))
   }
 
@@ -67,7 +68,7 @@ export function DataModal({
           delete next[column]
           return next
         })
-        alert((e as Error).message)
+        host.notify((e as Error).message)
       })
   }
   return (

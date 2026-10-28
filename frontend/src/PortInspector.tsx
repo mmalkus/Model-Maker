@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import { PortDataView } from './PortDataView'
 import type { GraphOut, PortType } from './types'
+import { host } from './host'
 
 export function PortInspector({
   blockId,
@@ -42,7 +43,7 @@ export function PortInspector({
   const saveName = () => {
     setEditing(false)
     if (nameText.trim() === (dataName ?? '')) return
-    api.renamePort(blockId, port, nameText.trim() || null).then(onChanged).catch((err) => alert((err as Error).message))
+    api.renamePort(blockId, port, nameText.trim() || null).then(onChanged).catch((err) => host.notify((err as Error).message))
   }
 
   return (

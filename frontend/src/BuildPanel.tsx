@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
 import type { BuildEvent, BuildOut, BuildPlan, BuildStage, GraphOut, LLMSettingsOut } from './types'
+import { host } from './host'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
@@ -138,8 +139,8 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
               </button>
             )}
             <button
-              onClick={() => {
-                if (confirm('Discard this build and put the graph back as it was?')) act(() => api.agentAction('discard'))
+              onClick={async () => {
+                if (await host.confirm('Discard this build and put the graph back as it was?')) act(() => api.agentAction('discard'))
               }}
             >
               Discard
@@ -658,15 +659,8 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
 function downloadLog(buildId: string) {
   api
     .agentBuildLog(buildId)
-    .then((log) => {
-      const url = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' }))
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${buildId}.json`
-      a.click()
-      URL.revokeObjectURL(url)
-    })
-    .catch((e) => alert((e as Error).message))
+    .then((log) => host.saveFile(`${buildId}.json`, new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' })))
+    .catch((e) => host.notify((e as Error).message))
 }
 
 // ---- event feed ---------------------------------------------------------------------

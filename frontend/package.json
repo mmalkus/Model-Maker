@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "lint": "oxlint && node scripts/check-host.mjs",
+    "preview": "vite preview",
+    "build:vscode": "tsc -b && vite build --mode vscode"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

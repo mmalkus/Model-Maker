@@ -5,6 +5,7 @@ import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
 import { ParamsForm } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
+import { host } from './host'
 
 export function Inspector({
   block,
@@ -145,7 +146,7 @@ export function Inspector({
       await fn()
       onChanged()
     } catch (e) {
-      alert((e as Error).message)
+      host.notify((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -206,8 +207,7 @@ export function Inspector({
     setDraftExplanation(draft.explanation)
   }
 
-  const pickPath = (path: string) => {
-    const key = showBrowser?.key ?? 'path'
+  const pickPath = (path: string, key = showBrowser?.key ?? 'path') => {
     setShowBrowser(null)
     let parsed: Record<string, unknown>
     try {
@@ -370,7 +370,7 @@ export function Inspector({
               onClick={() =>
                 run(async () => {
                   const { changed } = await api.checkChanges(block.id)
-                  alert(changed ? 'Source has changed since last read.' : 'No change detected.')
+                  host.notify(changed ? 'Source has changed since last read.' : 'No change detected.', 'info')
                 })
               }
             >
@@ -385,8 +385,8 @@ export function Inspector({
         )}
         <button
           disabled={busy}
-          onClick={() => {
-            if (confirm(`Delete block "${block.name}"? Its wires go with it. This can't be undone.`)) {
+          onClick={async () => {
+            if (await host.confirm(`Delete block "${block.name}"? Its wires go with it. This can't be undone.`)) {
               run(() => api.deleteBlock(block.id))
             }
           }}
@@ -423,7 +423,11 @@ export function Inspector({
               setParamsText={setParamsText}
               columns={inputColumns}
               disabled={busy}
-              onBrowse={(key, ext) => setShowBrowser({ key, ext })}
+              onBrowse={(key, ext) => {
+                // A native picker where the host has one (VS Code), else the in-app browser.
+                if (host.pickPath) host.pickPath({ ext: ext || undefined }).then((path) => path && pickPath(path, key))
+                else setShowBrowser({ key, ext })
+              }}
             />
           )}
           {showParamsJson && (
@@ -567,7 +571,7 @@ export function Inspector({
         />
       )}
 
-      {showBrowser && <FileBrowser ext={showBrowser.ext || undefined} onPick={pickPath} onClose={() => setShowBrowser(null)} />}
+      {showBrowser && <FileBrowser ext={showBrowser.ext || undefined} onPick={(path) => pickPath(path)} onClose={() => setShowBrowser(null)} />}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, buildReportId } from './api'
 import type { Artifact, ArtifactSummary } from './types'
+import { host } from './host'
 
 // An AI build's full report (see controller._attach_report) is a persistent
 // Artifact of kind "build_report", one per build. These are the two ways
@@ -41,12 +42,9 @@ export function ReportModal({ buildId, onClose }: { buildId: string; onClose: ()
 
   const download = () => {
     if (!artifact) return
-    const url = URL.createObjectURL(new Blob([artifact.document], { type: 'text/markdown' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `build-report-${buildId}.md`
-    a.click()
-    URL.revokeObjectURL(url)
+    host
+      .saveFile(`build-report-${buildId}.md`, new Blob([artifact.document], { type: 'text/markdown' }))
+      .catch((e) => host.notify((e as Error).message))
   }
 
   return (
