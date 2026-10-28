@@ -219,6 +219,8 @@ function AppInner() {
             .then(reload)
             .catch((e) => host.notify((e as Error).message))
         else if (name === 'reload' && path) api.load(path).then(reload).catch((e) => host.notify((e as Error).message))
+        // The backend's graph changed underneath (a Copilot Chat tool edit).
+        else if (name === 'refresh') reload()
       }),
     [reload],
   )

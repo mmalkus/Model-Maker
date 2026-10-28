@@ -161,7 +161,242 @@
           "markdownDescription": "Extra environment variables for the backend process, e.g. `{\"ANTHROPIC_API_KEY\": \"…\"}`."
         }
       }
-    }
+    },
+    "languageModelTools": [
+      {
+        "name": "modelmaker_get_graph",
+        "toolReferenceName": "mmGraph",
+        "displayName": "Model-Maker: Get Graph",
+        "modelDescription": "The open Model-Maker project's pipeline: lanes, every block in run order (id, name, category, lane, status grey/green/orange/red/running, params, input and output ports as name:type, the error of a red block, why an orange block is stale) and every wire. Call this first, and again after edits.",
+        "userDescription": "Read the open canvas's blocks, wires and statuses",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "modelmaker_list_block_types",
+        "toolReferenceName": "mmBlockTypes",
+        "displayName": "Model-Maker: List Block Types",
+        "modelDescription": "Without a tag: the block tags (e.g. data_prep, sampling, pd, validation) with a description of each. With a tag: that tag's blocks (category id and one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one.",
+        "userDescription": "List the blocks Model-Maker offers",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "string",
+              "description": "A tag from the tag list."
+            }
+          }
+        }
+      },
+      {
+        "name": "modelmaker_describe_block_type",
+        "toolReferenceName": "mmDescribeBlock",
+        "displayName": "Model-Maker: Describe Block Type",
+        "modelDescription": "Full documentation for one block category: what it does, its parameters (types, defaults, which ones auto-fill from a column role) and its input/output ports.",
+        "userDescription": "Read one block type's documentation",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "A block category, e.g. train_test_split."
+            }
+          },
+          "required": [
+            "category"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_get_output_summary",
+        "toolReferenceName": "mmOutput",
+        "displayName": "Model-Maker: Get Output Summary",
+        "modelDescription": "A block's last output on one port (default: its first). For a dataframe: row count and each column's dtype, role, nulls, distinct count and mean/std/min/max -- never the rows. For a statistics table (binning summary, metric tables): its rows. For a metric or model: the value. The block must have run (green or orange).",
+        "userDescription": "Summarize a block's output (schema and statistics, not rows)",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "port": {
+              "type": "string",
+              "description": "An output port name; default the first."
+            }
+          },
+          "required": [
+            "block"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_add_block",
+        "toolReferenceName": "mmAddBlock",
+        "displayName": "Model-Maker: Add Block",
+        "modelDescription": "Adds a block to the canvas (it starts grey; wire its inputs with modelmaker_connect, then run it). Returns the new block with its id and ports.",
+        "userDescription": "Add a block to the canvas",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "The block category (from list/describe block types)."
+            },
+            "name": {
+              "type": "string",
+              "description": "A short display name."
+            },
+            "lane": {
+              "type": "string",
+              "description": "Lane id or name to put it in."
+            },
+            "params": {
+              "type": "object",
+              "description": "Parameter values; omitted ones take their defaults."
+            }
+          },
+          "required": [
+            "category"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_set_params",
+        "toolReferenceName": "mmSetParams",
+        "displayName": "Model-Maker: Set Params",
+        "modelDescription": "Changes some of a block's parameters (merged into its current ones). Downstream blocks go stale until re-run.",
+        "userDescription": "Change a block's parameters",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "params": {
+              "type": "object",
+              "description": "The parameters to change, with their new values."
+            }
+          },
+          "required": [
+            "block",
+            "params"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_connect",
+        "toolReferenceName": "mmConnect",
+        "displayName": "Model-Maker: Connect",
+        "modelDescription": "Wires one block's output port to another block's input port (ports as listed by modelmaker_get_graph, without the :type suffix).",
+        "userDescription": "Wire two blocks together",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "from_block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "from_port": {
+              "type": "string"
+            },
+            "to_block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "to_port": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from_block",
+            "from_port",
+            "to_block",
+            "to_port"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_run",
+        "toolReferenceName": "mmRun",
+        "displayName": "Model-Maker: Run",
+        "modelDescription": "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's status, with the error of any red block.",
+        "userDescription": "Run the pipeline, or up to one block",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            }
+          }
+        }
+      },
+      {
+        "name": "modelmaker_compile",
+        "toolReferenceName": "mmCompile",
+        "displayName": "Model-Maker: Compile",
+        "modelDescription": "Compiles the pipeline into one self-contained, readable Python script and returns its source. Every block must be green.",
+        "userDescription": "Compile the pipeline to a Python script",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "streaming": {
+              "type": "boolean",
+              "description": "Fuse compatible stretches into streaming polars queries."
+            }
+          }
+        }
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",

@@ -12,3 +12,6 @@ it runs (see vscode-extension-plan.md §8.2).
   Model API.
 - Native dialogs for saving, picking paths, confirmations and downloads.
   Compiled scripts open in an editor tab.
+- The canvas follows the VS Code colour theme (light, dark, high contrast).
+- Copilot Chat tools: read the graph, the block catalogue and output
+  summaries, and add, configure, wire, run and compile blocks.

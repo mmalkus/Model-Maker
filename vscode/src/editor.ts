@@ -19,6 +19,7 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
   // and Model-Maker: Save goes to the active one.
   private readonly panels = new Map<string, Set<vscode.WebviewPanel>>()
   private active: vscode.WebviewPanel | undefined
+  private lastActive: vscode.WebviewPanel | undefined
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -50,6 +51,25 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     this.active?.webview.postMessage({ kind: 'event', name: 'save' })
   }
 
+  /** The project the chat tools act on: the active canvas's, else the one
+   * last active, else the only one open. */
+  activeProject(): string | undefined {
+    if (this.active) return this.folderOf(this.active)
+    if (this.lastActive && this.folderOf(this.lastActive)) return this.folderOf(this.lastActive)
+    const open = [...this.panels.entries()].filter(([, set]) => set.size > 0)
+    return open.length === 1 ? open[0][0] : undefined
+  }
+
+  /** Re-reads the graph in a folder's canvases (after a chat tool edit). */
+  refresh(folder: string) {
+    for (const panel of this.panels.get(folder) ?? []) panel.webview.postMessage({ kind: 'event', name: 'refresh' })
+  }
+
+  private folderOf(panel: vscode.WebviewPanel): string | undefined {
+    for (const [folder, set] of this.panels) if (set.has(panel)) return folder
+    return undefined
+  }
+
   openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
     return { uri, dispose: () => {} }
   }
@@ -59,7 +79,7 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     const set = this.panels.get(folder) ?? new Set()
     set.add(panel)
     this.panels.set(folder, set)
-    this.active = panel
+    this.active = this.lastActive = panel
 
     let lastSave = 0
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(folder), 'model.json'))
@@ -75,13 +95,15 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
         if (choice === 'Reload') panel.webview.postMessage({ kind: 'event', name: 'reload' })
       }),
       panel.onDidChangeViewState(() => {
-        if (panel.active) this.active = panel
+        if (panel.active) this.active = this.lastActive = panel
+        else if (this.active === panel) this.active = undefined
       }),
     ]
     panel.onDidDispose(() => {
       disposables.forEach((d) => d.dispose())
       set.delete(panel)
       if (this.active === panel) this.active = undefined
+      if (this.lastActive === panel) this.lastActive = undefined
       this.backends.release(folder)
     })
 

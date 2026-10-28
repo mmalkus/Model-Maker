@@ -4,6 +4,7 @@ import { BackendManager, installPackage } from './backend'
 import { CopilotRelay } from './copilot'
 import { ModelEditorProvider, VIEW_TYPE } from './editor'
 import { onPythonChanged, resolvePython } from './python'
+import { registerTools } from './tools'
 
 const PROJECT_FILE = 'model.json'
 // Present in every model.json Model-Maker writes (modelmaker/project.py),
@@ -20,6 +21,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
   const backends = new BackendManager(log, relay)
   context.subscriptions.push(log, relay, backends)
   const editor = ModelEditorProvider.register(context, backends, log)
+  registerTools(context, backends, editor)
 
   const command = (id: string, fn: (...args: never[]) => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, fn))

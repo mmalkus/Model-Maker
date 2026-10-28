@@ -32,6 +32,11 @@ and **Ctrl/Cmd+S** saves straight away. Git works through VS Code's
 Source Control. **Compile** opens the generated script in a new editor
 tab.
 
+## Theme
+
+Inside VS Code the canvas uses your colour theme, whether light, dark or
+high contrast, and switches when you switch theme.
+
 ## How it works
 
 Each open project gets its own local backend: `python -m modelmaker.api`
@@ -44,6 +49,25 @@ Codespaces the backend runs next to your files.
 Copilot is offered to the backend through a small relay inside the
 extension, an OpenAI-compatible endpoint over VS Code's Language Model
 API. The first AI call asks you to allow Model-Maker to use Copilot.
+
+## Copilot Chat tools
+
+In Copilot Chat's agent mode, Copilot can work on the open canvas with these
+tools. Mention them with `#` (for example `#mmGraph`) or let agent mode pick
+them:
+
+| Tool | Does |
+|---|---|
+| `#mmGraph` | Reads the blocks, wires, statuses and errors |
+| `#mmBlockTypes`, `#mmDescribeBlock` | Browse and read the block catalogue, including your library |
+| `#mmOutput` | Summarizes a block's output: schema and statistics, never rows |
+| `#mmAddBlock`, `#mmSetParams`, `#mmConnect` | Edit the pipeline |
+| `#mmRun` | Runs the pipeline, or up to one block, and reports errors |
+| `#mmCompile` | Returns the compiled Python script |
+
+Every edit asks you first, lands in the canvas's undo history, and shows up
+on the canvas straight away. Copilot sees the same data the AI builder
+does: column names, types, roles and summary statistics, never your rows.
 
 ## Commands
 

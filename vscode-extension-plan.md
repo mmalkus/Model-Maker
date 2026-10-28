@@ -25,12 +25,11 @@ Decisions already taken:
 
 ## Status
 
-Phases 0–4 and the release pipeline (§7, §8.3) are implemented: the
-backend opt-ins, the frontend's `host.ts`, the extension in `vscode/`
-(custom editor, backend manager, bridge, Copilot relay), the CI `vscode`
-job, and the `build-vscode`/`publish-vscode` jobs. Still open: theming
-(§4.4), Copilot Chat tools (§5.5), the one-time Marketplace setup (§8.1),
-and checking the remote cases (SSH, WSL, Codespaces) by hand.
+Everything in this plan is implemented except the one-time Marketplace
+setup (§8.1) and checking the remote cases (SSH, WSL, Codespaces) by hand.
+That covers phases 0–5, the CI `vscode` job, the `build-vscode` and
+`publish-vscode` release jobs, theming (§4.4) and the Copilot Chat tools
+(§5.5).
 
 Where the implementation differs from the plan below:
 
@@ -42,6 +41,20 @@ Where the implementation differs from the plan below:
 - **`Host` has two more methods (§4.1):** `prompt` (webviews block
   `window.prompt` too) and `downloadUrl` (library exports, fetched with the
   token).
+- **The Copilot Chat tools use VS Code's Language Model Tools API, not an
+  MCP server (§5.5).** The AI builder's MCP tools are tied to a build:
+  phases, ownership and a per-build token. The chat tools instead call the
+  canvas's own backend over its existing endpoints, plus a read-only
+  `/api/assistant/*` router (graph, block catalogue, redacted output
+  summaries) that reuses the builder's catalogue and summary code. Edits get
+  VS Code's confirmation step, land in the undo history, and refresh the
+  canvas. That needed no new Python process, and the tools work over
+  remotes like the rest of the extension.
+- **Theming (§4.4)** turns the components' inline colours into
+  `var(--mm-*)` tokens with their exact old values. The browser build looks
+  the same (checked by a screenshot colour diff). Inside VS Code the tokens,
+  the brand chrome, React Flow and CodeMirror map onto `--vscode-*`
+  colours.
 - **The extension checks for a compatible backend through `/api/version`'s
   compat level only.** `modelmaker.packageSpec` defaults to an unpinned
   `quantology-modelmaker`. The first extension release therefore has to

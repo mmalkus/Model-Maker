@@ -1680,6 +1680,10 @@ from .library_api import router as _library_router  # noqa: E402 -- reads SESSIO
 
 app.include_router(_library_router)
 
+from .assistant_api import router as _assistant_router  # noqa: E402 -- likewise
+
+app.include_router(_assistant_router)
+
 
 # ---- version, auth and CORS (opt-in for embedding, e.g. the VS Code extension)
 

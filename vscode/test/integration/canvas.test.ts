@@ -70,6 +70,16 @@ suite('Model-Maker canvas', () => {
     }
   })
 
+  test('the chat tools are registered and read the open canvas', async () => {
+    await activate()
+    const names = vscode.lm.tools.filter((t) => t.name.startsWith('modelmaker_')).map((t) => t.name)
+    assert.ok(names.includes('modelmaker_get_graph') && names.includes('modelmaker_run'), names.join(', '))
+    // Read-only, so no confirmation is asked.
+    const result = await vscode.lm.invokeTool('modelmaker_get_graph', { input: {}, toolInvocationToken: undefined })
+    const text = result.content.map((p) => (p instanceof vscode.LanguageModelTextPart ? p.value : '')).join('')
+    assert.ok(JSON.parse(text).blocks.length > 0)
+  })
+
   test('the Copilot relay is offered to the backend', async () => {
     const { backends } = await activate()
     const backend = await backends.acquire(folder())

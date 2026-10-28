@@ -118,7 +118,8 @@ jobs:
         working-directory: vscode
       - run: npm run typecheck
         working-directory: vscode
-      - run: npm run test:unit
+      # Includes the chat tools against a real backend (the package above).
+      - run: MODELMAKER_TEST_PYTHON="$(command -v python)" npm run test:unit
         working-directory: vscode
 
       - name: Package the .vsix

@@ -6,6 +6,7 @@ them set, the rest of the suite covers that nothing changed."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -216,3 +217,48 @@ def test_copilot_loop_takes_model_and_context_from_relay(relay):
     assert isinstance(loop, CopilotLoop)
     assert loop.model == "claude-sonnet" and loop.context_tokens == 64000
     assert make_loop("copilot", None, api_base_url="", token="").model == "gpt-4.1"
+
+
+# ---- assistant views (the VS Code extension's Copilot Chat tools) ----------
+
+DEMO = Path(__file__).resolve().parents[1] / "projects" / "demo_pd_model"
+
+
+@pytest.fixture
+def demo_client(tmp_path, monkeypatch):
+    import shutil
+
+    from modelmaker.session import ProjectSession
+
+    shutil.copytree(DEMO, tmp_path / "demo")
+    monkeypatch.setattr(api_module, "SESSION", ProjectSession(recovery_path=tmp_path / "r.json"))
+    c = TestClient(api_module.app)
+    assert c.post("/api/project/load", json={"path": str(tmp_path / "demo")}).status_code == 200
+    return c
+
+
+def test_assistant_graph_lists_blocks_in_run_order(demo_client):
+    body = demo_client.get("/api/assistant/graph").json()
+    ids = [b["id"] for b in body["blocks"]]
+    assert ids[0] == "b_load" and len(ids) == len(body["blocks"]) > 3
+    first = body["blocks"][0]
+    assert {"status", "params", "outputs", "lane"} <= set(first)
+    assert body["lanes"] and body["wires"] and body["running"] is False
+
+
+def test_assistant_block_catalogue(demo_client):
+    tags = demo_client.get("/api/assistant/block_types").json()["tags"]
+    assert tags
+    tag = tags[0]["tag"] if isinstance(tags[0], dict) else tags[0]
+    assert demo_client.get("/api/assistant/block_types", params={"tag": tag}).json()["blocks"]
+    doc = demo_client.get("/api/assistant/block_types/train_test_split").json()
+    assert "params" in doc or "parameters" in doc
+    assert demo_client.get("/api/assistant/block_types/no_such_block").status_code == 404
+
+
+def test_assistant_output_is_schema_not_rows(demo_client):
+    assert demo_client.get("/api/assistant/output", params={"block": "b_load"}).status_code == 409  # not run yet
+    demo_client.post("/api/blocks/b_load/run")
+    body = demo_client.get("/api/assistant/output", params={"block": "b_load"}).json()
+    assert body["type"] == "dataframe" and body["row_count"] > 0
+    assert "rows" not in body and all("name" in c and "dtype" in c for c in body["columns"])

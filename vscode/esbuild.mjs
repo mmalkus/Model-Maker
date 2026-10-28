@@ -10,7 +10,15 @@ const common = { bundle: true, platform: 'node', target: 'node20', format: 'cjs'
 
 if (args.has('--tests')) {
   const entries = (dir) => readdirSync(dir).filter((f) => f.endsWith('.test.ts')).map((f) => `${dir}/${f}`)
-  await esbuild.build({ ...common, entryPoints: entries('test/unit'), outdir: 'out/unit', sourcemap: true })
+  // Unit tests run in plain Node: `vscode` is a stub there.
+  await esbuild.build({
+    ...common,
+    entryPoints: entries('test/unit'),
+    outdir: 'out/unit',
+    sourcemap: true,
+    external: [],
+    alias: { vscode: './test/stub/vscode.ts' },
+  })
   await esbuild.build({ ...common, entryPoints: entries('test/integration'), outdir: 'out/integration', external: ['vscode', 'mocha'] })
 } else {
   const options = {
