@@ -25,11 +25,12 @@ import type {
   TryOut,
   UpdatePreview,
 } from './types'
+import { host } from './host'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+  const res = await fetch(`${host.apiBase}/api${path}`, {
     ...init,
+    headers: { 'Content-Type': 'application/json', ...host.authHeaders(), ...init?.headers },
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
@@ -126,7 +127,14 @@ export const api = {
   recoveryInfo: () => request<{ recovery: RecoveryInfo | null }>('/project/recovery'),
   recover: () => request<GraphOut>('/project/recover', { method: 'POST' }),
 
-  save: (path?: string) => request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }),
+  save: (path?: string) => {
+    // Tells VS Code the project-file change that follows is ours, not an
+    // outside edit to offer reloading for; a no-op in the browser.
+    host.post('saving')
+    return request<{ path: string }>('/project/save', { method: 'POST', body: JSON.stringify({ path }) }).finally(() =>
+      host.post('saved'),
+    )
+  },
   load: (path: string) => request<GraphOut>('/project/load', { method: 'POST', body: JSON.stringify({ path }) }),
   new: () => request<GraphOut>('/project/new', { method: 'POST' }),
   projectDefaultDir: () => request<{ path: string }>('/project/default_dir'),
@@ -144,7 +152,7 @@ export const api = {
   gitPull: () => request<GitStatusOut>('/project/git/pull', { method: 'POST' }),
 
   imageUrl: (id: string, port: string, cacheBust?: string | null) =>
-    `/api/blocks/${id}/image?port=${encodeURIComponent(port)}${cacheBust ? `&t=${encodeURIComponent(cacheBust)}` : ''}`,
+    host.withToken(`${host.apiBase}/api/blocks/${id}/image?port=${encodeURIComponent(port)}${cacheBust ? `&t=${encodeURIComponent(cacheBust)}` : ''}`),
 
   value: (id: string, port: string) => request<unknown>(`/blocks/${id}/value?port=${encodeURIComponent(port)}`),
 
@@ -237,7 +245,7 @@ export const api = {
     if (q.blocks?.length) p.set('blocks', q.blocks.join(','))
     if (q.files?.length) p.set('files', q.files.join(','))
     const qs = p.toString()
-    return `/api/library/export${qs ? `?${qs}` : ''}`
+    return `${host.apiBase}/api/library/export${qs ? `?${qs}` : ''}`
   },
   libraryImportPreview: (filename: string, content_base64: string) =>
     request<ImportPreview>('/library/import/preview', { method: 'POST', body: JSON.stringify({ filename, content_base64 }) }),

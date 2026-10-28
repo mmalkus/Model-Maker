@@ -1,17 +1,55 @@
 import { defaultKeymap } from '@codemirror/commands'
 import { python } from '@codemirror/lang-python'
-import { EditorState, type Extension } from '@codemirror/state'
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { EditorState, Prec, type Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
+import { tags } from '@lezer/highlight'
 import { useEffect, useRef } from 'react'
+import { host as appHost } from './host'
 
 const theme = EditorView.theme({
-  '&': { fontSize: '11px', border: '1px solid #d1d5db', borderRadius: '6px', backgroundColor: '#fff' },
+  '&': { fontSize: '11px', border: '1px solid var(--mm-border-strong)', borderRadius: '6px', backgroundColor: 'var(--mm-bg)' },
   '&.cm-focused': { outline: '2px solid var(--brand)', outlineOffset: '-1px' },
   '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', lineHeight: '1.5' },
-  '.cm-gutters': { backgroundColor: '#f9fafb', border: 'none', borderRight: '1px solid #f3f4f6' },
+  '.cm-gutters': { backgroundColor: 'var(--mm-bg-subtle)', border: 'none', borderRight: '1px solid var(--mm-bg-hover)' },
   '.cm-content': { padding: '6px 0' },
 })
+
+// Inside VS Code: the editor's own colours and token colours, so code reads
+// on a dark or high-contrast theme too (see index.css for the rest).
+const vscodeTheme: Extension = [
+  EditorView.theme({
+    '&': { color: 'var(--vscode-editor-foreground, var(--vscode-foreground))' },
+    '.cm-scroller': { fontFamily: 'var(--vscode-editor-font-family)' },
+    '.cm-content': { caretColor: 'var(--vscode-editorCursor-foreground)' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--vscode-editorCursor-foreground)' },
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
+      backgroundColor: 'var(--vscode-editor-selectionBackground) !important',
+    },
+    '.cm-gutters': { color: 'var(--vscode-editorLineNumber-foreground)' },
+    '.cm-activeLine': { backgroundColor: 'var(--vscode-editor-lineHighlightBackground, transparent)' },
+    '.cm-activeLineGutter': {
+      backgroundColor: 'var(--vscode-editor-lineHighlightBackground, transparent)',
+      color: 'var(--vscode-editorLineNumber-activeForeground)',
+    },
+    '.cm-matchingBracket': { backgroundColor: 'var(--vscode-editorBracketMatch-background)' },
+  }),
+  Prec.high(
+    syntaxHighlighting(
+      HighlightStyle.define([
+        { tag: [tags.keyword, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword], color: 'var(--vscode-symbolIcon-keywordForeground)' },
+        { tag: [tags.string, tags.special(tags.string)], color: 'var(--vscode-debugTokenExpression-string)' },
+        { tag: [tags.number, tags.bool, tags.null], color: 'var(--vscode-debugTokenExpression-number)' },
+        { tag: tags.comment, color: 'var(--vscode-descriptionForeground)', fontStyle: 'italic' },
+        { tag: [tags.function(tags.variableName), tags.function(tags.definition(tags.variableName))], color: 'var(--vscode-symbolIcon-functionForeground)' },
+        { tag: [tags.className, tags.definition(tags.className)], color: 'var(--vscode-symbolIcon-classForeground)' },
+        { tag: [tags.propertyName, tags.attributeName], color: 'var(--vscode-symbolIcon-propertyForeground)' },
+        { tag: tags.variableName, color: 'var(--vscode-foreground)' },
+      ]),
+    ),
+  ),
+]
 
 /** CodeMirror in a React wrapper. The editor owns its own document, so the
  * `value` prop is only pushed in when it differs from what's on screen --
@@ -52,6 +90,7 @@ export function CodeEditor({
       basicSetup,
       python(),
       theme,
+      appHost.kind === 'vscode' ? vscodeTheme : [],
       EditorView.lineWrapping,
       fill
         ? EditorView.theme({ '&': { height: '100%' } })

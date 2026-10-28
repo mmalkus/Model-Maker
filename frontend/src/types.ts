@@ -402,6 +402,8 @@ export interface LLMProviderSettings {
   // where it came from -- the key's value is never sent to the client.
   api_key_set?: boolean
   api_key_source?: 'override' | 'env' | null
+  // copilot only: whether the VS Code extension's relay is reachable.
+  available?: boolean
 }
 
 export interface AgentLLMChoice {

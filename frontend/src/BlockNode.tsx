@@ -77,7 +77,7 @@ function ProvenancePopover({
           onClose()
           onOpenBuildReport(buildId)
         }}
-        style={{ background: 'none', border: 'none', padding: 0, color: '#2563eb', cursor: 'pointer', fontSize: 11 }}
+        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--mm-link)', cursor: 'pointer', fontSize: 11 }}
       >
         Open build report
       </button>
@@ -114,23 +114,23 @@ function ProvenancePopover({
         top: 30,
         right: -4,
         width: 240,
-        background: '#fff',
-        border: '1px solid #d1d5db',
+        background: 'var(--mm-bg)',
+        border: '1px solid var(--mm-border-strong)',
         borderRadius: 6,
         boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
         padding: '6px 8px',
         fontSize: 11,
         lineHeight: 1.45,
-        color: '#374151',
+        color: 'var(--mm-fg-3)',
         zIndex: 20,
         cursor: 'default',
       }}
     >
       {entries.map((e, i) => (
-        <div key={e.key} style={i > 0 ? { marginTop: 6, paddingTop: 6, borderTop: '1px solid #f3f4f6' } : undefined}>
+        <div key={e.key} style={i > 0 ? { marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--mm-bg-hover)' } : undefined}>
           <div style={{ fontWeight: 600 }}>{e.heading}</div>
           {e.lines.filter(Boolean).map((line, j) => (
-            <div key={j} style={{ color: '#6b7280' }}>
+            <div key={j} style={{ color: 'var(--mm-muted)' }}>
               {line}
             </div>
           ))}
@@ -155,14 +155,14 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         position: 'relative',
         border: `2px solid ${color}`,
         borderRadius: 8,
-        background: '#fff',
+        background: 'var(--mm-bg)',
         minWidth: 160,
         // Without a ceiling, a long status line (a staleness reason naming
         // the upstream edit that caused it) stretches the card right across
         // the canvas instead of wrapping inside it.
         maxWidth: 280,
         boxShadow: aiActive
-          ? '0 0 0 3px #a78bfa'
+          ? '0 0 0 3px var(--mm-ai-border-3)'
           : selected
             ? '0 0 0 2px var(--brand)'
             : '0 1px 3px rgba(0,0,0,0.15)',
@@ -176,10 +176,10 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           alignItems: 'center',
           gap: 6,
           padding: '6px 8px',
-          borderBottom: '1px solid #eee',
+          borderBottom: '1px solid var(--mm-border-2)',
           borderTopLeftRadius: 6,
           borderTopRightRadius: 6,
-          background: '#fafafa',
+          background: 'var(--mm-bg-subtle-2)',
         }}
       >
         <span
@@ -196,7 +196,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         {block.group_by && (
           <span
             title={`Runs once per distinct value of '${block.group_by}'`}
-            style={{ fontSize: 10, color: '#7c3aed', border: '1px solid #7c3aed55', borderRadius: 4, padding: '0 4px', flexShrink: 0 }}
+            style={{ fontSize: 10, color: 'var(--mm-ai)', border: '1px solid #7c3aed55', borderRadius: 4, padding: '0 4px', flexShrink: 0 }}
           >
             ⟲ {block.group_by}
           </span>
@@ -213,7 +213,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
               fontWeight: 600,
               color: 'var(--brand)',
               border: '1px solid var(--brand-border)',
-              background: block.definition_info.update_available ? '#fffbeb' : 'var(--brand-light)',
+              background: block.definition_info.update_available ? 'var(--mm-warn-bg)' : 'var(--brand-light)',
               borderRadius: 4,
               padding: '0 4px',
               flexShrink: 0,
@@ -223,7 +223,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           </span>
         )}
         {block.definition_info?.source === 'builtin' && block.definition_info.changed_since_saved && (
-          <span title="This built-in changed since the model was saved -- review it in the inspector" style={{ fontSize: 10, color: '#92400e', flexShrink: 0 }}>
+          <span title="This built-in changed since the model was saved -- review it in the inspector" style={{ fontSize: 10, color: 'var(--mm-warn)', flexShrink: 0 }}>
             changed
           </span>
         )}
@@ -241,9 +241,9 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
             style={{
               fontSize: 10,
               fontWeight: aiBuilt ? 600 : undefined,
-              color: '#6d28d9',
-              background: aiBuilt ? '#ede9fe' : '#fff',
-              border: aiBuilt ? 'none' : '1px solid #c4b5fd',
+              color: 'var(--mm-ai-2)',
+              background: aiBuilt ? 'var(--mm-ai-bg-2)' : 'var(--mm-bg)',
+              border: aiBuilt ? 'none' : '1px solid var(--mm-ai-border)',
               borderRadius: 4,
               padding: '0 4px',
               flexShrink: 0,
@@ -261,16 +261,16 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
       {aiPlannedChange && (
         <div
           title="The AI build's plan proposes this change to your block -- approving the plan allows it"
-          style={{ background: '#f5f3ff', color: '#6d28d9', fontSize: 10, padding: '3px 8px', borderBottom: '1px dashed #c4b5fd' }}
+          style={{ background: 'var(--mm-ai-bg)', color: 'var(--mm-ai-2)', fontSize: 10, padding: '3px 8px', borderBottom: '1px dashed var(--mm-ai-border)' }}
         >
           planned change: {aiPlannedChange}
         </div>
       )}
-      <div style={{ padding: '4px 8px 8px', color: '#6b7280' }}>
+      <div style={{ padding: '4px 8px 8px', color: 'var(--mm-muted)' }}>
         <div>
           {block.category}
           {block.status === 'running' && (
-            <span style={{ color: '#2563eb', fontWeight: 600 }}>
+            <span style={{ color: 'var(--mm-link)', fontWeight: 600 }}>
               {' '}
               · running{block.running_seconds != null && ` (${Math.round(block.running_seconds)}s)`}…
             </span>
@@ -284,11 +284,11 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                 key={k}
                 title={`${k} = ${JSON.stringify(v)}`}
                 style={{
-                  background: '#f3f4f6',
+                  background: 'var(--mm-bg-hover)',
                   borderRadius: 4,
                   padding: '1px 4px',
                   fontSize: 10,
-                  color: '#4b5563',
+                  color: 'var(--mm-fg-4)',
                   whiteSpace: 'nowrap',
                 }}
               >
@@ -321,7 +321,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
                     border: `1px solid ${badge.color}55`,
                     borderRadius: 4,
                     padding: '0 4px',
-                    background: '#fff',
+                    background: 'var(--mm-bg)',
                     cursor: 'pointer',
                   }}
                 >
@@ -337,7 +337,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           <div
             title={`Stale: ${block.stale_reason}`}
             style={{
-              color: '#b45309',
+              color: 'var(--mm-warn-2)',
               marginTop: 4,
               display: '-webkit-box',
               WebkitLineClamp: 2,
@@ -360,7 +360,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           id={port.name}
           type="target"
           position={Position.Top}
-          style={{ left: 20 + i * 16, background: '#555' }}
+          style={{ left: 20 + i * 16, background: 'var(--mm-fg-5)' }}
         />
       ))}
       {block.outputs.map((port, i) => (
@@ -369,7 +369,7 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           id={port.name}
           type="source"
           position={Position.Bottom}
-          style={{ left: 20 + i * 16, background: '#555' }}
+          style={{ left: 20 + i * 16, background: 'var(--mm-fg-5)' }}
         />
       ))}
     </div>

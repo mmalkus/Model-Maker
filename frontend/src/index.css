@@ -1,7 +1,7 @@
 :root {
   color-scheme: light;
   font: 13px/1.4 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
-  color: #111827;
+  color: var(--mm-fg);
 
   /* Quantology brand (see quantology.nl design system) */
   --font-heading: 'Fraunces', Georgia, serif;
@@ -19,6 +19,52 @@
   --brand-ink: var(--brand-navy);
   --brand-light: var(--brand-sand);
   --brand-border: var(--brand-sand-300);
+
+  /* Neutral and semantic colours the components use (var(--mm-*)), one per
+     shade. In a browser they're the palette as designed; inside VS Code
+     they follow the editor's theme (below). */
+  --mm-fg: #111827;
+  --mm-fg-2: #1f2937;
+  --mm-fg-3: #374151;
+  --mm-fg-4: #4b5563;
+  --mm-fg-5: #555;
+  --mm-muted: #6b7280;
+  --mm-faint: #9ca3af;
+  --mm-bg: #fff;
+  --mm-bg-subtle: #f9fafb;
+  --mm-bg-subtle-2: #fafafa;
+  --mm-bg-subtle-3: #fcfbf8;
+  --mm-bg-hover: #f3f4f6;
+  --mm-border: #e5e7eb;
+  --mm-border-2: #eee;
+  --mm-border-3: #ddd;
+  --mm-border-strong: #d1d5db;
+  --mm-error: #b91c1c;
+  --mm-error-2: #991b1b;
+  --mm-error-bg: #fef2f2;
+  --mm-error-border: #fecaca;
+  --mm-warn: #92400e;
+  --mm-warn-2: #b45309;
+  --mm-warn-3: #78350f;
+  --mm-warn-bg: #fffbeb;
+  --mm-warn-bg-2: #fef3c7;
+  --mm-warn-border: #fde68a;
+  --mm-ai: #7c3aed;
+  --mm-ai-2: #6d28d9;
+  --mm-ai-3: #5b21b6;
+  --mm-ai-4: #4c1d95;
+  --mm-ai-bg: #f5f3ff;
+  --mm-ai-bg-2: #ede9fe;
+  --mm-ai-border: #c4b5fd;
+  --mm-ai-border-2: #ddd6fe;
+  --mm-ai-border-3: #a78bfa;
+  --mm-ok: #15803d;
+  --mm-ok-2: #166534;
+  --mm-ok-bg: #f0fdf4;
+  --mm-ok-border: #bbf7d0;
+  --mm-ok-3: #3f6259;
+  --mm-overlay: rgba(255, 255, 255, 0.85);
+  --mm-link: #2563eb;
 }
 
 * {
@@ -30,21 +76,27 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: #ffffff;
+  background: var(--mm-bg);
+}
+
+/* Again on body: a var() in :root's colour resolves there, before the
+   theme overrides on body below could apply. */
+body {
+  color: var(--mm-fg);
 }
 
 button {
   font: inherit;
-  color: #111827;
-  background: #fff;
-  border: 1px solid #d1d5db;
+  color: var(--mm-fg);
+  background: var(--mm-bg);
+  border: 1px solid var(--mm-border-strong);
   border-radius: 6px;
   padding: 5px 10px;
   cursor: pointer;
 }
 
 button:hover:not(:disabled) {
-  background: #f3f4f6;
+  background: var(--mm-bg-hover);
 }
 
 button:disabled {
@@ -67,15 +119,15 @@ button.brand-primary:hover:not(:disabled) {
 }
 
 textarea {
-  color: #111827;
-  background: #fff;
-  border: 1px solid #d1d5db;
+  color: var(--mm-fg);
+  background: var(--mm-bg);
+  border: 1px solid var(--mm-border-strong);
   border-radius: 6px;
   padding: 6px;
 }
 
 table {
-  color: #111827;
+  color: var(--mm-fg);
 }
 
 /* Pulsing dot for a block/run currently in progress -- see BlockNode.tsx's
@@ -88,4 +140,128 @@ table {
   50% {
     opacity: 0.35;
   }
+}
+
+/* ---- Inside VS Code --------------------------------------------------------
+   The webview's <body> carries vscode-light / vscode-dark /
+   vscode-high-contrast(-light) and every --vscode-* theme colour, updated
+   live when the user switches theme. Map the app's tokens onto them; a plain
+   browser never has these classes, so nothing here applies there. */
+body[class*='vscode-'] {
+  --mm-fg: var(--vscode-foreground);
+  --mm-fg-2: var(--vscode-foreground);
+  --mm-fg-3: var(--vscode-foreground);
+  --mm-fg-4: var(--vscode-descriptionForeground);
+  --mm-fg-5: var(--vscode-descriptionForeground);
+  --mm-muted: var(--vscode-descriptionForeground);
+  --mm-faint: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+
+  --mm-bg: var(--vscode-editor-background);
+  --mm-bg-subtle: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --mm-bg-subtle-2: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --mm-bg-subtle-3: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --mm-bg-hover: var(--vscode-list-hoverBackground);
+
+  --mm-border: var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  --mm-border-2: var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  --mm-border-3: var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  --mm-border-strong: var(--vscode-input-border, var(--vscode-panel-border, var(--vscode-widget-border)));
+
+  --mm-error: var(--vscode-errorForeground);
+  --mm-error-2: var(--vscode-errorForeground);
+  --mm-error-bg: var(--vscode-inputValidation-errorBackground, transparent);
+  --mm-error-border: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+
+  --mm-warn: var(--vscode-editorWarning-foreground);
+  --mm-warn-2: var(--vscode-editorWarning-foreground);
+  --mm-warn-3: var(--vscode-editorWarning-foreground);
+  --mm-warn-bg: var(--vscode-inputValidation-warningBackground, transparent);
+  --mm-warn-bg-2: var(--vscode-inputValidation-warningBackground, transparent);
+  --mm-warn-border: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
+
+  --mm-ai: var(--vscode-charts-purple);
+  --mm-ai-2: var(--vscode-charts-purple);
+  --mm-ai-3: var(--vscode-charts-purple);
+  --mm-ai-4: var(--vscode-charts-purple);
+  --mm-ai-bg: color-mix(in srgb, var(--vscode-charts-purple) 12%, transparent);
+  --mm-ai-bg-2: color-mix(in srgb, var(--vscode-charts-purple) 20%, transparent);
+  --mm-ai-border: color-mix(in srgb, var(--vscode-charts-purple) 50%, transparent);
+  --mm-ai-border-2: color-mix(in srgb, var(--vscode-charts-purple) 35%, transparent);
+  --mm-ai-border-3: var(--vscode-charts-purple);
+
+  --mm-ok: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+  --mm-ok-2: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+  --mm-ok-bg: color-mix(in srgb, var(--vscode-charts-green) 12%, transparent);
+  --mm-ok-border: color-mix(in srgb, var(--vscode-charts-green) 45%, transparent);
+  --mm-ok-3: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+
+  --mm-link: var(--vscode-textLink-foreground);
+  --mm-overlay: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+
+  /* The brand chrome (toolbar band, primary buttons) becomes VS Code's. */
+  --brand: var(--vscode-button-background);
+  /* Also a text colour throughout (AI explanations, hints). */
+  --brand-dark: var(--vscode-foreground);
+  --brand-ink: var(--vscode-foreground);
+  --brand-charcoal: var(--vscode-foreground);
+  --brand-light: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background));
+  --brand-border: var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+
+  /* React Flow's own theme variables. */
+  --xy-background-color: var(--vscode-editor-background);
+  --xy-background-pattern-dots-color: var(--vscode-editorLineNumber-foreground);
+  --xy-edge-stroke: var(--vscode-descriptionForeground);
+  --xy-edge-stroke-selected: var(--vscode-focusBorder);
+  --xy-connectionline-stroke: var(--vscode-focusBorder);
+  --xy-handle-background-color: var(--vscode-descriptionForeground);
+  --xy-handle-border-color: var(--vscode-editor-background);
+  --xy-node-color: var(--vscode-foreground);
+  --xy-controls-button-background-color: var(--vscode-editorWidget-background);
+  --xy-controls-button-background-color-hover: var(--vscode-list-hoverBackground);
+  --xy-controls-button-color: var(--vscode-foreground);
+  --xy-controls-button-color-hover: var(--vscode-foreground);
+  --xy-controls-button-border-color: var(--vscode-widget-border, transparent);
+  --xy-attribution-background-color: transparent;
+  --xy-selection-background-color: color-mix(in srgb, var(--vscode-focusBorder) 15%, transparent);
+  --xy-selection-border: 1px dotted var(--vscode-focusBorder);
+
+  font-family: var(--vscode-font-family);
+  /* VS Code's default webview stylesheet pads the body. */
+  padding: 0;
+}
+
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  color-scheme: dark;
+}
+
+body[class*='vscode-'] button.brand-primary {
+  color: var(--vscode-button-foreground);
+}
+
+body[class*='vscode-'] button.brand-primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+  border-color: var(--vscode-button-hoverBackground);
+}
+
+body[class*='vscode-'] .react-flow__attribution {
+  background: transparent;
+}
+
+body[class*='vscode-'] input:not([type='checkbox']):not([type='radio']),
+body[class*='vscode-'] select,
+body[class*='vscode-'] textarea {
+  color: var(--vscode-input-foreground, var(--mm-fg));
+  background: var(--vscode-input-background, var(--mm-bg));
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+}
+
+body[class*='vscode-'] :focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* High-contrast themes outline controls instead of filling them. */
+body.vscode-high-contrast button,
+body.vscode-high-contrast-light button {
+  border-color: var(--vscode-contrastBorder, var(--mm-border-strong));
 }

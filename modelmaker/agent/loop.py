@@ -639,9 +639,38 @@ class ClaudeCliLoop(AgentLoop):
         return LoopOutcome(final_text=final, error=error)
 
 
+class CopilotLoop(OpenAILoop):
+    """GitHub Copilot's models through the VS Code extension's relay (see
+    llm/copilot_provider.py), which speaks the OpenAI wire format. The
+    relay reports each model's input-token limit in /models, and old tool
+    results are elided to stay under it -- some Copilot models have far
+    smaller windows than the vendor's own API."""
+
+    what = "Copilot relay"
+
+    def __init__(self, model: str | None = None) -> None:
+        from ..llm import copilot_provider
+
+        endpoint = copilot_provider.relay()
+        if endpoint is None:
+            raise RuntimeError(copilot_provider.UNAVAILABLE)
+        self.base_url, self.api_key = endpoint
+        self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", LOCAL_HTTP_TIMEOUT_SECONDS))
+        self.messages = []
+        try:
+            models = copilot_provider.relay_models(self.base_url, self.api_key)
+        except RuntimeError as e:
+            raise LLMUnavailable(str(e)) from e
+        self.model = model or os.environ.get("MODELMAKER_COPILOT_MODEL") or (models[0]["id"] if models else None)
+        if not self.model:
+            raise RuntimeError("the Copilot relay offers no models -- check that GitHub Copilot is signed in in VS Code")
+        limit = next((m.get("max_input_tokens") for m in models if m.get("id") == self.model), None)
+        self.context_tokens = int(limit) if limit else None
+
+
 # ---- factory ---------------------------------------------------------------------------
 
-AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini", "lmstudio")
+AGENT_CAPABLE_PROVIDERS = ("claude_cli", "anthropic", "openai", "gemini", "lmstudio", "copilot")
 
 
 def make_loop(
@@ -666,6 +695,8 @@ def make_loop(
         return GeminiLoop(model, api_key=api_key, base_url=base_url)
     if provider == "lmstudio":
         return LMStudioLoop(model, base_url=base_url)
+    if provider == "copilot":
+        return CopilotLoop(model)
     raise ValueError(
         f"provider {provider!r} can't drive an AI build yet (tool calling isn't wired up for it); "
         f"use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}"

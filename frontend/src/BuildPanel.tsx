@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
 import type { BuildEvent, BuildOut, BuildPlan, BuildStage, GraphOut, LLMSettingsOut } from './types'
+import { host } from './host'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
@@ -27,8 +28,8 @@ const PHASE_LABEL: Record<string, string> = {
   discarded: 'Discarded',
 }
 
-const box: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, marginBottom: 8 }
-const label: React.CSSProperties = { fontSize: 11, color: '#6b7280', fontWeight: 600, marginBottom: 4 }
+const box: React.CSSProperties = { border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8, marginBottom: 8 }
+const label: React.CSSProperties = { fontSize: 11, color: 'var(--mm-muted)', fontWeight: 600, marginBottom: 4 }
 
 type Props = {
   graph: GraphOut
@@ -109,13 +110,13 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
   )
 
   return (
-    <div style={{ width: 380, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', fontSize: 12, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ width: 380, borderLeft: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', fontSize: 12, display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
         <strong style={{ fontSize: 14 }}>Build with AI</strong>
         <span style={{ flex: 1 }} />
         <button onClick={onClose} title="Close (the build keeps going)">×</button>
       </div>
-      {error && <div style={{ ...box, borderColor: '#fecaca', background: '#fef2f2', color: '#b91c1c' }}>{error}</div>}
+      {error && <div style={{ ...box, borderColor: 'var(--mm-error-border)', background: 'var(--mm-error-bg)', color: 'var(--mm-error)' }}>{error}</div>}
 
       {!build || TERMINAL.has(build.phase) ? (
         <>
@@ -138,8 +139,8 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
               </button>
             )}
             <button
-              onClick={() => {
-                if (confirm('Discard this build and put the graph back as it was?')) act(() => api.agentAction('discard'))
+              onClick={async () => {
+                if (await host.confirm('Discard this build and put the graph back as it was?')) act(() => api.agentAction('discard'))
               }}
             >
               Discard
@@ -191,9 +192,9 @@ function StartForm({
       />
       <div style={{ ...label, marginTop: 8 }}>Build from (select blocks on the canvas; shift-click for several)</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minHeight: 22 }}>
-        {anchors.length === 0 && <span style={{ color: '#b45309' }}>Nothing selected -- select your prepared input block(s).</span>}
+        {anchors.length === 0 && <span style={{ color: 'var(--mm-warn-2)' }}>Nothing selected -- select your prepared input block(s).</span>}
         {anchors.map((id) => (
-          <span key={id} style={{ background: '#f3f4f6', borderRadius: 4, padding: '2px 6px' }}>
+          <span key={id} style={{ background: 'var(--mm-bg-hover)', borderRadius: 4, padding: '2px 6px' }}>
             {graph.blocks[id].name}
           </span>
         ))}
@@ -208,7 +209,7 @@ function StartForm({
       </label>
 
       <details style={{ marginTop: 8 }}>
-        <summary style={{ cursor: 'pointer', color: '#4b5563' }}>Models and options</summary>
+        <summary style={{ cursor: 'pointer', color: 'var(--mm-fg-4)' }}>Models and options</summary>
         <LlmPicker label="Plan LLM" value={planLlm} fallback={llmSettings?.agent.plan} capable={capable} onChange={setPlanLlm} />
         <LlmPicker label="Build LLM" value={buildLlm} fallback={llmSettings?.agent.build} capable={capable} onChange={setBuildLlm} />
         <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
@@ -262,7 +263,7 @@ function StartForm({
       >
         {autoBuild ? 'Plan and build' : 'Plan the build'}
       </button>
-      <div style={{ color: '#6b7280', marginTop: 6 }}>
+      <div style={{ color: 'var(--mm-muted)', marginTop: 6 }}>
         {autoBuild
           ? 'The AI outlines the stages, then builds them all straight away -- Stop or Discard at any time, and one Undo reverts the build.'
           : 'The AI outlines the stages first and changes nothing until you approve. It then plans and builds one stage at a time, and stops for you to review each.'}{' '}
@@ -310,15 +311,15 @@ function LlmPicker({
 
 function Header({ build, busy }: { build: BuildOut; busy: boolean }) {
   return (
-    <div style={{ ...box, background: '#f5f3ff', borderColor: '#ddd6fe' }}>
+    <div style={{ ...box, background: 'var(--mm-ai-bg)', borderColor: 'var(--mm-ai-border-2)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {(busy || WORKING.has(build.phase)) && (
-          <span style={{ width: 8, height: 8, borderRadius: 999, background: '#7c3aed', animation: 'mm-pulse 1s ease-in-out infinite' }} />
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: 'var(--mm-ai)', animation: 'mm-pulse 1s ease-in-out infinite' }} />
         )}
         <strong>{PHASE_LABEL[build.phase] ?? build.phase}</strong>
       </div>
-      <div style={{ marginTop: 4, color: '#4b5563' }}>{build.goal}</div>
-      <div style={{ marginTop: 4, color: '#6b7280', fontSize: 11 }}>
+      <div style={{ marginTop: 4, color: 'var(--mm-fg-4)' }}>{build.goal}</div>
+      <div style={{ marginTop: 4, color: 'var(--mm-muted)', fontSize: 11 }}>
         plan: {build.plan_llm.provider}/{build.plan_llm.model ?? 'default'} · build: {build.build_llm.provider}/
         {build.build_llm.model ?? 'default'}
         {build.sample_rows_used ? ` · sample ${build.sample_rows_used.toLocaleString()} rows` : ''}
@@ -339,12 +340,12 @@ function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; ac
   return (
     <div>
       {blocking.map((i) => (
-        <div key={i.code} style={{ ...box, borderColor: '#fecaca', background: '#fef2f2', color: '#991b1b', whiteSpace: 'pre-wrap' }}>
+        <div key={i.code} style={{ ...box, borderColor: 'var(--mm-error-border)', background: 'var(--mm-error-bg)', color: 'var(--mm-error-2)', whiteSpace: 'pre-wrap' }}>
           {i.message}
         </div>
       ))}
       {warnings.map((i) => (
-        <div key={i.code} style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', color: '#92400e', whiteSpace: 'pre-wrap' }}>
+        <div key={i.code} style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)', whiteSpace: 'pre-wrap' }}>
           {i.message}
         </div>
       ))}
@@ -362,7 +363,7 @@ function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; ac
         </button>
       </div>
       {blocking.length === 0 && warnings.length > 0 && (
-        <div style={{ color: '#6b7280', marginBottom: 8 }}>
+        <div style={{ color: 'var(--mm-muted)', marginBottom: 8 }}>
           Proceeding records these warnings in the build's report. Anchors: {build.anchors.map((a) => graph.blocks[a]?.name ?? a).join(', ')}
         </div>
       )}
@@ -381,7 +382,7 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
       {plan ? (
         <PlanView plan={plan} graph={graph} />
       ) : build.pending_question ? (
-        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+        <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
       ) : (
         <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>
       )}
@@ -421,7 +422,7 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
     <div>
       <div style={box}>{plan.summary}</div>
       {!!plan.questions?.length && (
-        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb' }}>
+        <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)' }}>
           <div style={label}>Questions</div>
           <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>
         </div>
@@ -438,21 +439,21 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
           {plan.stages.map((st) => (
             <li key={st.key} style={{ marginBottom: 6 }}>
               <strong>{st.name}</strong>
-              {st.lane && <span style={{ color: '#6b7280' }}> (into lane {graph.lanes[st.lane]?.name ?? st.lane})</span>}
-              <div style={{ color: '#4b5563', whiteSpace: 'pre-wrap' }}>{st.goal}</div>
+              {st.lane && <span style={{ color: 'var(--mm-muted)' }}> (into lane {graph.lanes[st.lane]?.name ?? st.lane})</span>}
+              <div style={{ color: 'var(--mm-fg-4)', whiteSpace: 'pre-wrap' }}>{st.goal}</div>
             </li>
           ))}
         </ol>
-        <div style={{ color: '#6b7280', marginTop: 4 }}>
+        <div style={{ color: 'var(--mm-muted)', marginTop: 4 }}>
           The AI picks each stage's blocks once the stages before it have run, so it can use what they found.
         </div>
       </div>
       {!!plan.changes_to_existing?.length && (
-        <div style={{ ...box, borderColor: '#c4b5fd' }}>
+        <div style={{ ...box, borderColor: 'var(--mm-ai-border)' }}>
           <div style={label}>Changes to your existing blocks</div>
           {plan.changes_to_existing.map((c, i) => (
             <div key={i}>
-              <strong>{graph.blocks[c.block]?.name ?? c.block}</strong>: {c.change} <span style={{ color: '#6b7280' }}>-- {c.why}</span>
+              <strong>{graph.blocks[c.block]?.name ?? c.block}</strong>: {c.change} <span style={{ color: 'var(--mm-muted)' }}>-- {c.why}</span>
             </div>
           ))}
         </div>
@@ -462,10 +463,10 @@ function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
 }
 
 const STAGE_MARK: Record<BuildStage['status'], { mark: string; color: string }> = {
-  done: { mark: '✓', color: '#15803d' },
-  active: { mark: '▶', color: '#7c3aed' },
-  pending: { mark: '○', color: '#9ca3af' },
-  skipped: { mark: '–', color: '#9ca3af' },
+  done: { mark: '✓', color: 'var(--mm-ok)' },
+  active: { mark: '▶', color: 'var(--mm-ai)' },
+  pending: { mark: '○', color: 'var(--mm-faint)' },
+  skipped: { mark: '–', color: 'var(--mm-faint)' },
 }
 
 // Progress through the outline: each stage's status, the current stage's
@@ -486,28 +487,28 @@ function Stages({ build, graph }: { build: BuildOut; graph: GraphOut }) {
         const current = i === build.stage_index
         return (
           <div key={st.key} style={{ marginBottom: 4 }}>
-            <div style={{ color: st.status === 'pending' || st.status === 'skipped' ? '#6b7280' : '#1f2937' }}>
+            <div style={{ color: st.status === 'pending' || st.status === 'skipped' ? 'var(--mm-muted)' : 'var(--mm-fg-2)' }}>
               <span style={{ color, display: 'inline-block', width: 14 }}>{mark}</span>
               <strong>{st.name}</strong>
-              {st.status === 'skipped' && <span style={{ color: '#6b7280' }}> (dropped)</span>}
+              {st.status === 'skipped' && <span style={{ color: 'var(--mm-muted)' }}> (dropped)</span>}
             </div>
             {current && st.status === 'active' && (
               <div style={{ marginLeft: 14 }}>
-                <div style={{ color: '#4b5563' }}>{st.goal}</div>
+                <div style={{ color: 'var(--mm-fg-4)' }}>{st.goal}</div>
                 {st.plan ? (
                   st.plan.steps.map((s) => (
-                    <div key={s.ref} style={{ color: built.has(s.ref) ? '#15803d' : '#6b7280' }}>
-                      {built.has(s.ref) ? '✓' : '·'} <span style={{ color: '#7c3aed' }}>{s.ref}</span> {s.name}{' '}
-                      <span style={{ color: '#9ca3af' }}>({s.category})</span>
+                    <div key={s.ref} style={{ color: built.has(s.ref) ? 'var(--mm-ok)' : 'var(--mm-muted)' }}>
+                      {built.has(s.ref) ? '✓' : '·'} <span style={{ color: 'var(--mm-ai)' }}>{s.ref}</span> {s.name}{' '}
+                      <span style={{ color: 'var(--mm-faint)' }}>({s.category})</span>
                     </div>
                   ))
                 ) : (
-                  <div style={{ color: '#6b7280', fontStyle: 'italic' }}>Planning this stage's blocks…</div>
+                  <div style={{ color: 'var(--mm-muted)', fontStyle: 'italic' }}>Planning this stage's blocks…</div>
                 )}
               </div>
             )}
             {st.summary && !(current && build.phase === 'awaiting_stage_review') && (
-              <details style={{ marginLeft: 14, color: '#4b5563' }}>
+              <details style={{ marginLeft: 14, color: 'var(--mm-fg-4)' }}>
                 <summary style={{ cursor: 'pointer' }}>Summary</summary>
                 <div style={{ whiteSpace: 'pre-wrap' }}>{st.summary}</div>
               </details>
@@ -527,13 +528,13 @@ function StageReview({ build, act, busy }: { build: BuildOut; act: Act; busy: bo
   const next = build.stages[build.stage_index + 1]
   return (
     <div>
-      <div style={{ ...box, borderColor: '#bbf7d0', background: '#f0fdf4' }}>
+      <div style={{ ...box, borderColor: 'var(--mm-ok-border)', background: 'var(--mm-ok-bg)' }}>
         <div style={label}>{stage.name} is built</div>
         <div style={{ whiteSpace: 'pre-wrap' }}>{stage.summary}</div>
       </div>
       <Concerns concerns={(build.concerns ?? []).filter((c) => c.stage === stage.key)} />
       {next && (
-        <div style={{ color: '#4b5563', marginBottom: 6 }}>
+        <div style={{ color: 'var(--mm-fg-4)', marginBottom: 6 }}>
           Next: <strong>{next.name}</strong> -- {next.goal}
         </div>
       )}
@@ -566,7 +567,7 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   const [answer, setAnswer] = useState('')
   return (
     <div>
-      <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
       <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box' }} />
       <button
         className="brand-primary"
@@ -588,8 +589,8 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
 function Concerns({ concerns }: { concerns: BuildOut['concerns'] }) {
   if (!concerns.length) return null
   return (
-    <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', color: '#92400e' }}>
-      <div style={{ ...label, color: '#92400e' }}>Flagged by the app</div>
+    <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)' }}>
+      <div style={{ ...label, color: 'var(--mm-warn)' }}>Flagged by the app</div>
       {concerns.map((c, i) => (
         <div key={i}>⚠ {c.what}</div>
       ))}
@@ -603,11 +604,11 @@ const REPORTED = new Set(['done', 'done_with_errors'])
 function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: GraphOut; onOpenReport: (buildId: string) => void }) {
   const good = build.phase === 'done'
   return (
-    <div style={{ ...box, borderColor: good ? '#bbf7d0' : '#e5e7eb', marginBottom: 12 }}>
+    <div style={{ ...box, borderColor: good ? 'var(--mm-ok-border)' : 'var(--mm-border)', marginBottom: 12 }}>
       <div style={{ fontWeight: 600 }}>
-        Last build: {PHASE_LABEL[build.phase]} <span style={{ color: '#6b7280', fontWeight: 400 }}>-- {build.goal}</span>
+        Last build: {PHASE_LABEL[build.phase]} <span style={{ color: 'var(--mm-muted)', fontWeight: 400 }}>-- {build.goal}</span>
       </div>
-      {build.error && <div style={{ color: '#b91c1c', marginTop: 4 }}>{build.error}</div>}
+      {build.error && <div style={{ color: 'var(--mm-error)', marginTop: 4 }}>{build.error}</div>}
       {build.results.length > 0 && (
         <div style={{ marginTop: 6 }}>
           {build.results.map((r, i) => (
@@ -629,13 +630,13 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
           <div style={label}>Deviations from the plan</div>
           {build.deviations.map((d, i) => (
             <div key={i}>
-              {d.plan_step && <span style={{ color: '#7c3aed' }}>{d.plan_step} </span>}
-              {d.what} -- <span style={{ color: '#6b7280' }}>{d.why}</span>
+              {d.plan_step && <span style={{ color: 'var(--mm-ai)' }}>{d.plan_step} </span>}
+              {d.what} -- <span style={{ color: 'var(--mm-muted)' }}>{d.why}</span>
             </div>
           ))}
         </div>
       )}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', color: '#6b7280', marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', color: 'var(--mm-muted)', marginTop: 8 }}>
         {REPORTED.has(build.phase) && (
           <button onClick={() => onOpenReport(build.id)} title="Results, deviations from the plan, failures and warnings, in full">
             Open full report
@@ -658,15 +659,8 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
 function downloadLog(buildId: string) {
   api
     .agentBuildLog(buildId)
-    .then((log) => {
-      const url = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' }))
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${buildId}.json`
-      a.click()
-      URL.revokeObjectURL(url)
-    })
-    .catch((e) => alert((e as Error).message))
+    .then((log) => host.saveFile(`${buildId}.json`, new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' })))
+    .catch((e) => host.notify((e as Error).message))
 }
 
 // ---- event feed ---------------------------------------------------------------------
@@ -716,9 +710,9 @@ function EventFeed({ events, graph }: { events: BuildEvent[]; graph: GraphOut })
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'nearest' })
   }, [events.length])
-  const color = { ok: '#15803d', err: '#b91c1c', info: '#6b7280', ai: '#1f2937' }
+  const color = { ok: 'var(--mm-ok)', err: 'var(--mm-error)', info: 'var(--mm-muted)', ai: 'var(--mm-fg-2)' }
   return (
-    <div style={{ ...box, flex: 1, minHeight: 120, overflowY: 'auto', fontSize: 11, background: '#fafafa' }}>
+    <div style={{ ...box, flex: 1, minHeight: 120, overflowY: 'auto', fontSize: 11, background: 'var(--mm-bg-subtle-2)' }}>
       {events.map((e) => {
         const d = describeEvent(e, graph)
         if (!d) return null

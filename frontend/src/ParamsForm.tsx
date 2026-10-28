@@ -52,7 +52,7 @@ export function ParamsForm({
         const value = params[f.key]
         return (
           <div key={f.key}>
-            <div style={{ color: '#374151', marginBottom: 2 }}>{f.label}</div>
+            <div style={{ color: 'var(--mm-fg-3)', marginBottom: 2 }}>{f.label}</div>
             {f.kind === 'path' && (
               <div style={{ display: 'flex', gap: 6 }}>
                 <input

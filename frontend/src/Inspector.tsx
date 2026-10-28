@@ -5,6 +5,7 @@ import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
 import { ParamsForm } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
+import { host } from './host'
 
 export function Inspector({
   block,
@@ -133,7 +134,7 @@ export function Inspector({
 
   if (!block) {
     return (
-      <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, color: '#9ca3af', fontSize: 12 }}>
+      <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, color: 'var(--mm-faint)', fontSize: 12 }}>
         Select a block to inspect it.
       </div>
     )
@@ -145,7 +146,7 @@ export function Inspector({
       await fn()
       onChanged()
     } catch (e) {
-      alert((e as Error).message)
+      host.notify((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -206,8 +207,7 @@ export function Inspector({
     setDraftExplanation(draft.explanation)
   }
 
-  const pickPath = (path: string) => {
-    const key = showBrowser?.key ?? 'path'
+  const pickPath = (path: string, key = showBrowser?.key ?? 'path') => {
     setShowBrowser(null)
     let parsed: Record<string, unknown>
     try {
@@ -268,7 +268,7 @@ export function Inspector({
   }
 
   return (
-    <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', fontSize: 12 }}>
+    <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', fontSize: 12 }}>
       {editingName ? (
         <input
           autoFocus
@@ -293,23 +293,23 @@ export function Inspector({
           {block.name}
         </h3>
       )}
-      <div style={{ color: '#6b7280', marginBottom: 8 }}>
+      <div style={{ color: 'var(--mm-muted)', marginBottom: 8 }}>
         {block.category} &middot; {block.block_type} &middot; status:{' '}
-        <strong style={block.status === 'running' ? { color: '#2563eb' } : undefined}>
+        <strong style={block.status === 'running' ? { color: 'var(--mm-link)' } : undefined}>
           {block.status}
           {block.status === 'running' && '…'}
         </strong>
       </div>
 
       {block.provenance && (
-        <div style={{ background: '#f5f3ff', color: '#4c1d95', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+        <div style={{ background: 'var(--mm-ai-bg)', color: 'var(--mm-ai-4)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
           {block.provenance.source === 'agent' ? (
             <>
               <strong>Built by AI</strong> in build {block.provenance.build_id}
               {block.provenance.at && ` on ${new Date(block.provenance.at).toLocaleString()}`}
               {block.provenance.plan_step && ` (plan step ${block.provenance.plan_step})`}.
               {block.provenance.goal && <div style={{ marginTop: 2 }}>Goal: {block.provenance.goal}</div>}
-              <div style={{ marginTop: 2, color: '#6d28d9' }}>
+              <div style={{ marginTop: 2, color: 'var(--mm-ai-2)' }}>
                 Plan LLM {block.provenance.plan_llm} · build LLM {block.provenance.build_llm}
               </div>
               {block.provenance.modified_by_user && <div style={{ marginTop: 2 }}>Changed by a person since.</div>}
@@ -319,7 +319,7 @@ export function Inspector({
           )}
           {(block.provenance.changes ?? []).map((c, i) => (
             <div key={i} style={{ marginTop: 2 }}>
-              {new Date(c.at).toLocaleString()}: {c.change} <span style={{ color: '#6d28d9' }}>({c.build_id})</span>
+              {new Date(c.at).toLocaleString()}: {c.change} <span style={{ color: 'var(--mm-ai-2)' }}>({c.build_id})</span>
             </div>
           ))}
         </div>
@@ -333,14 +333,14 @@ export function Inspector({
       />
 
       {block.status === 'orange' && block.stale_reason && (
-        <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+        <div style={{ background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
           <strong>Stale:</strong> {block.stale_reason}. The output below is from the last run, not the current
           settings.
         </div>
       )}
 
       {block.last_error && (
-        <div style={{ background: '#fef2f2', color: '#b91c1c', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+        <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
           {block.last_error}
         </div>
       )}
@@ -355,7 +355,7 @@ export function Inspector({
         {block.status === 'running' && (
           <button
             onClick={() => run(() => api.cancelRun())}
-            style={{ color: '#b91c1c', borderColor: '#fecaca' }}
+            style={{ color: 'var(--mm-error)', borderColor: 'var(--mm-error-border)' }}
           >
             Stop
           </button>
@@ -370,7 +370,7 @@ export function Inspector({
               onClick={() =>
                 run(async () => {
                   const { changed } = await api.checkChanges(block.id)
-                  alert(changed ? 'Source has changed since last read.' : 'No change detected.')
+                  host.notify(changed ? 'Source has changed since last read.' : 'No change detected.', 'info')
                 })
               }
             >
@@ -385,12 +385,12 @@ export function Inspector({
         )}
         <button
           disabled={busy}
-          onClick={() => {
-            if (confirm(`Delete block "${block.name}"? Its wires go with it. This can't be undone.`)) {
+          onClick={async () => {
+            if (await host.confirm(`Delete block "${block.name}"? Its wires go with it. This can't be undone.`)) {
               run(() => api.deleteBlock(block.id))
             }
           }}
-          style={{ marginLeft: 'auto', color: '#b91c1c', borderColor: '#fecaca' }}
+          style={{ marginLeft: 'auto', color: 'var(--mm-error)', borderColor: 'var(--mm-error-border)' }}
         >
           Delete block
         </button>
@@ -404,7 +404,7 @@ export function Inspector({
               <img
                 src={api.imageUrl(block.id, p.name, block.last_attempt_at)}
                 alt={`${block.name} (${p.name})`}
-                style={{ maxWidth: '100%', border: '1px solid #e5e7eb', borderRadius: 6 }}
+                style={{ maxWidth: '100%', border: '1px solid var(--mm-border)', borderRadius: 6 }}
               />
             </div>
           ))}
@@ -423,13 +423,17 @@ export function Inspector({
               setParamsText={setParamsText}
               columns={inputColumns}
               disabled={busy}
-              onBrowse={(key, ext) => setShowBrowser({ key, ext })}
+              onBrowse={(key, ext) => {
+                // A native picker where the host has one (VS Code), else the in-app browser.
+                if (host.pickPath) host.pickPath({ ext: ext || undefined }).then((path) => path && pickPath(path, key))
+                else setShowBrowser({ key, ext })
+              }}
             />
           )}
           {showParamsJson && (
             <>
               {formFields.length > 0 && (
-                <div style={{ color: '#9ca3af', margin: '8px 0 2px' }}>
+                <div style={{ color: 'var(--mm-faint)', margin: '8px 0 2px' }}>
                   {block.form ? `Other params (JSON): ${block.form.other_params.join(', ')}` : 'Other params (JSON)'}
                 </div>
               )}
@@ -441,7 +445,7 @@ export function Inspector({
               />
             </>
           )}
-          {paramsError && <div style={{ color: '#b91c1c' }}>{paramsError}</div>}
+          {paramsError && <div style={{ color: 'var(--mm-error)' }}>{paramsError}</div>}
           <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
             <button disabled={busy} onClick={saveParams}>
               Save params
@@ -456,7 +460,7 @@ export function Inspector({
       {block.inputs.some((p) => p.type === 'dataframe') && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Group by</div>
-          <div style={{ color: '#9ca3af', marginBottom: 4 }}>
+          <div style={{ color: 'var(--mm-faint)', marginBottom: 4 }}>
             Run this block once per distinct value of a column instead of once overall (e.g. Gini per region) --
             each group runs in its own isolated process, up to "Max parallel" at a time.
           </div>
@@ -496,7 +500,7 @@ export function Inspector({
       <div style={{ marginBottom: 12, background: 'var(--brand-light)', border: '1px solid var(--brand-border)', borderRadius: 6, padding: 8 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
           Draft with AI
-          {provider && <span style={{ fontWeight: 400, color: '#9ca3af' }}> (via {provider})</span>}
+          {provider && <span style={{ fontWeight: 400, color: 'var(--mm-faint)' }}> (via {provider})</span>}
         </div>
         <textarea
           ref={instructionRef}
@@ -533,14 +537,14 @@ export function Inspector({
                 : `Still waiting (${draftElapsed}s)...`}
           </div>
         )}
-        <div style={{ color: '#9ca3af', marginTop: 4 }}>
+        <div style={{ color: 'var(--mm-faint)', marginTop: 4 }}>
           AI chooses values for this block's params here. To change its code, use the block library
           {block.definition_info?.source === 'library' ? ' (Fix / Edit with AI)' : ' (Duplicate to library)'}.
         </div>
         {draftExplanation && (
           <div style={{ marginTop: 6, color: 'var(--brand-dark)' }}>
             {draftExplanation}
-            <div style={{ color: '#9ca3af', marginTop: 2 }}>Draft filled into Params above -- review, then Save params to apply.</div>
+            <div style={{ color: 'var(--mm-faint)', marginTop: 2 }}>Draft filled into Params above -- review, then Save params to apply.</div>
           </div>
         )}
       </div>
@@ -549,7 +553,7 @@ export function Inspector({
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Code</div>
           <CodeEditor value={block.source} readOnly />
-          <div style={{ color: '#9ca3af', marginTop: 2 }}>
+          <div style={{ color: 'var(--mm-faint)', marginTop: 2 }}>
             {block.definition_info?.source === 'library'
               ? "This block's own copy of its library code. Edit it in the library, then Update the block."
               : 'Built-in code -- configure this block via its params above, or duplicate it to your library to change it.'}
@@ -567,7 +571,7 @@ export function Inspector({
         />
       )}
 
-      {showBrowser && <FileBrowser ext={showBrowser.ext || undefined} onPick={pickPath} onClose={() => setShowBrowser(null)} />}
+      {showBrowser && <FileBrowser ext={showBrowser.ext || undefined} onPick={(path) => pickPath(path)} onClose={() => setShowBrowser(null)} />}
     </div>
   )
 }
@@ -592,7 +596,7 @@ function DefinitionBanner({
   if (info.source === 'builtin') {
     if (!info.changed_since_saved) return null
     return (
-      <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+      <div style={{ background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
         <strong>Built-in changed since this model was saved.</strong> It runs the installed version.{' '}
         <button style={{ fontSize: 11 }} onClick={onOpenUpdate}>
           Review &amp; accept
@@ -630,7 +634,7 @@ function DefinitionBanner({
         )}
       </div>
       {!info.in_library && (
-        <div style={{ color: '#6b7280', marginTop: 2 }}>
+        <div style={{ color: 'var(--mm-muted)', marginTop: 2 }}>
           It runs its own embedded copy, so the model still works; its library file was moved or deleted.
         </div>
       )}
@@ -659,14 +663,14 @@ function MetricView({ name, value }: { name: string; value: unknown }) {
           <tbody>
             {entries.map(([k, v]) => (
               <tr key={k}>
-                <td style={{ padding: '2px 8px 2px 0', color: '#6b7280', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{k}</td>
+                <td style={{ padding: '2px 8px 2px 0', color: 'var(--mm-muted)', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{k}</td>
                 <td style={{ padding: '2px 0', wordBreak: 'break-word' }}>{formatMetricScalar(v)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       ) : (
-        <pre style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, fontSize: 11, margin: 0 }}>
+        <pre style={{ background: 'var(--mm-bg-subtle)', border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8, fontSize: 11, margin: 0 }}>
           {JSON.stringify(value, null, 2)}
         </pre>
       )}

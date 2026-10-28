@@ -1,5 +1,6 @@
 from .base import LLM_PROVIDER_REGISTRY, ColumnInfo, DraftContext, DraftResult, LLMProvider, get_provider, register_provider
 from .claude_cli_provider import ClaudeCliProvider
+from .copilot_provider import CopilotProvider
 from .gemini_provider import GeminiProvider
 from .lmstudio_provider import LMStudioProvider
 from .openai_provider import OpenAIProvider
@@ -15,6 +16,7 @@ __all__ = [
     "register_provider",
     "StubProvider",
     "ClaudeCliProvider",
+    "CopilotProvider",
     "LMStudioProvider",
     "OpenAIProvider",
     "GeminiProvider",
