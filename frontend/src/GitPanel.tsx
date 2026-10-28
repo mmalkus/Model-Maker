@@ -54,8 +54,8 @@ export function GitPanel({
         top: '100%',
         right: 0,
         marginTop: 4,
-        background: '#fff',
-        border: '1px solid #d1d5db',
+        background: 'var(--mm-bg)',
+        border: '1px solid var(--mm-border-strong)',
         borderRadius: 8,
         padding: 12,
         zIndex: 50,
@@ -70,22 +70,22 @@ export function GitPanel({
       </div>
 
       {!projectPath ? (
-        <div style={{ color: '#9ca3af' }}>Save the project first -- git works on the project's own folder.</div>
+        <div style={{ color: 'var(--mm-faint)' }}>Save the project first -- git works on the project's own folder.</div>
       ) : !status ? (
-        <div style={{ color: '#9ca3af' }}>Loading...</div>
+        <div style={{ color: 'var(--mm-faint)' }}>Loading...</div>
       ) : !status.is_repo ? (
         <>
-          <div style={{ color: '#9ca3af', marginBottom: 8 }}>This project's folder isn't a git repo yet.</div>
+          <div style={{ color: 'var(--mm-faint)', marginBottom: 8 }}>This project's folder isn't a git repo yet.</div>
           <button disabled={busy} onClick={doInit}>
             Initialize repo
           </button>
         </>
       ) : (
         <>
-          <div style={{ marginBottom: 8, color: '#374151' }}>
+          <div style={{ marginBottom: 8, color: 'var(--mm-fg-3)' }}>
             Branch <strong>{status.branch ?? '(none)'}</strong>
             {status.remote && (status.ahead > 0 || status.behind > 0) && (
-              <span style={{ color: '#9ca3af' }}>
+              <span style={{ color: 'var(--mm-faint)' }}>
                 {' '}
                 ({status.ahead > 0 ? `${status.ahead} ahead` : ''}
                 {status.ahead > 0 && status.behind > 0 ? ', ' : ''}
@@ -95,7 +95,7 @@ export function GitPanel({
           </div>
 
           <label style={{ display: 'block', marginBottom: 8 }}>
-            <div style={{ color: '#6b7280', marginBottom: 2 }}>Remote (GitHub) URL</div>
+            <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>Remote (GitHub) URL</div>
             <div style={{ display: 'flex', gap: 6 }}>
               <input
                 value={remoteInput}
@@ -112,14 +112,14 @@ export function GitPanel({
           </label>
 
           <div style={{ marginBottom: 8 }}>
-            <div style={{ color: '#6b7280', marginBottom: 2 }}>
+            <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>
               Changes {status.changes.length > 0 ? `(${status.changes.length})` : '(none)'}
             </div>
             {status.changes.length > 0 && (
-              <div style={{ maxHeight: 100, overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: 4, padding: 4 }}>
+              <div style={{ maxHeight: 100, overflowY: 'auto', border: '1px solid var(--mm-border)', borderRadius: 4, padding: 4 }}>
                 {status.changes.map((c) => (
                   <div key={c.path} style={{ fontFamily: 'monospace', fontSize: 11, display: 'flex', gap: 6 }}>
-                    <span style={{ color: '#9ca3af', width: 20 }}>{c.status}</span>
+                    <span style={{ color: 'var(--mm-faint)', width: 20 }}>{c.status}</span>
                     <span>{c.path}</span>
                   </div>
                 ))}
@@ -128,7 +128,7 @@ export function GitPanel({
           </div>
 
           <label style={{ display: 'block', marginBottom: 8 }}>
-            <div style={{ color: '#6b7280', marginBottom: 2 }}>Commit message</div>
+            <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>Commit message</div>
             <div style={{ display: 'flex', gap: 6 }}>
               <input
                 value={message}
@@ -155,7 +155,7 @@ export function GitPanel({
         </>
       )}
 
-      {error && <div style={{ color: '#b91c1c', marginTop: 8 }}>{error}</div>}
+      {error && <div style={{ color: 'var(--mm-error)', marginTop: 8 }}>{error}</div>}
     </div>
   )
 }

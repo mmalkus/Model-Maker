@@ -451,7 +451,7 @@ function AppInner() {
           sourceHandle: !built && refs.has(inp.from) ? GHOST_OUT : inp.from_port,
           target: `ghost_${s.ref}`,
           targetHandle: GHOST_IN,
-          style: { stroke: '#a78bfa', strokeDasharray: '6 4' },
+          style: { stroke: 'var(--mm-ai-border-3)', strokeDasharray: '6 4' },
           selectable: false as const,
         }
       }),
@@ -663,9 +663,9 @@ function AppInner() {
             alignItems: 'center',
             gap: 8,
             padding: '5px 12px',
-            background: '#fef3c7',
-            borderBottom: '1px solid #fde68a',
-            color: '#92400e',
+            background: 'var(--mm-warn-bg-2)',
+            borderBottom: '1px solid var(--mm-warn-border)',
+            color: 'var(--mm-warn)',
             fontSize: 12,
           }}
         >
@@ -757,7 +757,7 @@ function AppInner() {
               {canvasLocked && (
                 <span
                   title="While the AI builds, the graph is read-only for you -- stop the build to edit"
-                  style={{ background: '#ede9fe', color: '#5b21b6', borderRadius: 4, padding: '3px 8px', fontSize: 12 }}
+                  style={{ background: 'var(--mm-ai-bg-2)', color: 'var(--mm-ai-3)', borderRadius: 4, padding: '3px 8px', fontSize: 12 }}
                 >
                   AI is editing -- canvas read-only
                 </span>
@@ -776,8 +776,8 @@ function AppInner() {
                 display: 'flex',
                 gap: 10,
                 fontSize: 11,
-                color: 'var(--brand-charcoal, #6b7280)',
-                background: 'rgba(255,255,255,0.85)',
+                color: 'var(--brand-charcoal, var(--mm-muted))',
+                background: 'var(--mm-overlay)',
                 padding: '3px 8px',
                 borderRadius: 4,
               }}

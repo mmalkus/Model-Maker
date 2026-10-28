@@ -83,8 +83,8 @@ export function DataModal({
       style={{
         position: 'fixed',
         inset: 24,
-        background: '#fff',
-        border: '1px solid #d1d5db',
+        background: 'var(--mm-bg)',
+        border: '1px solid var(--mm-border-strong)',
         borderRadius: 8,
         padding: 16,
         zIndex: 50,
@@ -97,7 +97,7 @@ export function DataModal({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
         <div>
           <strong style={{ fontSize: 14 }}>{blockName}</strong>
-          <span style={{ color: '#6b7280', fontSize: 12, marginLeft: 8 }}>
+          <span style={{ color: 'var(--mm-muted)', fontSize: 12, marginLeft: 8 }}>
             {preview.row_count} rows shown &middot; lineage: {preview.lineage.join(' -> ') || '(none)'}
           </span>
         </div>
@@ -124,7 +124,7 @@ export function DataModal({
         </div>
       </div>
       {analysis && (
-        <div style={{ marginBottom: 8, border: '1px solid #e5e7eb', borderRadius: 6, background: '#f9fafb' }}>
+        <div style={{ marginBottom: 8, border: '1px solid var(--mm-border)', borderRadius: 6, background: 'var(--mm-bg-subtle)' }}>
           <button
             onClick={() => setShowDocument((s) => !s)}
             style={{
@@ -139,7 +139,7 @@ export function DataModal({
           >
             {showDocument ? '▾' : '▸'} Data analysis
             {analysis.documentPath && (
-              <span style={{ fontWeight: 400, color: '#6b7280' }}> — saved to {analysis.documentPath}</span>
+              <span style={{ fontWeight: 400, color: 'var(--mm-muted)' }}> — saved to {analysis.documentPath}</span>
             )}
           </button>
           {showDocument && (
@@ -159,9 +159,9 @@ export function DataModal({
           )}
         </div>
       )}
-      <div style={{ overflow: 'auto', flex: 1, border: '1px solid #e5e7eb', borderRadius: 6 }}>
+      <div style={{ overflow: 'auto', flex: 1, border: '1px solid var(--mm-border)', borderRadius: 6 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>
-          <thead style={{ position: 'sticky', top: 0, background: '#f9fafb', zIndex: 1 }}>
+          <thead style={{ position: 'sticky', top: 0, background: 'var(--mm-bg-subtle)', zIndex: 1 }}>
             <tr>
               {preview.columns.map((c) => {
                 const s = preview.summary?.[c.name]
@@ -169,16 +169,16 @@ export function DataModal({
                 const displayedRole = pending ?? c.role
                 const displayedTags = pendingTags ? (pendingTags[c.name] ?? []) : c.tags
                 return (
-                  <th key={c.name} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid #e5e7eb' }}>
+                  <th key={c.name} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid var(--mm-border)' }}>
                     {c.name}
-                    <div style={{ fontWeight: 400, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <div style={{ fontWeight: 400, color: 'var(--mm-faint)', display: 'flex', alignItems: 'center', gap: 2 }}>
                       {c.dtype} /
                       {blockId && c.role !== 'predicted' ? (
                         <select
                           value={displayedRole}
                           onChange={(e) => setRole(c.name, e.target.value)}
                           title="Tag this column's role"
-                          style={{ fontSize: 10, color: '#9ca3af', border: 'none', background: 'transparent', padding: 0 }}
+                          style={{ fontSize: 10, color: 'var(--mm-faint)', border: 'none', background: 'transparent', padding: 0 }}
                         >
                           <option value="unassigned">{ROLE_LABELS.unassigned}</option>
                           {ASSIGNABLE_ROLES.map((r) => (
@@ -192,13 +192,13 @@ export function DataModal({
                       )}
                     </div>
                     {pending !== undefined && pending !== c.role && (
-                      <div style={{ fontWeight: 400, color: 'var(--brand-dark, #b45309)' }}>re-run to apply</div>
+                      <div style={{ fontWeight: 400, color: 'var(--brand-dark, var(--mm-warn-2))' }}>re-run to apply</div>
                     )}
                     {displayedTags.length > 0 && (
-                      <div style={{ fontWeight: 400, color: '#7c3aed', fontSize: 10 }}>{displayedTags.join(', ')}</div>
+                      <div style={{ fontWeight: 400, color: 'var(--mm-ai)', fontSize: 10 }}>{displayedTags.join(', ')}</div>
                     )}
                     {s && (
-                      <div style={{ fontWeight: 400, color: '#9ca3af' }}>
+                      <div style={{ fontWeight: 400, color: 'var(--mm-faint)' }}>
                         {s.null_count > 0 && `${s.null_count} null `}
                         {s.n_unique != null && `${s.n_unique} unique`}
                         {s.mean != null && ` · mean ${s.mean.toFixed(2)}`}
@@ -213,7 +213,7 @@ export function DataModal({
             {preview.rows.map((row, i) => (
               <tr key={i}>
                 {preview.columns.map((c) => (
-                  <td key={c.name} style={{ padding: 6, borderBottom: '1px solid #f3f4f6', whiteSpace: 'nowrap' }}>
+                  <td key={c.name} style={{ padding: 6, borderBottom: '1px solid var(--mm-bg-hover)', whiteSpace: 'nowrap' }}>
                     {String(row[c.name])}
                   </td>
                 ))}

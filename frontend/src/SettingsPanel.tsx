@@ -90,8 +90,8 @@ export function SettingsPanel({
         top: '100%',
         right: 0,
         marginTop: 4,
-        background: '#fff',
-        border: '1px solid #d1d5db',
+        background: 'var(--mm-bg)',
+        border: '1px solid var(--mm-border-strong)',
         borderRadius: 8,
         padding: 12,
         zIndex: 50,
@@ -105,11 +105,11 @@ export function SettingsPanel({
       </div>
 
       {!settings ? (
-        <div style={{ color: '#9ca3af', fontSize: 12 }}>Loading...</div>
+        <div style={{ color: 'var(--mm-faint)', fontSize: 12 }}>Loading...</div>
       ) : (
         <>
           <label style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
-            <div style={{ color: '#6b7280', marginBottom: 2 }}>AI provider (used to draft/fix block code)</div>
+            <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>AI provider (used to draft/fix block code)</div>
             <select
               value={provider}
               onChange={(e) => update({ active_provider: e.target.value })}
@@ -124,12 +124,12 @@ export function SettingsPanel({
                 </option>
               ))}
             </select>
-            {PROVIDER_HELP[provider] && <div style={{ color: '#9ca3af', marginTop: 2 }}>{PROVIDER_HELP[provider]}</div>}
+            {PROVIDER_HELP[provider] && <div style={{ color: 'var(--mm-faint)', marginTop: 2 }}>{PROVIDER_HELP[provider]}</div>}
           </label>
 
           {BASE_URL_PROVIDERS.has(provider) && (
             <label style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
-              <div style={{ color: '#6b7280', marginBottom: 2 }}>
+              <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>
                 {provider === 'openai' ? 'Base URL (optional -- for OpenAI-compatible endpoints)' : 'Base URL (address:port)'}
               </div>
               <input
@@ -150,7 +150,7 @@ export function SettingsPanel({
 
           {KEY_PROVIDERS.has(provider) && (
             <label style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
-              <div style={{ color: '#6b7280', marginBottom: 2 }}>API key</div>
+              <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>API key</div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
                   type="password"
@@ -175,7 +175,7 @@ export function SettingsPanel({
                   </button>
                 )}
               </div>
-              <div style={{ color: '#9ca3af', marginTop: 2 }}>
+              <div style={{ color: 'var(--mm-faint)', marginTop: 2 }}>
                 Kept in server memory only for this run -- never written to disk, and never sent back to the browser.
               </div>
             </label>
@@ -183,7 +183,7 @@ export function SettingsPanel({
 
           {provider && provider !== 'stub' && (
             <label style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
-              <div style={{ color: '#6b7280', marginBottom: 2 }}>
+              <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>
                 Model{provider === 'lmstudio' ? ' (blank = auto-detect loaded model)' : ''}
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
@@ -229,7 +229,7 @@ export function SettingsPanel({
                   ))}
                 </select>
               )}
-              {modelsError && <div style={{ color: '#b91c1c', marginTop: 2 }}>{modelsError}</div>}
+              {modelsError && <div style={{ color: 'var(--mm-error)', marginTop: 2 }}>{modelsError}</div>}
             </label>
           )}
 
@@ -242,16 +242,16 @@ export function SettingsPanel({
             />
             <span>
               Include Polars reference examples in prompts
-              <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+              <div style={{ color: 'var(--mm-faint)', fontWeight: 400 }}>
                 Helps smaller/local models get exact Polars syntax right, at the cost of extra tokens per call.
               </div>
             </span>
           </label>
 
           {settings.agent && (
-            <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 10, paddingTop: 8, fontSize: 12 }}>
+            <div style={{ borderTop: '1px solid var(--mm-border)', marginTop: 10, paddingTop: 8, fontSize: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 2 }}>AI builder</div>
-              <div style={{ color: '#9ca3af', marginBottom: 6 }}>
+              <div style={{ color: 'var(--mm-faint)', marginBottom: 6 }}>
                 Which LLMs plan and build models with "Build with AI". Planning is short but benefits from the strongest
                 model; building is many tool calls. Each can be overridden per build.
               </div>
@@ -280,7 +280,7 @@ export function SettingsPanel({
                 />
                 <span>
                   Small context
-                  <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+                  <div style={{ color: 'var(--mm-faint)', fontWeight: 400 }}>
                     Start each build stage in a fresh conversation, carrying only the outline, what's built and the
                     decisions so far. For models with a small context window (e.g. local models).
                   </div>
@@ -295,7 +295,7 @@ export function SettingsPanel({
                 />
                 <span>
                   Decision hints
-                  <div style={{ color: '#9ca3af', fontWeight: 400 }}>
+                  <div style={{ color: 'var(--mm-faint)', fontWeight: 400 }}>
                     Add a short, rule-based "what this means and what to do next" to the build's results (binning,
                     coefficients, Gini, PSI...), so the model reads a recommendation rather than a statistics table.
                     For small models.
@@ -328,7 +328,7 @@ function AgentLlmRow({
   const [model, setModel] = useState(choice.model_set ? (choice.model ?? '') : '')
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
-      <span style={{ width: 36, color: '#6b7280' }}>{label}</span>
+      <span style={{ width: 36, color: 'var(--mm-muted)' }}>{label}</span>
       <select
         value={choice.provider_set ? choice.provider : ''}
         disabled={disabled}

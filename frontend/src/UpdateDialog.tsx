@@ -32,24 +32,24 @@ export function UpdateDialog({ block, onClose, onApplied }: { block: BlockOut; o
   }
 
   const item = (ok: boolean | 'warn', text: string) => (
-    <li style={{ color: ok === true ? '#3f6259' : ok === 'warn' ? '#92400e' : '#b91c1c' }}>{text}</li>
+    <li style={{ color: ok === true ? 'var(--mm-ok-3)' : ok === 'warn' ? 'var(--mm-warn)' : 'var(--mm-error)' }}>{text}</li>
   )
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,35,64,0.35)', zIndex: 55, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div role="dialog" aria-label="Update block" style={{ width: 760, maxHeight: '85vh', background: '#fff', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div role="dialog" aria-label="Update block" style={{ width: 760, maxHeight: '85vh', background: 'var(--mm-bg)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '14px 18px 8px' }}>
           <h2 style={{ margin: 0, fontFamily: 'var(--font-heading)', fontSize: 19, color: 'var(--brand-ink)' }}>
             {builtin ? `Accept the changed built-in: ${block.category}` : `Update ${block.name}`}
           </h2>
           {preview && (
-            <div style={{ color: '#6b7280', fontSize: 12 }}>
+            <div style={{ color: 'var(--mm-muted)', fontSize: 12 }}>
               v{preview.from_version} → v{preview.to_version}
               {builtin && ' · the installed Model-Maker changed this block since the model was saved'}
             </div>
           )}
         </div>
-        {error && <div style={{ background: '#fef2f2', color: '#b91c1c', padding: '6px 18px', fontSize: 12 }}>{error}</div>}
+        {error && <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: '6px 18px', fontSize: 12 }}>{error}</div>}
         {preview && (
           <div style={{ padding: '0 18px', overflowY: 'auto', fontSize: 12 }}>
             <ul style={{ margin: '8px 0', paddingLeft: 18 }}>
@@ -63,19 +63,19 @@ export function UpdateDialog({ block, onClose, onApplied }: { block: BlockOut; o
               {preview.meta_changed && !preview.code_diff && item('warn', 'Its description (ports, form or metadata rules) changed')}
             </ul>
             {preview.code_diff ? (
-              <pre style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, margin: '0 0 12px', overflowX: 'auto' }}>
+              <pre style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, background: 'var(--mm-bg-subtle)', border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8, margin: '0 0 12px', overflowX: 'auto' }}>
                 {preview.code_diff.split('\n').map((l, i) => (
-                  <div key={i} style={{ color: l.startsWith('+') ? '#166534' : l.startsWith('-') ? '#b91c1c' : undefined }}>
+                  <div key={i} style={{ color: l.startsWith('+') ? 'var(--mm-ok-2)' : l.startsWith('-') ? 'var(--mm-error)' : undefined }}>
                     {l}
                   </div>
                 ))}
               </pre>
             ) : (
-              <div style={{ color: '#6b7280', marginBottom: 12 }}>The code is unchanged.</div>
+              <div style={{ color: 'var(--mm-muted)', marginBottom: 12 }}>The code is unchanged.</div>
             )}
           </div>
         )}
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '12px 18px', borderTop: '1px solid #e5e7eb', background: '#fcfbf8' }}>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '12px 18px', borderTop: '1px solid var(--mm-border)', background: 'var(--mm-bg-subtle-3)' }}>
           <button onClick={onClose}>Cancel</button>
           <button className="brand-primary" disabled={!preview || busy} onClick={apply}>
             {builtin ? 'Accept' : `Update to v${preview?.to_version ?? ''}`}

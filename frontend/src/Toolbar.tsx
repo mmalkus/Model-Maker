@@ -189,7 +189,7 @@ export function Toolbar({
       {running && (
         <button
           onClick={() => run(() => api.cancelRun())}
-          style={{ color: '#b91c1c', borderColor: '#fecaca', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+          style={{ color: 'var(--mm-error)', borderColor: 'var(--mm-error-border)', display: 'inline-flex', alignItems: 'center', gap: 5 }}
           title="Stop the run in progress -- the block currently executing is interrupted immediately"
         >
           <span
@@ -275,7 +275,7 @@ export function Toolbar({
           </button>
         </>
       )}
-      <span style={{ fontSize: 12, color: dirty ? '#92400e' : '#6b7280' }}>
+      <span style={{ fontSize: 12, color: dirty ? 'var(--mm-warn)' : 'var(--mm-muted)' }}>
         {projectPath ?? '(unsaved)'}
         {dirty && (
           <span title="Edits not yet written to the project file (always snapshotted for crash recovery; autosaves shortly if the project has a save location)">
@@ -284,13 +284,13 @@ export function Toolbar({
           </span>
         )}
         {!dirty && autosave.state === 'saved' && (
-          <span title="Automatically written to the project file after your last edit" style={{ color: '#6b7280' }}>
+          <span title="Automatically written to the project file after your last edit" style={{ color: 'var(--mm-muted)' }}>
             {' '}
             · autosaved {new Date(autosave.at).toLocaleTimeString()}
           </span>
         )}
         {autosave.state === 'error' && (
-          <span title={autosave.message} style={{ color: '#b91c1c' }}>
+          <span title={autosave.message} style={{ color: 'var(--mm-error)' }}>
             {' '}
             · autosave failed
           </span>
@@ -323,8 +323,8 @@ export function Toolbar({
           style={{
             position: 'fixed',
             inset: 40,
-            background: '#fff',
-            border: '1px solid #d1d5db',
+            background: 'var(--mm-bg)',
+            border: '1px solid var(--mm-border-strong)',
             borderRadius: 8,
             padding: 16,
             zIndex: 50,

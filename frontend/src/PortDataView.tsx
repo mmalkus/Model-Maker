@@ -160,7 +160,7 @@ export function PortDataView({
       {portType === 'dataframe' &&
         (preview ? (
           <>
-            <div style={{ color: '#6b7280', marginBottom: 8 }}>
+            <div style={{ color: 'var(--mm-muted)', marginBottom: 8 }}>
               {preview.row_count} rows &middot; lineage: {preview.lineage.join(' -> ') || '(none)'}
             </div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
@@ -182,7 +182,7 @@ export function PortDataView({
             </div>
 
             {artifact && (
-              <div style={{ marginBottom: 8, border: '1px solid #e5e7eb', borderRadius: 6, background: '#f9fafb' }}>
+              <div style={{ marginBottom: 8, border: '1px solid var(--mm-border)', borderRadius: 6, background: 'var(--mm-bg-subtle)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 6px 0' }}>
                   <button
                     onClick={() => setShowDocument((s) => !s)}
@@ -218,16 +218,16 @@ export function PortDataView({
                       </span>
                     )}
                   </button>
-                  <button onClick={deleteArtifact} style={{ fontSize: 10, color: '#b91c1c' }}>
+                  <button onClick={deleteArtifact} style={{ fontSize: 10, color: 'var(--mm-error)' }}>
                     Delete
                   </button>
                 </div>
                 {artifact.stale && (
-                  <div style={{ padding: '0 6px', fontSize: 10, color: 'var(--brand-dark, #b45309)' }}>
+                  <div style={{ padding: '0 6px', fontSize: 10, color: 'var(--brand-dark, var(--mm-warn-2))' }}>
                     source data has changed since this was written
                   </div>
                 )}
-                {artifactError && <div style={{ padding: '0 6px', fontSize: 10, color: '#b91c1c' }}>{artifactError}</div>}
+                {artifactError && <div style={{ padding: '0 6px', fontSize: 10, color: 'var(--mm-error)' }}>{artifactError}</div>}
                 {showDocument && (
                   <pre
                     style={{ margin: 0, padding: '4px 6px 6px', fontSize: 11, whiteSpace: 'pre-wrap', fontFamily: 'inherit', maxHeight: 200, overflow: 'auto' }}
@@ -238,7 +238,7 @@ export function PortDataView({
               </div>
             )}
 
-            <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, marginBottom: 8 }}>
+            <div style={{ border: '1px solid var(--mm-border)', borderRadius: 6, marginBottom: 8 }}>
               {preview.columns.map((c, i) => {
                 const pending = pendingRoles[c.name]
                 const displayedRole = pending ?? c.role
@@ -251,14 +251,14 @@ export function PortDataView({
                       alignItems: 'center',
                       gap: 6,
                       padding: '4px 6px',
-                      borderBottom: i < preview.columns.length - 1 ? '1px solid #f3f4f6' : undefined,
+                      borderBottom: i < preview.columns.length - 1 ? '1px solid var(--mm-bg-hover)' : undefined,
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       <span title={c.name}>{c.name}</span>
-                      <span style={{ color: '#9ca3af' }}> ({c.dtype})</span>
+                      <span style={{ color: 'var(--mm-faint)' }}> ({c.dtype})</span>
                       {displayedTags.length > 0 && (
-                        <div style={{ color: '#7c3aed', fontSize: 10 }}>{displayedTags.join(', ')}</div>
+                        <div style={{ color: 'var(--mm-ai)', fontSize: 10 }}>{displayedTags.join(', ')}</div>
                       )}
                     </div>
                     {c.role !== 'predicted' ? (
@@ -276,7 +276,7 @@ export function PortDataView({
                         ))}
                       </select>
                     ) : (
-                      <span style={{ color: '#9ca3af', fontSize: 11 }}>{c.role}</span>
+                      <span style={{ color: 'var(--mm-faint)', fontSize: 11 }}>{c.role}</span>
                     )}
                   </div>
                 )
@@ -284,21 +284,21 @@ export function PortDataView({
             </div>
           </>
         ) : (
-          <div style={{ color: '#9ca3af' }}>{error ?? 'Loading...'}</div>
+          <div style={{ color: 'var(--mm-faint)' }}>{error ?? 'Loading...'}</div>
         ))}
 
       {portType === 'image' && (
         <img
           src={api.imageUrl(blockId, port)}
           alt={title}
-          style={{ maxWidth: '100%', border: '1px solid #e5e7eb', borderRadius: 6 }}
+          style={{ maxWidth: '100%', border: '1px solid var(--mm-border)', borderRadius: 6 }}
         />
       )}
 
       {portType !== 'dataframe' && portType !== 'image' && (
         <div>
           {error ? (
-            <span style={{ color: '#b91c1c' }}>{error}</span>
+            <span style={{ color: 'var(--mm-error)' }}>{error}</span>
           ) : (
             <pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap' }}>
               {value ? JSON.stringify(value.v, null, 2) : 'Loading...'}

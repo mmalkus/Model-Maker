@@ -32,7 +32,7 @@ export function PortInspector({
 
   if (!block) {
     return (
-      <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, color: '#9ca3af', fontSize: 12 }}>
+      <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, color: 'var(--mm-faint)', fontSize: 12 }}>
         This block no longer exists.
       </div>
     )
@@ -47,7 +47,7 @@ export function PortInspector({
   }
 
   return (
-    <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', fontSize: 12 }}>
+    <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', fontSize: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
         {editing ? (
           <input
@@ -76,7 +76,7 @@ export function PortInspector({
         )}
         <button onClick={onClose}>Close</button>
       </div>
-      <div style={{ color: '#6b7280', marginBottom: 12 }}>
+      <div style={{ color: 'var(--mm-muted)', marginBottom: 12 }}>
         {block.name} :: {port}
       </div>
 
