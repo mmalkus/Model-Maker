@@ -26,6 +26,7 @@ from .compiler import CompileError, compile_graph
 from .forms import block_form
 from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
 from .llm import claude_cli_provider as _claude_cli_provider
+from .llm import copilot_provider as _copilot_provider
 from .llm import gemini_provider as _gemini_provider
 from .llm import lmstudio_provider as _lmstudio_provider
 from .llm import openai_provider as _openai_provider
@@ -50,12 +51,8 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
 app = FastAPI(title="Model-Maker API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS and the optional auth token are registered at the end of this module,
+# after every other middleware, so they wrap them (see _cors_kwargs).
 
 SESSION = ProjectSession()
 LLM_SETTINGS = LLMSettingsStore()
@@ -1002,6 +999,11 @@ def _effective_llm_settings() -> dict[str, Any]:
             "gemini",
             model=gemini_override.get("model") or os.environ.get("MODELMAKER_LLM_MODEL"),
         ),
+        # Only usable inside VS Code, whose extension relays Copilot to us.
+        "copilot": {
+            "model": LLM_SETTINGS.for_provider("copilot").get("model") or os.environ.get("MODELMAKER_COPILOT_MODEL"),
+            "available": _copilot_provider.relay() is not None,
+        },
     }
     if _anthropic_provider is not None:
         anthropic_override = LLM_SETTINGS.for_provider("anthropic")
@@ -1153,6 +1155,14 @@ def list_llm_models(provider: str, base_url: str | None = None) -> dict[str, lis
             raise HTTPException(400, "no Gemini API key configured -- set one in Settings first")
         try:
             return {"models": _gemini_provider.list_models(_gemini_provider.DEFAULT_BASE_URL, api_key)}
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+    if provider == "copilot":
+        endpoint = _copilot_provider.relay()
+        if endpoint is None:
+            raise HTTPException(400, _copilot_provider.UNAVAILABLE)
+        try:
+            return {"models": [m["id"] for m in _copilot_provider.relay_models(*endpoint)]}
         except RuntimeError as e:
             raise HTTPException(502, str(e))
     if provider == "stub":
@@ -1669,6 +1679,82 @@ def agent_mcp_call(req: AgentToolCall, x_agent_token: str | None = Header(defaul
 from .library_api import router as _library_router  # noqa: E402 -- reads SESSION from this module at call time
 
 app.include_router(_library_router)
+
+
+# ---- version, auth and CORS (opt-in for embedding, e.g. the VS Code extension)
+
+# Bumped when a change to the HTTP API would break an older client (the VS
+# Code extension refuses a backend whose level it doesn't know).
+API_COMPAT_LEVEL = 1
+
+
+@app.get("/api/version")
+def version_ep() -> dict[str, Any]:
+    from importlib import metadata
+
+    try:
+        version = metadata.version("quantology-modelmaker")
+    except metadata.PackageNotFoundError:
+        version = "0+unknown"
+    return {"version": version, "api": API_COMPAT_LEVEL}
+
+
+# Paths the auth token doesn't cover: liveness, and the claude CLI agent's
+# MCP bridge, which carries its own per-build X-Agent-Token instead.
+_AUTH_EXEMPT = ("/api/health", "/api/agent/mcp/")
+
+
+def _token_matches(given: str, token: str) -> bool:
+    # As bytes: compare_digest rejects non-ASCII str, which a header can be.
+    return secrets.compare_digest(given.encode(), token.encode())
+
+
+def _auth_ok(request: Request, token: str) -> bool:
+    header = request.headers.get("authorization", "")
+    if header.startswith("Bearer ") and _token_matches(header[7:], token):
+        return True
+    # <img src> and file downloads can't send a header, so a GET may carry
+    # the token in the query string instead -- never a mutating request.
+    query = request.query_params.get("token")
+    return request.method in ("GET", "HEAD") and query is not None and _token_matches(query, token)
+
+
+@app.middleware("http")
+async def _auth_token(request: Request, call_next):
+    """With MODELMAKER_AUTH_TOKEN set (the VS Code extension sets a random
+    one per backend), every /api request needs it; unset -- the default --
+    nothing is checked, exactly as before."""
+    token = os.environ.get("MODELMAKER_AUTH_TOKEN")
+    if (
+        token
+        and request.method != "OPTIONS"  # CORS preflights never carry credentials
+        and request.url.path.startswith("/api/")
+        and not request.url.path.startswith(_AUTH_EXEMPT)
+        and not _auth_ok(request, token)
+    ):
+        return JSONResponse({"detail": "missing or invalid auth token"}, status_code=401)
+    return await call_next(request)
+
+
+def _cors_kwargs() -> dict[str, Any]:
+    """The Vite dev server's origins, plus MODELMAKER_CORS_ORIGIN_REGEX when
+    set (the VS Code extension sets it to match its webview origin)."""
+    kwargs: dict[str, Any] = {
+        "allow_origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+    regex = os.environ.get("MODELMAKER_CORS_ORIGIN_REGEX")
+    if regex:
+        kwargs["allow_origin_regex"] = regex
+        # A cross-origin download reads its filename from this header.
+        kwargs["expose_headers"] = ["Content-Disposition"]
+    return kwargs
+
+
+# Added last so it's outermost: 401s and 409s carry CORS headers too, which
+# a cross-origin client needs to read them.
+app.add_middleware(CORSMiddleware, **_cors_kwargs())
 
 
 # Serve the built frontend (from `npm run build` in frontend/, which emits
