@@ -2,7 +2,7 @@
   "name": "modelmaker",
   "displayName": "Model-Maker",
   "description": "Visual pipeline builder for financial model development: the Model-Maker canvas inside VS Code, with GitHub Copilot as its AI.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "quantology",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -144,7 +144,7 @@
         },
         "modelmaker.packageSpec": {
           "type": "string",
-          "default": "quantology-modelmaker",
+          "default": "quantology-modelmaker>=0.3.0",
           "markdownDescription": "What `pip install -U` installs: a PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
         },
         "modelmaker.llm.useCopilot": {

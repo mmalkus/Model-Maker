@@ -62,7 +62,7 @@ can also offer your GitHub Copilot models as the `copilot` AI provider.
 The pip package works on its own exactly as described here; the extension
 is another way to run it. See
 [`vscode-extension-plan.md`](vscode-extension-plan.md) for the design and
-release process.
+[`docs/releasing.md`](docs/releasing.md) for how a release ships both.
 
 Develop it with:
 

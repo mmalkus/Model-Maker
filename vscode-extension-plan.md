@@ -31,6 +31,14 @@ That covers phases 0–5, the CI `vscode` job, the `build-vscode` and
 `publish-vscode` release jobs, theming (§4.4) and the Copilot Chat tools
 (§5.5).
 
+Phase 6 is prepared. Both versions are 0.3.0, which goes to the pre-release
+channel because the minor is odd. The extension requires
+`quantology-modelmaker>=0.3.0`, the first release with the backend opt-ins.
+The release steps passed a dry run (version and tag check, channel pick,
+`vsce package --pre-release`). The runbook and draft release notes are in
+[`docs/releasing.md`](docs/releasing.md). Publishing waits on the owner's
+one-time setup and a GitHub release.
+
 Where the implementation differs from the plan below:
 
 - **No VS Code dirty state or undo routing (§5.3).** The canvas already

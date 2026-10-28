@@ -12,6 +12,8 @@ import { resolvePython } from './python'
 export const API_COMPAT = 1
 
 const PACKAGE = 'quantology-modelmaker'
+// The first release with the switches this extension sets (auth, CORS, /api/version).
+const DEFAULT_SPEC = `${PACKAGE}>=0.3.0`
 const HEALTH_TIMEOUT_MS = 90_000
 // The webview's origin; the backend admits it through CORS.
 const WEBVIEW_ORIGIN_REGEX = '^vscode-webview://[a-z0-9-]+$'
@@ -310,7 +312,7 @@ export function installedVersion(python: string, log?: vscode.OutputChannel): Pr
 
 /** pip install -U <modelmaker.packageSpec> into `python`. */
 export async function installPackage(python: string, log: vscode.OutputChannel, progress?: Progress) {
-  const spec = vscode.workspace.getConfiguration('modelmaker').get<string>('packageSpec', PACKAGE).trim() || PACKAGE
+  const spec = vscode.workspace.getConfiguration('modelmaker').get<string>('packageSpec', DEFAULT_SPEC).trim() || DEFAULT_SPEC
   progress?.report({ message: `pip install -U ${spec}` })
   log.appendLine(`$ ${python} -m pip install -U ${spec}`)
   const { code, out } = await run(python, ['-m', 'pip', 'install', '-U', ...spec.split(/\s+/)], log)
