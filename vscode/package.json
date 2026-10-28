@@ -1,0 +1,192 @@
+{
+  "name": "modelmaker",
+  "displayName": "Model-Maker",
+  "description": "Visual pipeline builder for financial model development: the Model-Maker canvas inside VS Code, with GitHub Copilot as its AI.",
+  "version": "0.2.0",
+  "publisher": "quantology",
+  "license": "Apache-2.0",
+  "icon": "icon.png",
+  "homepage": "https://www.quantology.nl/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mmalkus/Model-Maker"
+  },
+  "bugs": {
+    "url": "https://github.com/mmalkus/Model-Maker/issues"
+  },
+  "galleryBanner": {
+    "color": "#0B2340",
+    "theme": "dark"
+  },
+  "categories": [
+    "Data Science",
+    "Visualization",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "model",
+    "pipeline",
+    "credit risk",
+    "polars",
+    "copilot"
+  ],
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/model.json"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "modelmaker.model",
+        "displayName": "Model-Maker Canvas",
+        "selector": [
+          {
+            "filenamePattern": "**/model.json"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "modelmaker.openProject",
+        "title": "Open Project…",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.newProject",
+        "title": "New Project…",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.openCanvas",
+        "title": "Open in Model-Maker Canvas",
+        "category": "Model-Maker",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "modelmaker.save",
+        "title": "Save Project",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.restartBackend",
+        "title": "Restart Backend",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.showLog",
+        "title": "Show Backend Log",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.selectInterpreter",
+        "title": "Select Python Interpreter",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.installPackage",
+        "title": "Install / Upgrade Python Package",
+        "category": "Model-Maker"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "modelmaker.openCanvas",
+          "when": "resourceFilename == model.json && activeCustomEditorId != modelmaker.model",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "modelmaker.openCanvas",
+          "when": "resourceFilename == model.json"
+        },
+        {
+          "command": "modelmaker.save",
+          "when": "activeCustomEditorId == modelmaker.model"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "modelmaker.save",
+        "key": "ctrl+s",
+        "mac": "cmd+s",
+        "when": "activeCustomEditorId == modelmaker.model"
+      }
+    ],
+    "configuration": {
+      "title": "Model-Maker",
+      "properties": {
+        "modelmaker.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "Python interpreter that runs the Model-Maker backend. Empty: the interpreter selected in the Python extension, else `python3`/`python` on PATH."
+        },
+        "modelmaker.autoInstall": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask",
+          "markdownDescription": "Whether to `pip install` the Model-Maker package into that interpreter when it's missing or too old."
+        },
+        "modelmaker.packageSpec": {
+          "type": "string",
+          "default": "quantology-modelmaker",
+          "markdownDescription": "What `pip install -U` installs: a PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
+        },
+        "modelmaker.llm.useCopilot": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offer your GitHub Copilot models to Model-Maker's AI features (drafting blocks, AI builds) and make Copilot the default provider. Other providers stay available in the canvas's Settings."
+        },
+        "modelmaker.backend.extraEnv": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Extra environment variables for the backend process, e.g. `{\"ANTHROPIC_API_KEY\": \"…\"}`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p . --noEmit",
+    "lint": "oxlint src test",
+    "test:unit": "node esbuild.mjs --tests && node --test \"out/unit/**/*.test.js\"",
+    "test": "npm run build && node esbuild.mjs --tests && vscode-test",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "node esbuild.mjs --production"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "1.95.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "mocha": "^11.0.0",
+    "oxlint": "^1.79.0",
+    "ovsx": "^0.10.0",
+    "typescript": "~5.9.0"
+  },
+  "dependencies": {
+    "@vscode/python-extension": "^1.0.5"
+  }
+}

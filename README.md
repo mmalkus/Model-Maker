@@ -52,6 +52,27 @@ it. It creates a `.venv` next to itself if missing, installs/upgrades
 `quantology-modelmaker` into it, and starts `modelmaker-api` at
 `http://127.0.0.1:8001`. Safe to re-run any time to pick up updates.
 
+## VS Code
+
+The extension in [`vscode/`](vscode/README.md) opens a project's
+`model.json` as the canvas in an editor tab. It starts the same
+`modelmaker-api` from the selected Python interpreter, one backend per
+open project, and offers to `pip install` the package if it's missing. It
+can also offer your GitHub Copilot models as the `copilot` AI provider.
+The pip package works on its own exactly as described here; the extension
+is another way to run it. See
+[`vscode-extension-plan.md`](vscode-extension-plan.md) for the design and
+release process.
+
+Develop it with:
+
+```bash
+pip install -e .
+(cd frontend && npm ci && npm run build:vscode)   # the canvas, into vscode/media/webview
+cd vscode && npm ci && npm run build
+code --extensionDevelopmentPath="$PWD" path/to/workspace
+```
+
 ## Projects
 
 A project is a folder, not a file: **Save**/**Load** browse for a folder
@@ -189,6 +210,7 @@ AI-assisted block drafting ("Draft with AI", suggest-a-fix) is pluggable:
 | OpenAI API / OpenAI-compatible endpoint | `openai` | An API key (Settings, or `OPENAI_API_KEY`) and a model id. Defaults to `https://api.openai.com/v1`, but the base URL is configurable — point it at Groq, Together, OpenRouter, Fireworks, Azure OpenAI's `/openai` surface, or a self-hosted vLLM/text-generation-webui server instead |
 | Google Gemini API | `gemini` | An API key (Settings, or `GEMINI_API_KEY` / `GOOGLE_API_KEY`) and a model id, e.g. `gemini-2.5-pro` |
 | LM Studio (local) | `lmstudio` | LM Studio running with its local server started (Developer tab → Start Server) and a model loaded |
+| GitHub Copilot | `copilot` | Only inside VS Code, through the [extension](#vs-code)'s relay, with Copilot signed in |
 | Stub (no network, deterministic) | `stub` | none — used by default in tests |
 
 The `openai` and `gemini` providers talk plain HTTPS via the standard
@@ -337,7 +359,8 @@ modelmaker/
   packet.py           DataFramePacket: the typed value flowing over wires
   project.py          Load/save project files (JSON + block source files)
   static/             Built frontend bundle (generated, gitignored)
-frontend/             React + Vite UI
+frontend/             React + Vite UI (npm run build -> modelmaker/static; npm run build:vscode -> vscode/media/webview)
+vscode/               VS Code extension: custom editor, backend manager, Copilot relay
 tests/                Pytest suite for the backend
 sample_data/          Example CSVs (tests also write a generated credit_risk_data.csv here, gitignored)
 ```

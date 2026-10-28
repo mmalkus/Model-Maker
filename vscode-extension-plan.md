@@ -23,6 +23,31 @@ Decisions already taken:
   an OpenAI-compatible endpoint. The existing `OpenAILoop` and OpenAI
   provider do the rest.
 
+## Status
+
+Phases 0–4 and the release pipeline (§7, §8.3) are implemented: the
+backend opt-ins, the frontend's `host.ts`, the extension in `vscode/`
+(custom editor, backend manager, bridge, Copilot relay), the CI `vscode`
+job, and the `build-vscode`/`publish-vscode` jobs. Still open: theming
+(§4.4), Copilot Chat tools (§5.5), the one-time Marketplace setup (§8.1),
+and checking the remote cases (SSH, WSL, Codespaces) by hand.
+
+Where the implementation differs from the plan below:
+
+- **No VS Code dirty state or undo routing (§5.3).** The canvas already
+  autosaves `model.json` about two seconds after each edit, so the custom
+  editor is read-only from VS Code's point of view. Ctrl/Cmd+S saves
+  immediately, and the canvas keeps its own undo (Ctrl/Cmd+Z). The file
+  watcher skips the canvas's own writes.
+- **`Host` has two more methods (§4.1):** `prompt` (webviews block
+  `window.prompt` too) and `downloadUrl` (library exports, fetched with the
+  token).
+- **The extension checks for a compatible backend through `/api/version`'s
+  compat level only.** `modelmaker.packageSpec` defaults to an unpinned
+  `quantology-modelmaker`. The first extension release therefore has to
+  ship with a package release that has the opt-ins (§8.2 lockstep covers
+  this).
+
 ## 1. Architecture
 
 ```

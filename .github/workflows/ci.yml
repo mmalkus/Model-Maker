@@ -66,6 +66,80 @@ jobs:
       # tsc -b && vite build. setup.py swallows a failed frontend build when
       # packaging, so this is the only place a broken one fails loudly.
       - run: npm run build
+      # The VS Code webview build must leave the Python package's bundle
+      # alone (vscode-extension-plan.md §2, invariant 2).
+      - name: Build for VS Code without touching modelmaker/static
+        run: |
+          (cd ../modelmaker/static && find . -type f | sort | xargs sha256sum) > "$RUNNER_TEMP/static.before"
+          npm run build:vscode
+          (cd ../modelmaker/static && find . -type f | sort | xargs sha256sum) > "$RUNNER_TEMP/static.after"
+          diff "$RUNNER_TEMP/static.before" "$RUNNER_TEMP/static.after"
+          test -f ../vscode/media/webview/index.html
+
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            vscode/package-lock.json
+
+      # Released in lockstep (vscode-extension-plan.md §8.2).
+      - name: Check the extension's version matches the package's
+        run: |
+          py=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          ext=$(node -p "require('./vscode/package.json').version")
+          test "$py" = "$ext" || { echo "pyproject.toml is $py but vscode/package.json is $ext"; exit 1; }
+
+      - name: Install the Python package (the backend the tests start)
+        run: python -m pip install -e .
+
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build:vscode
+        working-directory: frontend
+
+      - run: npm ci
+        working-directory: vscode
+      - run: npm run lint
+        working-directory: vscode
+      - run: npm run typecheck
+        working-directory: vscode
+      - run: npm run test:unit
+        working-directory: vscode
+
+      - name: Package the .vsix
+        working-directory: vscode
+        run: npx vsce package --no-dependencies -o modelmaker.vsix
+
+      # A real VS Code opening the demo project: backend start with auth,
+      # project load, a green run, save. Copilot isn't signed in here.
+      - name: Integration tests
+        working-directory: vscode
+        run: |
+          ws="$RUNNER_TEMP/workspace"
+          mkdir -p "$ws/.vscode"
+          (cd "$ws" && modelmaker-demo .)
+          printf '{"modelmaker.pythonPath": "%s", "modelmaker.autoInstall": "never"}\n' "$(command -v python)" > "$ws/.vscode/settings.json"
+          MODELMAKER_TEST_WORKSPACE="$ws" xvfb-run -a npm test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: modelmaker-vsix
+          path: vscode/modelmaker.vsix
 
   package:
     name: Package
