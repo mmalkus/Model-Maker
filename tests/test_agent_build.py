@@ -865,7 +865,7 @@ def test_a_finished_build_can_be_continued_with_a_message(prepared):
     assert session.graph.blocks[BUILT["s2"]].params["features"] == FEATURES[:3]
 
 
-def test_a_stopped_build_continues_from_its_saved_log(prepared):
+def test_a_stopped_build_continues_from_its_saved_log(prepared, tmp_path):
     session, anchor = prepared
     ANCHOR[:] = [anchor]
     controller = make_controller(session, {"plan": [plan_turn], "build": [build_est]})
@@ -876,8 +876,13 @@ def test_a_stopped_build_continues_from_its_saved_log(prepared):
     assert b.phase == AWAITING_STAGE_REVIEW
     controller.stop()
     record = json.loads(json.dumps(b.log_record(), default=str))
+    session.save(tmp_path / "proj" / "model.json")
 
-    # A new server: nothing in memory but the log and the project.
+    # A new server: nothing in memory but the log and the saved project --
+    # whose input block hasn't been read (the AI may not read it itself).
+    session = ProjectSession(recovery_path=tmp_path / "recovery2.json")
+    session.load(tmp_path / "proj" / "model.json")
+    assert session.runner.status(anchor) != "green"
     again = make_controller(session, {"build": [build_val]})
     restored = AgentBuild.from_record(session, RunSlot(), record)
     assert restored.id == b.id and restored.owned_blocks == b.owned_blocks

@@ -463,9 +463,16 @@ class BuildController:
             self._snapshot_before = self._transaction.enter_context(session.transaction())
             b.set_phase(BUILDING)
             self._maybe_sample()
-            prompt = prompts.reopen_prompt(b, text, ended_as, fresh)
-
             def work() -> None:
+                # Input blocks are the user's to read (tools.run_to refuses
+                # them), and a build reloaded after a restart finds them
+                # unread: read them for it, or nothing downstream can run.
+                try:
+                    self._reread_inputs()
+                except RunBusy as e:
+                    b.log("error", message=f"couldn't read the input blocks: {e}")
+                # After the read, so "built so far" shows current outputs.
+                prompt = prompts.reopen_prompt(b, text, ended_as, fresh)
                 if fresh:
                     self._build_loop = self.loop_factory(b.build_llm, "build")
                     _record_resolved_model(b.build_llm, self._build_loop)
