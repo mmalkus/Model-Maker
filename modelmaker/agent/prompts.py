@@ -99,7 +99,9 @@ will see your plan as ghost blocks and approve it or send feedback.
 A good plan:
 - Restates the goal in `summary`, lists real `assumptions` (e.g. which column \
 is the default flag and why), and puts anything the user must decide in \
-`questions` (leave it empty if nothing is unclear -- don't ask for the sake of it).
+`questions` (leave it empty if nothing is unclear -- don't ask for the sake of it). \
+Give a question `options` when it has a few likely answers, so the user can \
+pick one with a click.
 - Is an outline of `stages` in build order (e.g. Data prep, Feature \
 engineering, Estimation, Validation) -- each becomes one lane. Reuse an \
 existing lane (its id in `lane`) where it fits. Keep to the stages the goal \
@@ -154,6 +156,12 @@ plan_step), connect and run_to are there for them -- record each with \
 note_deviation. Structural changes to the approved outline (dropping a stage, \
 a different model family) and any change to a user block the outline didn't \
 list need ask_user.
+
+Show the key results on the canvas with display blocks (tag `output`): \
+display_kpi for a headline number (a total RWA, a Gini, an average PD; set \
+`column`, `agg` and `label`) and display_table for a small results table \
+(a per-grade summary, a one-row capital total). Wire each to the block that \
+produces the result, as the last steps of that stage.
 
 The build is running on {sample_note}. On the last stage, instead of \
 complete_stage, call finish with a Markdown report (what you built across \
@@ -487,3 +495,40 @@ def stage_feedback_prompt(build: AgentBuild, feedback: str) -> str:
 
 def answer_prompt(answer: str) -> str:
     return f"The user answered:\n\n{answer}\n\nContinue the build."
+
+
+ENDED_AS = {
+    "stopped": "was stopped",
+    "failed": "failed",
+    "done": "finished",
+    "done_with_errors": "finished, with blocks that failed on the full data",
+}
+
+
+def reopen_prompt(build: AgentBuild, text: str, ended_as: str, fresh: bool) -> str:
+    """The user carries on with an ended build (controller.reopen). `fresh`:
+    a new conversation (the old one is gone -- a reloaded build, or small
+    context), so this carries the build's context too."""
+    stage = build.current_stage
+    then = (
+        "When it's done and checked, call finish with an updated report -- it replaces the earlier one."
+        if build.is_last_stage()
+        else f"When stage {stage['name']!r} is built and checked, call complete_stage and end your turn."
+    )
+    ask = (
+        f"The build {ENDED_AS.get(ended_as, ended_as)}, and the user has picked it up again. They say:\n\n{text}\n\n"
+        f"Do what they ask, working in stage {stage['name']!r} (its blocks and lanes are yours to change; "
+        "plan_stage again only if you add a batch of new steps). Check the results with run_to. "
+        f"{then} If something needs the user's decision, call ask_user."
+    )
+    if not fresh:
+        return ask
+    parts = [build_prompt(build)]
+    decided = decisions_so_far(build)
+    if decided and not build.options.small_context:  # small_context's stage_prompt already has it
+        parts.append("What the earlier stages decided -- keep to it:\n\n" + decided)
+    if build.report:
+        parts.append(f"The report it ended with:\n\n{build.report}")
+    parts.append("---\n\n" + ask)
+    return "\n\n".join(parts)
+

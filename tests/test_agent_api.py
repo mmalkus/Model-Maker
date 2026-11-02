@@ -120,6 +120,36 @@ def test_build_endpoints_and_canvas_lock(client):
     assert c.post("/api/blocks", json={"category": "filter"}).status_code == 200
 
 
+def test_an_ended_build_can_be_continued_after_a_restart(client, monkeypatch):
+    c = client
+
+    def add_then_ask(call):
+        split = call("add_block", {"category": "train_test_split", "lane": "est", "name": "split"})["block"]
+        call("connect", {"from_block": c.anchor, "from_port": "out", "to_block": split, "to_port": "df"})
+        return _ask(call)
+
+    c.scripts.update({"plan": [_plan(c.anchor)], "build": [add_then_ask]})
+    c.post("/api/agent/builds", json={"goal": "split it", "anchors": [c.anchor]})
+    _wait(c, "awaiting_approval")
+    c.post("/api/agent/builds/current/approve")
+    _wait(c, "awaiting_input")
+    build_id = c.post("/api/agent/builds/current/stop").json()["id"]
+
+    # A new server process: no build in memory, only its saved log.
+    scripts = {"build": [lambda call: call("finish", {"report": "split done"}) and ""]}
+    monkeypatch.setattr(api, "AGENT", BuildController(lambda: api.SESSION, api.RUN_SLOT, lambda choice, phase: ScriptedLoop(scripts["build"])))
+    assert c.get("/api/agent/builds/current").json()["build"] is None
+    listed = c.get("/api/agent/builds/continuable").json()
+    assert [b["id"] for b in listed] == [build_id] and listed[0]["phase"] == "stopped" and listed[0]["blocks"] == 1
+
+    r = c.post(f"/api/agent/builds/{build_id}/continue", json={"text": "finish it"})
+    assert r.status_code == 200, r.text
+    b = _wait(c, "done")
+    assert b["id"] == build_id and b["report"] == "split done"
+    # Continuing the same build again works off the in-memory one.
+    assert c.post(f"/api/agent/builds/{build_id}/continue", json={"text": " "}).status_code == 409
+
+
 def test_events_are_paged_by_cursor(client):
     c = client
     c.scripts.update({"plan": [_plan(c.anchor)]})

@@ -273,7 +273,7 @@ def test_ask_user_pauses_and_the_answer_resumes(prepared):
     ANCHOR[:] = [anchor]
 
     def asks(call):
-        call("ask_user", {"question": "Which seed?"})
+        call("ask_user", {"question": "Which seed?", "options": ["1", " 7 ", ""]})
         return "Waiting."
 
     def finishes(call):
@@ -286,8 +286,10 @@ def test_ask_user_pauses_and_the_answer_resumes(prepared):
     controller.approve()
     controller.join(60)
     assert b.phase == AWAITING_INPUT and b.pending_question == "Which seed?"
+    assert b.to_dict()["pending_options"] == ["1", "7"]
     assert controller.canvas_locked()
     controller.feedback("Seed 7.")
+    assert b.pending_options == []
     controller.join(120)
     assert b.phase == DONE
     assert "Seed 7." in controller.loops["build"].prompts[-1]
@@ -638,7 +640,7 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
             {
                 "plan": {
                     "summary": "split",
-                    "questions": ["Which seed?"],
+                    "questions": ["Which seed?", {"question": "Which split?", "options": ["70/30", "80/20"]}],
                     "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split", "blocks": ["train_test_split"]}],
                 }
             },
@@ -651,6 +653,10 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
     controller.join(60)
     assert b.phase == AWAITING_APPROVAL
     assert any(e["kind"] == "auto_build_paused" for e in b.events_since())
+    assert b.plan["questions"] == [
+        {"question": "Which seed?", "options": []},
+        {"question": "Which split?", "options": ["70/30", "80/20"]},
+    ]
     # Answering re-plans; the new plan has no questions, so it builds.
     controller.feedback("Seed 1.")
     controller.join(300)
@@ -787,6 +793,109 @@ def test_stop_during_a_stage_review(prepared):
     assert b.phase == STOPPED and not controller.canvas_locked()
     # The empty lane of the stage never built is cleaned up; the built one stays.
     assert b.lane_map["val"] not in session.graph.lanes and b.lane_map["est"] in session.graph.lanes
+
+
+def test_hitting_a_limit_pauses_for_the_user_and_a_reply_carries_on(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def busy(call):
+        for _ in range(5):
+            call("get_graph", {})
+        return "ran out"
+
+    finish = lambda call: call("finish", {"report": "ok"}) and ""  # noqa: E731
+    controller = make_controller(session, {"plan": [plan_one_stage], "build": [busy, finish]})
+    b = start(controller, anchor)
+    controller.join(60)
+    b.options.limits.build_tool_calls = 2
+    controller.approve()
+    controller.join(60)
+    # Not the end of the build: it waits, with what's built kept.
+    assert b.phase == AWAITING_INPUT and "limit of 2 tool calls" in b.pending_question
+    assert controller.canvas_locked() and b.limit_reached
+    controller.feedback("continue")
+    controller.join(120)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+
+
+def test_stop_after_a_limit_still_ends_the_build(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def busy(call):
+        for _ in range(5):
+            call("get_graph", {})
+        return ""
+
+    controller = make_controller(session, {"plan": [plan_one_stage], "build": [busy]})
+    b = start(controller, anchor)
+    controller.join(60)
+    b.options.limits.build_tool_calls = 2
+    controller.approve()
+    controller.join(60)
+    assert b.phase == AWAITING_INPUT
+    controller.stop()
+    assert b.phase == STOPPED
+
+
+def test_a_finished_build_can_be_continued_with_a_message(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+
+    def change(call):
+        fit = BUILT["s2"]
+        assert call("set_params", {"block": fit, "params": {"features": FEATURES[:3]}})["ok"]
+        assert call("run_to", {"block": fit})["status"] == "green"
+        assert call("finish", {"report": "Refitted on 3 drivers."})["ok"]
+        return "Changed."
+
+    controller = make_controller(session, {"plan": [plan_turn], "build": [*BUILD_TURNS, change]})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(300)
+    controller.approve()
+    controller.join(300)
+    assert b.phase == DONE
+    with pytest.raises(BuildError):
+        controller.reopen("  ")
+
+    controller.reopen("Use only the first three drivers.")
+    controller.join(300)
+    assert b.phase == DONE, (b.phase, b.error, b.pending_question)
+    assert b.report == "Refitted on 3 drivers."
+    # Same conversation, carried on in the last stage.
+    prompt = controller.loops["build"].prompts[-1]
+    assert "Use only the first three drivers." in prompt and "finished" in prompt
+    assert session.graph.blocks[BUILT["s2"]].params["features"] == FEATURES[:3]
+
+
+def test_a_stopped_build_continues_from_its_saved_log(prepared):
+    session, anchor = prepared
+    ANCHOR[:] = [anchor]
+    controller = make_controller(session, {"plan": [plan_turn], "build": [build_est]})
+    b = start(controller, anchor)
+    controller.join(60)
+    controller.approve()
+    controller.join(300)
+    assert b.phase == AWAITING_STAGE_REVIEW
+    controller.stop()
+    record = json.loads(json.dumps(b.log_record(), default=str))
+
+    # A new server: nothing in memory but the log and the project.
+    again = make_controller(session, {"build": [build_val]})
+    restored = AgentBuild.from_record(session, RunSlot(), record)
+    assert restored.id == b.id and restored.owned_blocks == b.owned_blocks
+    assert restored.lane_map["est"] == b.lane_map["est"]
+    again.reopen("Carry on with validation.", build=restored, token="t2")
+    again.join(300)
+    assert restored.phase == DONE, (restored.phase, restored.error, restored.pending_question)
+    assert [st["status"] for st in restored.stages] == ["done", "done"]
+    # A fresh conversation, so the prompt carries the outline and the ask.
+    prompt = again.loops["build"].prompts[0]
+    assert "Carry on with validation." in prompt and "approved this outline" in prompt and "'Validation'" in prompt
+    assert any(e["kind"] == "reopened" for e in restored.events_since(0))
 
 
 def test_waiting_on_the_user_doesnt_count_against_the_time_limit(prepared):

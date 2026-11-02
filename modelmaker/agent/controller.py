@@ -205,19 +205,48 @@ class BuildController:
         if b is None:
             return
         b.log("error", message=message)
+        if self._pause_for_limit():
+            return
         if b.stop_requested:
             self._end(STOPPED)
             return
         retry = f"The AI model didn't answer: {message}\n\nReply (e.g. \"continue\") to retry, or stop the build."
         if b.phase == PLANNING:
             b.pending_question = retry
+            b.pending_options = ["Continue"]
             b.set_phase(AWAITING_APPROVAL, note="the model didn't answer")
         elif b.phase == BUILDING:
             b.pending_question = retry
+            b.pending_options = ["Continue"]
             b.set_phase(AWAITING_INPUT, note="the model didn't answer")
         else:
             b.error = message
             self._end(FAILED)
+
+    def _pause_for_limit(self) -> bool:
+        """The model's turn ended because the build ran out of time or tool
+        calls (AgentBuild.limit_reached): wait for the user rather than
+        ending the build -- replying carries on with a fresh budget (see
+        feedback). False when it wasn't a limit (a real Stop)."""
+        b = self.build
+        if b is None or not b.limit_reached:
+            return False
+        stage = b.current_stage
+        if b.phase == BUILDING and stage is not None and stage["status"] == STAGE_DONE:
+            # The stage got completed just in time: its review is the pause.
+            b.extend_budget()
+            b.set_phase(AWAITING_STAGE_REVIEW, note="limit reached")
+            return True
+        b.pending_options = ["Continue"]
+        b.pending_question = (
+            f"{b.limit_reached}\n\nReply (e.g. \"continue\", or what to do differently) to carry on with a fresh "
+            "budget, or stop the build."
+        )
+        if b.phase == PLANNING:
+            b.set_phase(AWAITING_APPROVAL, note="limit reached")
+        else:
+            b.set_phase(AWAITING_INPUT, note="limit reached")
+        return True
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the current worker turn (tests, discard)."""
@@ -304,6 +333,8 @@ class BuildController:
 
     def _after_plan_turn(self, outcome) -> None:
         b = self.build
+        if self._pause_for_limit():
+            return
         if b.stop_requested:
             self._end(STOPPED)
             return
@@ -336,10 +367,14 @@ class BuildController:
             self._require_idle()
             if not text.strip():
                 raise BuildError("write some feedback")
+            if b.limit_reached:
+                b.extend_budget()
+                b.log("budget_extended")
             if b.phase == AWAITING_APPROVAL:
                 b.plan_history.append({"plan": b.plan, "feedback": text})
                 b.plan = None
                 b.pending_question = None
+                b.pending_options = []
                 b.set_phase(PLANNING)
                 b.log("user", text=text)
 
@@ -370,6 +405,7 @@ class BuildController:
                 )
                 b.last_question = None
                 b.pending_question = None
+                b.pending_options = []
                 b.set_phase(BUILDING)
                 b.log("user", text=text)
 
@@ -378,6 +414,74 @@ class BuildController:
                     self._after_build_turn(outcome)
 
                 self._spawn(answer)
+            return b
+
+    def reopen(self, text: str, build: AgentBuild | None = None, token: str | None = None) -> AgentBuild:
+        """Carry on with an ended build (stopped, failed, or done) from what
+        the user says next -- fix what broke, change something, build what's
+        left. `build`: one brought back from its saved log (AgentBuild.
+        from_record) when it isn't the current one. Back in building with a
+        fresh budget and a new undo transaction (so one Undo reverts what
+        the continuation changed, not the original build too)."""
+        with self._lock:
+            self._require_idle()
+            current = self.build
+            if build is not None and build is not current:
+                if current is not None and current.phase not in TERMINAL_PHASES:
+                    raise BuildError("an AI build is already in progress -- finish, stop or discard it first")
+            b = build or current
+            if b is None:
+                raise BuildError("no AI build to continue")
+            if b.phase not in (DONE, DONE_WITH_ERRORS, STOPPED, FAILED):
+                raise BuildError(f"the build is {b.phase}; only an ended build can be continued")
+            if not text.strip():
+                raise BuildError("tell the AI what to do next")
+            if not b.stages:
+                raise BuildError("this build ended before its plan was approved -- start a new build instead")
+            if not b.owned_blocks:
+                raise BuildError("none of this build's blocks are in the open project")
+            if b is not current:
+                self.build, self.token = b, token or self.token
+                self._plan_loop = self._build_loop = None
+            fresh = self._build_loop is None or b.options.small_context
+
+            # The stage to carry on in: the unfinished one, else (an ended
+            # build whose stages are all done) the last.
+            ended_as = b.phase
+            stage = b.current_stage
+            if stage is not None and stage["status"] == STAGE_DONE and not b.is_last_stage():
+                b.stage_index += 1
+                stage = b.current_stage
+            if stage is not None:
+                stage["status"] = STAGE_ACTIVE
+            b.finished = False
+            b.error = None
+            b.ended_at = None
+            b.pending_question = b.last_question = None
+            b.pending_options = []
+            b.extend_budget()
+            b.user_inputs.append({"stage": stage["key"] if stage else None, "text": text})
+            b.log("reopened", previous_phase=ended_as)
+            b.log("user", text=text)
+
+            session = self.session
+            self._transaction = ExitStack()
+            self._snapshot_before = self._transaction.enter_context(session.transaction())
+            b.set_phase(BUILDING)
+            self._maybe_sample()
+            prompt = prompts.reopen_prompt(b, text, ended_as, fresh)
+
+            def work() -> None:
+                if fresh:
+                    self._build_loop = self.loop_factory(b.build_llm, "build")
+                    _record_resolved_model(b.build_llm, self._build_loop)
+                    system = prompts.build_system(b, getattr(self._build_loop, "compact", False))
+                    outcome = self._build_loop.start(b, system, prompt, self._tools(BUILDING))
+                else:
+                    outcome = self._build_loop.resume(b, prompt, self._tools(BUILDING))
+                self._after_build_turn(outcome)
+
+            self._spawn(work)
             return b
 
     def approve(self) -> AgentBuild:
@@ -507,6 +611,11 @@ class BuildController:
 
     def _after_build_turn(self, outcome) -> None:
         b = self.build
+        if b.finished and b.limit_reached:
+            # finish went through before the limit cut the turn short.
+            b.extend_budget()
+        if not b.finished and self._pause_for_limit():
+            return
         if b.stop_requested:
             self._end(STOPPED)
             return
@@ -515,6 +624,7 @@ class BuildController:
             return
         if outcome.error:
             b.log("error", message=outcome.error)
+            b.pending_options = ["Continue"]
             b.pending_question = f"The AI hit an error: {outcome.error}\n\nReply to have it continue, or stop the build."
             b.set_phase(AWAITING_INPUT)
             return
@@ -530,6 +640,7 @@ class BuildController:
             else:
                 b.set_phase(AWAITING_STAGE_REVIEW)
             return
+        b.pending_options = ["Continue"]
         b.pending_question = (
             "The AI ended its turn without finishing the build"
             + (f":\n\n{outcome.final_text}" if outcome.final_text else ".")
@@ -628,6 +739,7 @@ class BuildController:
         if b.phase in TERMINAL_PHASES:
             return b
         b.stop_requested = True
+        b.limit_reached = None  # a real Stop: end, don't pause for a fresh budget
         b.log("stop_requested")
         for loop in (self._plan_loop, self._build_loop):
             if loop is not None:

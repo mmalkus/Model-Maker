@@ -17,6 +17,7 @@ serves every block:
             {"column_param": "output_col", "role": "predicted", "displaced": "feature"},
             {"column_param": "flag_col", "fallback": "default_{horizon}m", "role": "target"},
             {"column_suffix": "_bin", "role": "segment"},
+            {"column": "predicted", "role": "predicted", "new_only": True, "displaced": "feature"},
         ],
     }
 
@@ -29,7 +30,10 @@ A role rule names its column directly, via a param (`fallback` is a
 template over the params used when that param is unset), or by suffix (new
 columns only). For a unique role (target, predicted, ...), `if_taken`
 gives the column that role instead when another column already has it,
-and `displaced` re-tags any other column that has it.
+and `displaced` re-tags any other column that has it. `new_only` applies
+the rule only when the block created the column -- not to one with that
+name passed through from an input (a predict on a table that already
+carries an earlier model's prediction).
 """
 
 from __future__ import annotations
@@ -93,7 +97,7 @@ def schema_diff(spec: dict[str, Any] | None, defaults: dict[str, Any] | None = N
                     targets = [c for c in new_cols if c.endswith(rule["column_suffix"])]
                 else:
                     col = _rule_column(rule, p)
-                    targets = [col] if col in meta else []
+                    targets = [col] if col in meta and (col in new_cols or not rule.get("new_only")) else []
                 for col in targets:
                     given = role
                     if role in UNIQUE_ROLES:

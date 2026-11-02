@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
+import { NodeDisplay } from './NodeDisplay'
 import type { BlockOut, PortType } from './types'
 
 const STATUS_COLOR: Record<string, string> = {
@@ -160,7 +161,8 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         // Without a ceiling, a long status line (a staleness reason naming
         // the upstream edit that caused it) stretches the card right across
         // the canvas instead of wrapping inside it.
-        maxWidth: 280,
+        // A display block shows its result on the card, so it gets more room.
+        maxWidth: block.display ? 460 : 280,
         boxShadow: aiActive
           ? '0 0 0 3px var(--mm-ai-border-3)'
           : selected
@@ -331,6 +333,10 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
               )
             })}
           </div>
+        )}
+
+        {block.display && (
+          <NodeDisplay block={block} display={block.display} />
         )}
 
         {block.status === 'orange' && block.stale_reason && (

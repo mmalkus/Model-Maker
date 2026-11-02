@@ -502,7 +502,19 @@ _PLAN_SCHEMA = {
         "assumptions": {"type": "array", "items": _STR},
         "questions": {
             "type": "array",
-            "items": _STR,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": _STR,
+                    "options": {
+                        "type": "array",
+                        "items": _STR,
+                        "description": "Short likely answers the user can pick with one click (they can still "
+                        "type their own). Leave out for open questions.",
+                    },
+                },
+                "required": ["question"],
+            },
             "description": "Anything you need the user to decide before building. Non-empty blocks approval until answered.",
         },
         "stages": {
@@ -767,6 +779,18 @@ def layout_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> dict[str, dict[s
     return layout
 
 
+def _question(q: Any) -> dict[str, Any]:
+    """A plan question as {question, options} -- a bare string is a
+    question without suggested answers."""
+    if isinstance(q, str):
+        return {"question": q, "options": []}
+    return {"question": str(q.get("question") or ""), "options": _options(q.get("options"))}
+
+
+def _options(options: Any) -> list[str]:
+    return [o.strip() for o in options or [] if isinstance(o, str) and o.strip()]
+
+
 @tool(
     "submit_plan",
     "Submit your outline plan -- the stages, in order -- for the user's review. This ends the planning "
@@ -781,6 +805,7 @@ def submit_plan(b: AgentBuild, plan: dict[str, Any]) -> dict[str, Any]:
     errors = validate_plan(b, plan)
     if errors:
         raise ToolError("plan has problems, fix and resubmit:\n- " + "\n- ".join(errors))
+    plan["questions"] = [_question(q) for q in plan.get("questions") or []]
     layout_plan(b, plan)
     b.plan = plan
     b.set_phase(AWAITING_APPROVAL)
@@ -1359,13 +1384,15 @@ def note_deviation(b: AgentBuild, what: str, why: str, plan_step: str | None = N
     "ask_user",
     "Pause the build and ask the user something you can't decide yourself (a structural change to the "
     "approved outline, a change to one of their blocks that wasn't approved, or repeated failures). After calling "
-    "it, end your turn -- you'll be resumed with their answer.",
-    {"question": _STR},
+    "it, end your turn -- you'll be resumed with their answer. `options`: short likely answers the user can "
+    "pick with one click (they can still type their own); leave out for open questions.",
+    {"question": _STR, "options": {"type": "array", "items": _STR}},
     ["question"],
     WRITE,
 )
-def ask_user(b: AgentBuild, question: str) -> dict[str, Any]:
+def ask_user(b: AgentBuild, question: str, options: list[str] | None = None) -> dict[str, Any]:
     b.pending_question = question
+    b.pending_options = _options(options)
     b.last_question = question
     b.set_phase(AWAITING_INPUT)
     b.turn_over = True

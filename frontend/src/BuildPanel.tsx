@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
-import type { BuildEvent, BuildOut, BuildPlan, BuildStage, GraphOut, LLMSettingsOut } from './types'
+import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut, PlanQuestion } from './types'
 import { host } from './host'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
@@ -30,6 +30,26 @@ const PHASE_LABEL: Record<string, string> = {
 
 const box: React.CSSProperties = { border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8, marginBottom: 8 }
 const label: React.CSSProperties = { fontSize: 11, color: 'var(--mm-muted)', fontWeight: 600, marginBottom: 4 }
+const optionRow: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 4, margin: '4px 0 6px' }
+const optionPicked: React.CSSProperties = { background: 'var(--mm-warn-2)', borderColor: 'var(--mm-warn-2)', color: 'var(--mm-bg)' }
+
+// Builds saved before plan questions had options store them as strings.
+const asQuestion = (q: PlanQuestion | string): PlanQuestion => (typeof q === 'string' ? { question: q } : q)
+
+// One-click answers (ask_user's options, or the plan questions'): the
+// textarea beside them is still there for anything else.
+function AnswerOptions({ options, picked, disabled, onPick }: { options?: string[]; picked?: string; disabled?: boolean; onPick: (o: string) => void }) {
+  if (!options?.length) return null
+  return (
+    <div style={optionRow}>
+      {options.map((o) => (
+        <button key={o} disabled={disabled} style={o === picked ? optionPicked : undefined} onClick={() => onPick(o)}>
+          {o}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 type Props = {
   graph: GraphOut
@@ -121,6 +141,11 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
       {!build || TERMINAL.has(build.phase) ? (
         <>
           {build && <Finished build={build} graph={graph} onOpenReport={onOpenReport} />}
+          <ContinueBuild
+            current={build}
+            refreshKey={`${build?.id}:${build?.phase}:${Object.keys(graph.blocks).length}`}
+            onContinue={(id, text) => act(() => api.agentContinue(id, text))}
+          />
           <BuildReportList refreshKey={`${build?.id}:${build?.phase}:${graph.can_undo}:${graph.can_redo}`} onOpen={onOpenReport} />
           <StartForm graph={graph} selectedIds={selectedIds} llmSettings={llmSettings} onStart={(body) => act(() => api.agentStart(body))} />
         </>
@@ -376,17 +401,31 @@ function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; ac
 // until it's done, so the buttons wait too.
 function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: GraphOut; act: Act; busy: boolean }) {
   const [feedback, setFeedback] = useState('')
+  // The option picked per plan question (by index), sent with the feedback.
+  const [picked, setPicked] = useState<Record<number, string>>({})
   const plan = build.plan
+  const questions = (plan?.questions ?? []).map(asQuestion)
+  const answers = questions.flatMap((q, i) => (picked[i] ? [`${q.question}\n→ ${picked[i]}`] : []))
+  const message = [...answers, feedback.trim()].filter(Boolean).join('\n\n')
   return (
     <div>
       {plan ? (
-        <PlanView plan={plan} graph={graph} />
+        <PlanView
+          plan={plan}
+          graph={graph}
+          picked={picked}
+          busy={busy}
+          onPick={(i, o) => setPicked((p) => ({ ...p, [i]: p[i] === o ? '' : o }))}
+        />
       ) : build.pending_question ? (
-        <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+        <>
+          <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+          <AnswerOptions options={build.pending_options} disabled={busy} onPick={(o) => act(() => api.agentFeedback(o))} />
+        </>
       ) : (
         <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>
       )}
-      <div style={label}>{plan?.questions?.length ? 'Answer its questions' : 'Feedback (optional)'}</div>
+      <div style={label}>{questions.length ? 'Answer its questions (pick above, or write)' : 'Feedback (optional)'}</div>
       <textarea
         value={feedback}
         onChange={(e) => setFeedback(e.target.value)}
@@ -396,13 +435,14 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
       />
       <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
         <button
-          disabled={busy || !feedback.trim()}
+          disabled={busy || !message}
           onClick={() => {
-            act(() => api.agentFeedback(feedback))
+            act(() => api.agentFeedback(message))
             setFeedback('')
+            setPicked({})
           }}
         >
-          Re-plan with feedback
+          {questions.length ? 'Send answers' : 'Re-plan with feedback'}
         </button>
         <button
           className="brand-primary"
@@ -417,14 +457,23 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
   )
 }
 
-function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
+type PlanViewProps = { plan: BuildPlan; graph: GraphOut; picked: Record<number, string>; busy: boolean; onPick: (i: number, option: string) => void }
+
+function PlanView({ plan, graph, picked, busy, onPick }: PlanViewProps) {
   return (
     <div>
       <div style={box}>{plan.summary}</div>
       {!!plan.questions?.length && (
         <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)' }}>
           <div style={label}>Questions</div>
-          <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {plan.questions.map(asQuestion).map((q, i) => (
+              <li key={i}>
+                {q.question}
+                <AnswerOptions options={q.options} picked={picked[i]} disabled={busy} onPick={(o) => onPick(i, o)} />
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {!!plan.assumptions?.length && (
@@ -568,6 +617,7 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   return (
     <div>
       <div style={{ ...box, borderColor: 'var(--mm-warn-border)', background: 'var(--mm-warn-bg)', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      <AnswerOptions options={build.pending_options} disabled={busy} onPick={(o) => act(() => api.agentFeedback(o))} />
       <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box' }} />
       <button
         className="brand-primary"
@@ -656,6 +706,70 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
   )
 }
 
+// Pick an ended build up again: tell the AI what to fix, change or build
+// next. The current build, or -- after a restart -- one brought back from
+// its saved log, as long as its blocks are in the open project.
+function ContinueBuild({
+  current,
+  refreshKey,
+  onContinue,
+}: {
+  current: BuildOut | null
+  refreshKey: string
+  onContinue: (buildId: string, text: string) => void
+}) {
+  const [builds, setBuilds] = useState<ContinuableBuild[]>([])
+  const [picked, setPicked] = useState<string | null>(null)
+  const [text, setText] = useState('')
+  useEffect(() => {
+    api
+      .agentContinuable()
+      .then(setBuilds)
+      .catch(() => setBuilds([]))
+  }, [refreshKey])
+  if (!builds.length) return null
+  const chosen = builds.find((b) => b.id === picked) ?? builds.find((b) => b.id === current?.id) ?? builds[0]
+  const done = chosen.stages.filter((st) => st.status === 'done').length
+  return (
+    <div style={{ ...box, borderColor: 'var(--mm-ai-border-2)', background: 'var(--mm-ai-bg-3)', marginBottom: 12 }}>
+      <div style={label}>Continue {chosen.id === current?.id ? 'this' : 'a'} build with AI</div>
+      {builds.length > 1 ? (
+        <select value={chosen.id} onChange={(e) => setPicked(e.target.value)} style={{ width: '100%', marginBottom: 4 }}>
+          {builds.map((b) => (
+            <option key={b.id} value={b.id}>
+              {PHASE_LABEL[b.phase] ?? b.phase} -- {b.goal.slice(0, 70)}
+            </option>
+          ))}
+        </select>
+      ) : (
+        chosen.id !== current?.id && <div style={{ marginBottom: 4 }}>{chosen.goal}</div>
+      )}
+      <div style={{ color: 'var(--mm-muted)', marginBottom: 4 }}>
+        {PHASE_LABEL[chosen.phase] ?? chosen.phase} · {done} of {chosen.stages.length} stages built · {chosen.blocks} block(s)
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        style={{ width: '100%', boxSizing: 'border-box' }}
+        placeholder="e.g. Fix the failing LGD predict and finish the capital stage; or: add a downturn LGD floor"
+      />
+      <button
+        className="brand-primary"
+        style={{ marginTop: 6 }}
+        disabled={!text.trim()}
+        onClick={() => {
+          onContinue(chosen.id, text)
+          setText('')
+        }}
+        title="The AI picks up where the build left off, with a fresh time budget. One Undo reverts what it changes now."
+      >
+        Continue
+      </button>
+    </div>
+  )
+}
+
 function downloadLog(buildId: string) {
   api
     .agentBuildLog(buildId)
@@ -685,6 +799,9 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
     }
   if (e.kind === 'concern') return { text: `⚠ ${String(e.what)}`, tone: 'err' }
   if (e.kind === 'auto_continued') return { text: 'Going straight on to the next stage (building automatically)', tone: 'info' }
+  if (e.kind === 'limit_reached') return { text: `⏸ ${String(e.message)}`, tone: 'err' }
+  if (e.kind === 'budget_extended') return { text: '— Carrying on with a fresh budget', tone: 'info' }
+  if (e.kind === 'reopened') return { text: '— Build picked up again', tone: 'info' }
   if (e.kind !== 'tool') return null
   const args = (e.args ?? {}) as Record<string, unknown>
   const result = (e.result ?? {}) as Record<string, unknown>

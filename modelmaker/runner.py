@@ -734,7 +734,23 @@ class Runner:
         except Exception as e:  # noqa: BLE001 -- captured as block state, not propagated
             st.failed = True
             st.last_error = f"{type(e).__name__}: {e}"
+        if not st.failed and not self.sweep_running:
+            self._refresh_displays(block_id, plan)
         return self.status(block_id)
+
+    def _refresh_displays(self, block_id: str, plan: RunPlan) -> None:
+        """A display block (see BlockDefinition.display) only shows its
+        upstream's result, so it re-runs as soon as that upstream does: the
+        value on its canvas node follows the run without a second click. A
+        sweep (run_all) gets to them in its own topological turn instead."""
+        for child in sorted(plan.graph.successors(block_id)):
+            if self._cancel_requested.is_set():
+                return
+            definition = _try_resolve(plan.graph.blocks[child])
+            if definition is None or not definition.display or self._is_current(child, plan):
+                continue
+            if all(self._is_current(w.from_block, plan) for w in plan.graph.input_wires(child).values()):
+                self.run_block(child, plan)
 
     def _dispatch(
         self,

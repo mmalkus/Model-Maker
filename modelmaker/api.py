@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
 
 from dataclasses import asdict
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,12 +94,16 @@ def _start_background_run(fn: Callable[[], Any], wait_seconds: float | None = No
 
 # Static curated list -- the `claude` CLI has no scriptable "list models"
 # command, so this is what the model dropdown offers for the claude_cli
-# provider instead of a live query.
+# provider instead of a live query. The aliases come first: the CLI
+# resolves each to the newest model of that family the login can run.
 CLAUDE_CLI_KNOWN_MODELS = [
-    "claude-opus-5",
-    "claude-sonnet-5",
+    "sonnet",
+    "opus",
+    "haiku",
     "claude-fable-5-1",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
 ]
 
 # Where Save/Load default to when no project path is already known (see
@@ -282,6 +289,70 @@ def _definition_info(block) -> dict[str, Any] | None:
     return status_for(block)
 
 
+# A display block's node shows at most this much of its table -- enough for
+# a results table, small enough to send with every graph poll. The node says
+# how many rows and columns there are in all; "view full table" has the rest.
+DISPLAY_ROWS = 10
+DISPLAY_COLUMNS = 8
+DISPLAY_ITEMS = 12
+DISPLAY_TEXT = 600
+
+
+def _display_scalar(v: Any) -> Any:
+    """One cell or metric value, made JSON-safe for the graph response:
+    NaN/inf (which plain JSON can't carry) become null, anything that isn't
+    a plain scalar is shown as text."""
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (datetime, date, time)):
+        return v.isoformat()
+    return str(v)
+
+
+def _display_table(packet: DataFramePacket) -> dict[str, Any]:
+    df = packet.data
+    columns = df.columns[:DISPLAY_COLUMNS]
+    return {
+        "kind": "table",
+        "columns": [{"name": c, "dtype": str(df.schema[c])} for c in columns],
+        "rows": [[_display_scalar(v) for v in row] for row in df.head(DISPLAY_ROWS).select(columns).iter_rows()],
+        "row_count": df.height,
+        "column_count": df.width,
+    }
+
+
+def _display_out(block_id: str, definition, status: str) -> dict[str, Any] | None:
+    """What a display block's canvas node shows (see BlockDefinition.display):
+    its last result, small enough to ride along on every graph poll. None
+    for any other block, or one with nothing to show yet."""
+    if definition is None or not definition.display or status not in ("green", "orange"):
+        return None
+    st = SESSION.runner.state.get(block_id)
+    entry = SESSION.runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
+    port = definition.outputs[0].name if definition.outputs else None
+    if entry is None or port not in entry.outputs:
+        return None
+    value = entry.outputs[port]
+    if definition.display == "kpi" and isinstance(value, dict):
+        return {"kind": "kpi", **{k: _display_scalar(v) for k, v in value.items()}}
+    if isinstance(value, DataFramePacket):
+        return _display_table(value)
+    if isinstance(value, (bytes, bytearray)):
+        return {"kind": "image", "port": port}
+    if isinstance(value, dict) and 0 < len(value) <= DISPLAY_ITEMS and all(
+        v is None or isinstance(v, (bool, int, float, str)) for v in value.values()
+    ):
+        return {"kind": "value", "items": [[str(k), _display_scalar(v)] for k, v in value.items()]}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return {"kind": "value", "items": [["value", _display_scalar(value)]]}
+    text = json.dumps(value, default=str, indent=1)
+    return {"kind": "value", "text": text if len(text) <= DISPLAY_TEXT else text[:DISPLAY_TEXT] + "…"}
+
+
 def _block_out(block_id: str) -> dict[str, Any]:
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
@@ -317,7 +388,8 @@ def _block_out(block_id: str) -> dict[str, Any]:
         # mid-dispatch -- polars gives no finer-grained progress for a
         # single collect() call, so this is "how long has this been
         # running", not "how far along is it".
-        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,
+        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,        # A display block's result, shown on its node (see _display_out).
+        "display": _display_out(block_id, _definition_or_none(block), status),
     }
 
 
@@ -1618,6 +1690,73 @@ def agent_build_log(build_id: str) -> dict[str, Any]:
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))
     raise HTTPException(404, f"no saved log for {build_id}")
+
+
+def _saved_build_logs() -> list[Path]:
+    """Every saved build log the open project can see -- its own folder's
+    and the cache's (builds started before the project was saved) --
+    newest first."""
+    paths: dict[str, Path] = {}
+    for directory in (CACHE_DIR / BUILD_LOG_DIRNAME, build_log_dir(SESSION)):
+        if directory.is_dir():
+            for path in directory.glob("build_*.json"):
+                paths[path.name] = path
+    return sorted(paths.values(), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+CONTINUABLE_PHASES = ("done", "done_with_errors", "stopped", "failed")
+
+
+@app.get("/api/agent/builds/continuable")
+def agent_continuable() -> list[dict[str, Any]]:
+    """Ended builds whose blocks are in the open project -- ones the user
+    can pick up again with a message (POST .../continue), even after the
+    server that ran them is gone. Newest first."""
+    out = []
+    for path in _saved_build_logs():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("phase") not in CONTINUABLE_PHASES or not record.get("stages"):
+            continue
+        blocks = [b for b in record.get("owned_blocks") or [] if b in SESSION.graph.blocks]
+        if not blocks:
+            continue
+        out.append(
+            {
+                "id": record["id"],
+                "goal": record.get("goal"),
+                "phase": record["phase"],
+                "ended_at": record.get("ended_at"),
+                "blocks": len(blocks),
+                "stages": [{"name": st.get("name"), "status": st.get("status")} for st in record["stages"]],
+            }
+        )
+    return out
+
+
+@app.post("/api/agent/builds/{build_id}/continue")
+def agent_continue(build_id: str, req: AgentText, request: Request) -> dict[str, Any]:
+    """Carry on with an ended build from the user's message (see
+    BuildController.reopen) -- the current build, or one brought back from
+    its saved log."""
+    if not re.fullmatch(r"build_[0-9a-f]+", build_id):
+        raise HTTPException(400, "bad build id")
+    _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
+    current = AGENT.build
+    if current is not None and current.id == build_id:
+        return _agent_call(lambda: AGENT.reopen(req.text))
+    path = next((p for p in _saved_build_logs() if p.stem == build_id), None)
+    if path is None:
+        raise HTTPException(404, f"no saved log for {build_id}")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    build = AgentBuild.from_record(SESSION, RUN_SLOT, record, path)
+    try:
+        AGENT.loop_factory(build.build_llm, "build")
+    except Exception as e:  # noqa: BLE001 -- see agent_start
+        raise HTTPException(400, f"build LLM ({build.build_llm.provider}): {e}")
+    return _agent_call(lambda: AGENT.reopen(req.text, build=build, token=secrets.token_urlsafe(24)))
 
 
 @app.post("/api/agent/builds/current/recheck")

@@ -118,7 +118,35 @@ export interface BlockOut {
   // status is "running". A crude heartbeat, not real progress -- polars
   // gives no finer-grained signal for one collect() call.
   running_seconds: number | null
+  // A display block's last result, shown right on its node (see
+  // api._display_out); null for every other block and before a first run.
+  display: BlockDisplay | null
 }
+
+export type DisplayCell = string | number | boolean | null
+
+// A table display carries at most a few rows and columns; row_count and
+// column_count are the full table's.
+export type BlockDisplay =
+  | {
+      kind: 'table'
+      columns: { name: string; dtype: string }[]
+      rows: DisplayCell[][]
+      row_count: number
+      column_count: number
+    }
+  | {
+      kind: 'kpi'
+      label: string
+      value: number | null
+      column?: string
+      agg?: string
+      number_format?: 'number' | 'compact' | 'percent'
+      decimals?: number
+      unit?: string
+    }
+  | { kind: 'value'; items?: [string, DisplayCell][]; text?: string }
+  | { kind: 'image'; port: string }
 
 export interface WireOut {
   from_block: string
@@ -482,10 +510,17 @@ export interface PlanStage {
   lane?: string
 }
 
+export interface PlanQuestion {
+  question: string
+  // Likely answers, offered as one-click buttons.
+  options?: string[]
+}
+
 export interface BuildPlan {
   summary: string
   assumptions?: string[]
-  questions?: string[]
+  // Plain strings in builds saved before questions had options.
+  questions?: (PlanQuestion | string)[]
   stages: PlanStage[]
   changes_to_existing?: { block: string; change: string; why: string }[]
   // The bands of the lanes the outline would create (see agent/tools.layout_plan).
@@ -526,6 +561,8 @@ export interface BuildOut {
   stages: BuildStage[]
   stage_index: number
   pending_question: string | null
+  // One-click answers to pending_question.
+  pending_options?: string[]
   report: string | null
   results: { block: string; port: string | null; label?: string | null; value?: unknown; row_count?: number; error?: string }[]
   deviations: { plan_step?: string; what: string; why: string }[]
@@ -538,6 +575,17 @@ export interface BuildOut {
   error: string | null
   events: BuildEvent[]
   next_cursor: number
+}
+
+// An ended build whose blocks are in the open project -- one the user can
+// pick up again with a message (see api.agent_continuable).
+export interface ContinuableBuild {
+  id: string
+  goal: string
+  phase: BuildPhase
+  ended_at: string | null
+  blocks: number
+  stages: { name: string; status: BuildStage['status'] }[]
 }
 
 export interface BuildStateOut {

@@ -55,6 +55,7 @@
   --mm-ai-4: #4c1d95;
   --mm-ai-bg: #f5f3ff;
   --mm-ai-bg-2: #ede9fe;
+  --mm-ai-bg-3: #faf5ff;
   --mm-ai-border: #c4b5fd;
   --mm-ai-border-2: #ddd6fe;
   --mm-ai-border-3: #a78bfa;
@@ -185,6 +186,7 @@ body[class*='vscode-'] {
   --mm-ai-4: var(--vscode-charts-purple);
   --mm-ai-bg: color-mix(in srgb, var(--vscode-charts-purple) 12%, transparent);
   --mm-ai-bg-2: color-mix(in srgb, var(--vscode-charts-purple) 20%, transparent);
+  --mm-ai-bg-3: color-mix(in srgb, var(--vscode-charts-purple) 8%, transparent);
   --mm-ai-border: color-mix(in srgb, var(--vscode-charts-purple) 50%, transparent);
   --mm-ai-border-2: color-mix(in srgb, var(--vscode-charts-purple) 35%, transparent);
   --mm-ai-border-3: var(--vscode-charts-purple);

@@ -104,6 +104,7 @@ The rules, all checked by the validator:
 | `form` | Params form fields worth a label, placeholder or options. Every other param gets a field inferred from the signature. |
 | `meta` | How output columns get their roles. See below. |
 | `hints` | The decision-hint rule that judges the block's result in an AI build. See below. |
+| `display` | Show the block's result right on its canvas node: `"table"`, `"kpi"` or `"value"`. See below. |
 | `renamed` | `{"old_param": "new_param"}`. **Update** carries the old value over. |
 | `renamed_ports` | `{"old_port": "new_port"}`. **Update** keeps the wires connected. |
 
@@ -176,6 +177,11 @@ Every block's output columns get their metadata from one rule:
   one column. For those, `if_taken` gives the column that role instead
   when another column already has it, and `displaced` re-tags any other
   column that has it.
+- `"new_only": true` applies a rule only when the block created the
+  column, not when a column with that name came through from an input.
+  The `predict` block uses it, so scoring a table that already carries
+  another model's prediction makes the new one `predicted` and the old
+  one a `feature`.
 
 ### Decision hints: `hints`
 
@@ -186,6 +192,26 @@ result means" note. Each rule reads a specific output shape. For example,
 `auc_gini` reads a scalar_metric dict with a `gini` key on a `metric`
 port. Only use a rule when your block produces that shape. The library
 panel lists the rule names and the built-ins that use each one.
+
+### Display blocks: `display`
+
+A block with `"display"` shows its first output on its canvas node, with
+no click, and re-runs as soon as its upstream does, so the value follows
+every run:
+
+- `"table"`: the first 10 rows and 8 columns of a dataframe, plus the
+  full row and column count. **all rows…** opens the full table.
+- `"kpi"`: one headline number. The output is a `scalar_metric` dict with
+  `label` and `value`, and optionally `number_format` (`number`,
+  `compact` or `percent`), `decimals` and `unit`.
+- `"value"`: whatever comes through: a table as above, a flat dict as
+  key/value pairs, an image, or anything else as truncated JSON.
+
+The built-ins are `display_table`, `display_kpi` (*Headline number*: a
+column of a table reduced by `agg`, a metric dict's key, or a number) and
+`display_value`. `display_table` and `display_value` also save a table
+they show as `<block id>.csv` (or `filename`) in the run's output
+directory, unless `save_csv` is off.
 
 ## What the app does around every block
 

@@ -177,6 +177,9 @@ class AgentBuild:
         self.stages: list[dict[str, Any]] = []
         self.stage_index = 0
         self.pending_question: str | None = None
+        # One-click answers offered with pending_question (ask_user's
+        # options, or "Continue" when the app itself paused the build).
+        self.pending_options: list[str] = []
         self.report: str | None = None
         self.key_outputs: list[dict[str, Any]] = []
         self.results: list[dict[str, Any]] = []
@@ -211,6 +214,15 @@ class AgentBuild:
         self.usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
         self.stop_requested = False
+        # Set when the build ran out of time or tool calls (check_stop,
+        # call_tool): the model's turn ends like on a stop, but the
+        # controller pauses for the user instead of ending the build --
+        # replying grants a fresh budget (see extend_budget).
+        self.limit_reached: str | None = None
+        # active_seconds / counters at the last extend_budget: the limits
+        # apply to what's been used since.
+        self._budget_seconds_base = 0.0
+        self._budget_counters_base = {"plan_tool_calls": 0, "build_tool_calls": 0}
         self._events: list[dict[str, Any]] = []
         self._lock = threading.RLock()  # events + phase
         # Serializes tool calls (the MCP route can deliver them on any
@@ -307,14 +319,74 @@ class AgentBuild:
             "results": self.results,
             "deviations": self.deviations,
             "concerns": self.concerns,
+            "user_inputs": self.user_inputs,
             "owned_blocks": sorted(self.owned_blocks),
             "owned_lanes": sorted(self.owned_lanes),
+            "lane_map": self.lane_map,
             "sample_rows_used": self.sample_rows_used,
             "counters": self.counters,
             "usage": self.usage,
             "error": self.error,
             "events": events,
         }
+
+    @classmethod
+    def from_record(
+        cls, session: "ProjectSession", run_slot: "RunSlot", record: dict[str, Any], path: Path | None = None
+    ) -> "AgentBuild":
+        """An ended build brought back from its saved log (log_record), so
+        it can be continued (controller.reopen) after the server that ran
+        it is gone. Its blocks and lanes are whichever of the ones it made
+        are still in the graph; the model's conversation isn't kept, so a
+        continued build starts a fresh one from the build's state."""
+        models = record.get("models") or {}
+
+        def choice(m: dict[str, Any] | None) -> LLMChoice:
+            return LLMChoice(provider=(m or {}).get("provider"), model=(m or {}).get("model"))
+
+        opts = dict(record.get("options") or {})
+        limits = opts.pop("limits", None) or {}
+        known = BuildOptions.__dataclass_fields__
+        options = BuildOptions(
+            **{k: v for k, v in opts.items() if k in known},
+            limits=BuildLimits(**{k: v for k, v in limits.items() if k in BuildLimits.__dataclass_fields__}),
+        )
+        b = cls(session, run_slot, record.get("goal") or "", record.get("anchors") or [], choice(models.get("plan")), choice(models.get("build")), options)
+        b.id = record["id"]
+        b.phase = record.get("phase") or STOPPED
+        b._waiting_since = None
+        b.created_at = record.get("created_at") or b.created_at
+        b.ended_at = record.get("ended_at")
+        b.log_path = path
+        for name in ("preflight", "plan", "plan_history", "stages", "report", "key_outputs", "results", "deviations", "concerns", "user_inputs", "error"):
+            if record.get(name) is not None:
+                setattr(b, name, record[name])
+        graph = session.graph
+        b.owned_blocks = {bid for bid in record.get("owned_blocks") or [] if bid in graph.blocks}
+        b.owned_lanes = {lid for lid in record.get("owned_lanes") or [] if lid in graph.lanes}
+        b.lane_map = {k: v for k, v in (record.get("lane_map") or {}).items() if v in graph.lanes}
+        for st in b.stages:
+            # Logs from before lane_map was saved: a stage's lane is the one
+            # it was planned into, or the build's own lane named after it.
+            if st["key"] in b.lane_map:
+                continue
+            lane = st.get("lane") if st.get("lane") in graph.lanes else None
+            lane = lane or next((lid for lid in b.owned_lanes if graph.lanes[lid].name == st["name"]), None)
+            if lane:
+                b.lane_map[st["key"]] = lane
+        for change in (b.plan or {}).get("changes_to_existing") or []:
+            b.approved_changes.setdefault(change["block"], []).append(change)
+        b.stage_index = next((i for i, st in enumerate(b.stages) if st["status"] == STAGE_ACTIVE), None)
+        if b.stage_index is None:
+            done = [i for i, st in enumerate(b.stages) if st["status"] in (STAGE_DONE, STAGE_SKIPPED)]
+            b.stage_index = min(max(done, default=-1) + 1, max(len(b.stages) - 1, 0))
+        b.sample_rows_used = record.get("sample_rows_used")
+        b.counters.update({k: v for k, v in (record.get("counters") or {}).items() if k in b.counters})
+        b.usage.update(record.get("usage") or {})
+        b._events = list(record.get("events") or [])
+        for i, e in enumerate(b._events):
+            e["seq"] = i
+        return b
 
     def save_log(self) -> Path | None:
         """Write log_record() to build_log_dir()/<id>.json (atomically).
@@ -440,12 +512,29 @@ class AgentBuild:
     # ---- tool dispatch --------------------------------------------------
 
     def check_stop(self) -> None:
+        if self.limit_reached:
+            raise BuildStopped(f"{self.limit_reached} End your turn now without calling more tools.")
         if self.stop_requested:
             raise BuildStopped("The user stopped this build. End your turn now without calling more tools.")
         limit = self.options.limits.wall_seconds
-        if self.active_seconds() > limit:
-            self.stop_requested = True
-            raise BuildStopped(f"The build hit its {limit / 60:.0f}-minute time limit. End your turn now.")
+        if self.active_seconds() - self._budget_seconds_base > limit:
+            self._hit_limit(f"The build hit its {limit / 60:.0f}-minute time limit.")
+            raise BuildStopped(f"{self.limit_reached} End your turn now.")
+
+    def _hit_limit(self, message: str) -> None:
+        # stop_requested too, so the loops end the model's turn between
+        # tool calls exactly as they do on Stop.
+        self.limit_reached = message
+        self.stop_requested = True
+        self.log("limit_reached", message=message)
+
+    def extend_budget(self) -> None:
+        """A fresh time and tool-call budget, counted from now -- the user
+        chose to carry on after a limit, or reopened an ended build."""
+        self._budget_seconds_base = max(self.active_seconds(), 0.0)
+        self._budget_counters_base = {k: self.counters.get(k, 0) for k in self._budget_counters_base}
+        self.limit_reached = None
+        self.stop_requested = False
 
     def call_tool(self, name: str, args: dict[str, Any] | None) -> dict[str, Any]:
         """Run one tool call from the model. Always returns a JSON-able dict:
@@ -473,9 +562,9 @@ class AgentBuild:
             counter = "plan_tool_calls" if self.phase == PLANNING else "build_tool_calls"
             limit = getattr(self.options.limits, counter)
             self.counters[counter] += 1
-            if self.counters[counter] > limit:
-                self.stop_requested = True
-                raise BuildStopped(f"The build hit its limit of {limit} tool calls for this phase. End your turn now.")
+            if self.counters[counter] - self._budget_counters_base[counter] > limit:
+                self._hit_limit(f"The build hit its limit of {limit} tool calls for this phase.")
+                raise BuildStopped(f"{self.limit_reached} End your turn now.")
             with self._tool_lock:
                 result = tool.fn(self, **args)
             ok = True
@@ -518,6 +607,7 @@ class AgentBuild:
             "stages": self.stages,
             "stage_index": self.stage_index,
             "pending_question": self.pending_question,
+            "pending_options": self.pending_options,
             "report": self.report,
             "results": self.results,
             "deviations": self.deviations,

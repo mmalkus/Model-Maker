@@ -31,7 +31,7 @@ BLOCKS = {
             },
             {"key": "alpha", "label": "Regularization (alpha)", "kind": "number", "step": 0.01},
         ],
-        "meta": {"roles": [{"column": "predicted", "role": "predicted"}]},
+        "meta": {"roles": [{"column": "predicted", "role": "predicted", "displaced": "feature"}]},
     },
     "logistic_regression": {
         "display_name": "Logistic regression",
@@ -54,7 +54,7 @@ BLOCKS = {
         ],
         "meta": {
             "roles": [
-                {"column": "predicted_proba", "role": "predicted"},
+                {"column": "predicted_proba", "role": "predicted", "displaced": "feature"},
                 {"column": "predicted_class", "role": "feature"},
             ],
         },
@@ -79,7 +79,7 @@ BLOCKS = {
             {"key": "max_iter", "label": "Max iterations", "kind": "number"},
             {"key": "tol", "label": "Convergence tolerance", "kind": "number", "step": 1e-08},
         ],
-        "meta": {"roles": [{"column": "predicted", "role": "predicted"}]},
+        "meta": {"roles": [{"column": "predicted", "role": "predicted", "displaced": "feature"}]},
         "hints": "lgd_regression",
     },
     "predict": {
@@ -92,10 +92,13 @@ BLOCKS = {
         "outputs": [{"name": "predictions"}],
         "meta": {
             "inherit": {"port": "df"},
+            # Only the prediction this block makes is `predicted`: scoring a
+            # table that already carries another model's prediction (PD,
+            # then LGD, on one capital table) re-tags that one as a feature.
             "roles": [
-                {"column": "predicted", "role": "predicted"},
-                {"column": "predicted_proba", "role": "predicted"},
-                {"column": "predicted_class", "role": "feature"},
+                {"column": "predicted", "role": "predicted", "new_only": True, "displaced": "feature"},
+                {"column": "predicted_proba", "role": "predicted", "new_only": True, "displaced": "feature"},
+                {"column": "predicted_class", "role": "feature", "new_only": True},
             ],
         },
     },
