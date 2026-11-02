@@ -474,7 +474,8 @@ class GeminiLoop(AgentLoop):
 
 # ---- claude CLI (via MCP) ----------------------------------------------------------
 
-CLI_DEFAULT_MODEL = "claude-sonnet-5"
+# Same CLI alias as the draft provider (llm/claude_cli_provider.py).
+CLI_DEFAULT_MODEL = "sonnet"
 MCP_SERVER_NAME = "modelmaker"
 
 

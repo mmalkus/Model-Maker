@@ -97,12 +97,16 @@ def _start_background_run(fn: Callable[[], Any], wait_seconds: float | None = No
 
 # Static curated list -- the `claude` CLI has no scriptable "list models"
 # command, so this is what the model dropdown offers for the claude_cli
-# provider instead of a live query.
+# provider instead of a live query. The aliases come first: the CLI
+# resolves each to the newest model of that family the login can run.
 CLAUDE_CLI_KNOWN_MODELS = [
-    "claude-opus-5",
-    "claude-sonnet-5",
+    "sonnet",
+    "opus",
+    "haiku",
     "claude-fable-5-1",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
 ]
 
 # Where Save/Load default to when no project path is already known (see

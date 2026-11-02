@@ -176,6 +176,65 @@ def test_gemini_provider_requires_api_key_and_model(monkeypatch):
         get_provider("gemini", api_key="key-abc")
 
 
+def _claude_cli(monkeypatch, run):
+    import modelmaker.llm.claude_cli_provider as cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    return cli
+
+
+_CLI_CTX = DraftContext(instruction="add a flag", function_name="f", input_ports={})
+
+
+def test_claude_cli_defaults_to_the_sonnet_alias(monkeypatch):
+    from modelmaker.agent.loop import CLI_DEFAULT_MODEL
+
+    monkeypatch.delenv("MODELMAKER_LLM_MODEL", raising=False)
+    monkeypatch.delenv("MODELMAKER_LLM_TIMEOUT_SECONDS", raising=False)
+    cli = _claude_cli(monkeypatch, None)
+    provider = cli.ClaudeCliProvider()
+    # An alias the CLI resolves itself, so the default can't go stale --
+    # and the same one the AI builder uses.
+    assert provider.model == "sonnet" == CLI_DEFAULT_MODEL
+    assert provider.timeout_seconds == cli.CLI_TIMEOUT_SECONDS >= 300
+    monkeypatch.setenv("MODELMAKER_LLM_TIMEOUT_SECONDS", "1200")
+    assert cli.ClaudeCliProvider().timeout_seconds == 1200
+
+
+def test_claude_cli_reports_an_unavailable_model_from_its_json_result(monkeypatch):
+    import json
+    import subprocess
+
+    def run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "claude-bogus-9"
+        out = json.dumps({"is_error": True, "result": "There's an issue with the selected model (claude-bogus-9)."})
+        return subprocess.CompletedProcess(cmd, 1, stdout=out, stderr="[claude-code:unrecognized_model]")
+
+    cli = _claude_cli(monkeypatch, run)
+    with pytest.raises(RuntimeError, match=r"model 'claude-bogus-9'.*issue with the selected model"):
+        cli.ClaudeCliProvider(model="claude-bogus-9").draft(_CLI_CTX)
+
+
+def test_claude_cli_timeout_points_at_the_timeout_setting(monkeypatch):
+    import subprocess
+
+    def run(cmd, **kwargs):
+        assert kwargs["timeout"] == 42
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setenv("MODELMAKER_LLM_TIMEOUT_SECONDS", "42")
+    cli = _claude_cli(monkeypatch, run)
+    with pytest.raises(RuntimeError, match="within 42s.*MODELMAKER_LLM_TIMEOUT_SECONDS"):
+        cli.ClaudeCliProvider().draft(_CLI_CTX)
+
+
+def test_claude_cli_model_list_offers_aliases_first(client):
+    models = client.get("/api/llm/models", params={"provider": "claude_cli"}).json()["models"]
+    assert models[:3] == ["sonnet", "opus", "haiku"]
+    assert "claude-sonnet-5" not in models
+
+
 def test_stub_provider_analyze_data_mode_proposes_tags_and_a_document():
     ctx = DraftContext(
         instruction="analyze",
