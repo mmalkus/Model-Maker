@@ -8,6 +8,7 @@ import type {
   BrowseOut,
   BuildOut,
   BuildStateOut,
+  ContinuableBuild,
   DraftOut,
   EnvVarStatus,
   GitStatusOut,
@@ -193,6 +194,11 @@ export const api = {
     request<BuildOut>(`/agent/builds/current/${action}`, { method: 'POST' }),
   agentFeedback: (text: string) =>
     request<BuildOut>('/agent/builds/current/feedback', { method: 'POST', body: JSON.stringify({ text }) }),
+  // Ended builds can be picked up again with a message -- the current one,
+  // or one from an earlier server run, brought back from its saved log.
+  agentContinuable: () => request<ContinuableBuild[]>('/agent/builds/continuable'),
+  agentContinue: (buildId: string, text: string) =>
+    request<BuildOut>(`/agent/builds/${buildId}/continue`, { method: 'POST', body: JSON.stringify({ text }) }),
   llmModels: (provider: string, baseUrl?: string) => {
     const q = new URLSearchParams({ provider })
     if (baseUrl) q.set('base_url', baseUrl)

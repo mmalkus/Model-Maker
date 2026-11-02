@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
-import type { BuildEvent, BuildOut, BuildPlan, BuildStage, GraphOut, LLMSettingsOut } from './types'
+import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut } from './types'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
@@ -120,6 +120,11 @@ export function BuildPanel({ graph, selectedIds, llmSettings, onChanged, onBuild
       {!build || TERMINAL.has(build.phase) ? (
         <>
           {build && <Finished build={build} graph={graph} onOpenReport={onOpenReport} />}
+          <ContinueBuild
+            current={build}
+            refreshKey={`${build?.id}:${build?.phase}:${Object.keys(graph.blocks).length}`}
+            onContinue={(id, text) => act(() => api.agentContinue(id, text))}
+          />
           <BuildReportList refreshKey={`${build?.id}:${build?.phase}:${graph.can_undo}:${graph.can_redo}`} onOpen={onOpenReport} />
           <StartForm graph={graph} selectedIds={selectedIds} llmSettings={llmSettings} onStart={(body) => act(() => api.agentStart(body))} />
         </>
@@ -655,6 +660,70 @@ function Finished({ build, graph, onOpenReport }: { build: BuildOut; graph: Grap
   )
 }
 
+// Pick an ended build up again: tell the AI what to fix, change or build
+// next. The current build, or -- after a restart -- one brought back from
+// its saved log, as long as its blocks are in the open project.
+function ContinueBuild({
+  current,
+  refreshKey,
+  onContinue,
+}: {
+  current: BuildOut | null
+  refreshKey: string
+  onContinue: (buildId: string, text: string) => void
+}) {
+  const [builds, setBuilds] = useState<ContinuableBuild[]>([])
+  const [picked, setPicked] = useState<string | null>(null)
+  const [text, setText] = useState('')
+  useEffect(() => {
+    api
+      .agentContinuable()
+      .then(setBuilds)
+      .catch(() => setBuilds([]))
+  }, [refreshKey])
+  if (!builds.length) return null
+  const chosen = builds.find((b) => b.id === picked) ?? builds.find((b) => b.id === current?.id) ?? builds[0]
+  const done = chosen.stages.filter((st) => st.status === 'done').length
+  return (
+    <div style={{ ...box, borderColor: '#ddd6fe', background: '#faf5ff', marginBottom: 12 }}>
+      <div style={label}>Continue {chosen.id === current?.id ? 'this' : 'a'} build with AI</div>
+      {builds.length > 1 ? (
+        <select value={chosen.id} onChange={(e) => setPicked(e.target.value)} style={{ width: '100%', marginBottom: 4 }}>
+          {builds.map((b) => (
+            <option key={b.id} value={b.id}>
+              {PHASE_LABEL[b.phase] ?? b.phase} -- {b.goal.slice(0, 70)}
+            </option>
+          ))}
+        </select>
+      ) : (
+        chosen.id !== current?.id && <div style={{ marginBottom: 4 }}>{chosen.goal}</div>
+      )}
+      <div style={{ color: '#6b7280', marginBottom: 4 }}>
+        {PHASE_LABEL[chosen.phase] ?? chosen.phase} · {done} of {chosen.stages.length} stages built · {chosen.blocks} block(s)
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        style={{ width: '100%', boxSizing: 'border-box' }}
+        placeholder="e.g. Fix the failing LGD predict and finish the capital stage; or: add a downturn LGD floor"
+      />
+      <button
+        className="brand-primary"
+        style={{ marginTop: 6 }}
+        disabled={!text.trim()}
+        onClick={() => {
+          onContinue(chosen.id, text)
+          setText('')
+        }}
+        title="The AI picks up where the build left off, with a fresh time budget. One Undo reverts what it changes now."
+      >
+        Continue
+      </button>
+    </div>
+  )
+}
+
 function downloadLog(buildId: string) {
   api
     .agentBuildLog(buildId)
@@ -691,6 +760,9 @@ function describeEvent(e: BuildEvent, graph: GraphOut): { text: string; tone: 'o
     }
   if (e.kind === 'concern') return { text: `⚠ ${String(e.what)}`, tone: 'err' }
   if (e.kind === 'auto_continued') return { text: 'Going straight on to the next stage (building automatically)', tone: 'info' }
+  if (e.kind === 'limit_reached') return { text: `⏸ ${String(e.message)}`, tone: 'err' }
+  if (e.kind === 'budget_extended') return { text: '— Carrying on with a fresh budget', tone: 'info' }
+  if (e.kind === 'reopened') return { text: '— Build picked up again', tone: 'info' }
   if (e.kind !== 'tool') return null
   const args = (e.args ?? {}) as Record<string, unknown>
   const result = (e.result ?? {}) as Record<string, unknown>

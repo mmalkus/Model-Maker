@@ -538,6 +538,17 @@ export interface BuildOut {
   next_cursor: number
 }
 
+// An ended build whose blocks are in the open project -- one the user can
+// pick up again with a message (see api.agent_continuable).
+export interface ContinuableBuild {
+  id: string
+  goal: string
+  phase: BuildPhase
+  ended_at: string | null
+  blocks: number
+  stages: { name: string; status: BuildStage['status'] }[]
+}
+
 export interface BuildStateOut {
   build: BuildOut | null
   busy?: boolean

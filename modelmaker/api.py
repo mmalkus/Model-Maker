@@ -1610,6 +1610,73 @@ def agent_build_log(build_id: str) -> dict[str, Any]:
     raise HTTPException(404, f"no saved log for {build_id}")
 
 
+def _saved_build_logs() -> list[Path]:
+    """Every saved build log the open project can see -- its own folder's
+    and the cache's (builds started before the project was saved) --
+    newest first."""
+    paths: dict[str, Path] = {}
+    for directory in (CACHE_DIR / BUILD_LOG_DIRNAME, build_log_dir(SESSION)):
+        if directory.is_dir():
+            for path in directory.glob("build_*.json"):
+                paths[path.name] = path
+    return sorted(paths.values(), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+CONTINUABLE_PHASES = ("done", "done_with_errors", "stopped", "failed")
+
+
+@app.get("/api/agent/builds/continuable")
+def agent_continuable() -> list[dict[str, Any]]:
+    """Ended builds whose blocks are in the open project -- ones the user
+    can pick up again with a message (POST .../continue), even after the
+    server that ran them is gone. Newest first."""
+    out = []
+    for path in _saved_build_logs():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("phase") not in CONTINUABLE_PHASES or not record.get("stages"):
+            continue
+        blocks = [b for b in record.get("owned_blocks") or [] if b in SESSION.graph.blocks]
+        if not blocks:
+            continue
+        out.append(
+            {
+                "id": record["id"],
+                "goal": record.get("goal"),
+                "phase": record["phase"],
+                "ended_at": record.get("ended_at"),
+                "blocks": len(blocks),
+                "stages": [{"name": st.get("name"), "status": st.get("status")} for st in record["stages"]],
+            }
+        )
+    return out
+
+
+@app.post("/api/agent/builds/{build_id}/continue")
+def agent_continue(build_id: str, req: AgentText, request: Request) -> dict[str, Any]:
+    """Carry on with an ended build from the user's message (see
+    BuildController.reopen) -- the current build, or one brought back from
+    its saved log."""
+    if not re.fullmatch(r"build_[0-9a-f]+", build_id):
+        raise HTTPException(400, "bad build id")
+    _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
+    current = AGENT.build
+    if current is not None and current.id == build_id:
+        return _agent_call(lambda: AGENT.reopen(req.text))
+    path = next((p for p in _saved_build_logs() if p.stem == build_id), None)
+    if path is None:
+        raise HTTPException(404, f"no saved log for {build_id}")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    build = AgentBuild.from_record(SESSION, RUN_SLOT, record, path)
+    try:
+        AGENT.loop_factory(build.build_llm, "build")
+    except Exception as e:  # noqa: BLE001 -- see agent_start
+        raise HTTPException(400, f"build LLM ({build.build_llm.provider}): {e}")
+    return _agent_call(lambda: AGENT.reopen(req.text, build=build, token=secrets.token_urlsafe(24)))
+
+
 @app.post("/api/agent/builds/current/recheck")
 def agent_recheck() -> dict[str, Any]:
     return _agent_call(AGENT.recheck)

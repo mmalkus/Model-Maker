@@ -274,6 +274,37 @@ def test_target_param_auto_fills_from_role_tagged_upstream_column(tmp_path):
     assert predictions.schema_meta["y"].role.value == "target"
 
 
+def test_predict_on_a_table_that_already_has_a_prediction_takes_over_the_predicted_role(tmp_path):
+    # PD then LGD on one scoring table (an IRB capital stage): the LGD
+    # predict's `predicted` becomes the predicted column and the PD's
+    # passed-through predicted_proba is re-tagged a feature, rather than
+    # both claiming the unique role and failing the block.
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("x,y,lgd\n1,0,0.1\n2,1,0.4\n3,0,0.3\n4,1,0.7\n5,0,0.5\n6,1,0.9\n")
+    read = make_block("b_read", "read_csv", params={"path": str(csv_path)})
+    read.column_role_overrides = {"y": "target"}
+    pd_fit = make_block("b_pd", "logistic_regression", params={"features": ["x"]}, x=1)
+    lgd_fit = make_block("b_lgd", "lgd_regression", params={"target": "lgd", "features": ["x"]}, x=1)
+    score = make_block("b_score", "predict", x=2)
+    graph = Graph(
+        blocks={b.id: b for b in (read, pd_fit, lgd_fit, score)},
+        wires={
+            "w1": Wire("w1", "b_read", "out", "b_pd", "df"),
+            "w2": Wire("w2", "b_read", "out", "b_lgd", "df"),
+            "w3": Wire("w3", "b_pd", "predictions", "b_score", "df"),
+            "w4": Wire("w4", "b_lgd", "model", "b_score", "model"),
+        },
+    )
+    runner = Runner(graph, CacheStore())
+    runner.refresh("b_read")
+
+    assert runner.run_to_here("b_score") == "green", runner.state["b_score"].last_error
+    out = runner.cache.get(runner.state["b_score"].last_successful_key).outputs["predictions"]
+    assert out.schema_meta["predicted"].role.value == "predicted"
+    assert out.schema_meta["predicted_proba"].role.value == "feature"
+    assert out.schema_meta["y"].role.value == "target"
+
+
 def test_predicted_param_auto_fills_from_role_tagged_upstream_column(tmp_path):
     # auc_gini's score_col is never set in params -- it must resolve from
     # whichever upstream column logistic_regression tagged role=predicted

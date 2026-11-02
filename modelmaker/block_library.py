@@ -59,7 +59,7 @@ BLOCK_KEYS = {
 PORT_KEYS = {"name", "type", "required", "lazy", "aggregate"}
 FIELD_KEYS = {"key", "label", "kind", "placeholder", "step", "options", "auto_role"}
 META_KEYS = {"inherit", "new_role", "roles"}
-ROLE_RULE_KEYS = {"column", "column_param", "column_suffix", "fallback", "role", "if_taken", "displaced"}
+ROLE_RULE_KEYS = {"column", "column_param", "column_suffix", "fallback", "role", "if_taken", "displaced", "new_only"}
 
 # Params the engine fills in itself (see runner.run_block) -- never part of a
 # params form, and allowed in a signature without a form field.
