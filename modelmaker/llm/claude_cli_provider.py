@@ -9,8 +9,13 @@ import tempfile
 from .base import DraftContext, DraftResult, LLMProvider, register_provider
 from .prompts import JSON_ONLY_INSTRUCTIONS, build_user_prompt, contract_for, extract_json_response
 
-DEFAULT_MODEL = "claude-sonnet-5"
-CLI_TIMEOUT_SECONDS = 90
+# A CLI alias rather than a pinned id: the CLI resolves it to the newest
+# Sonnet the login can run, so the default never goes stale.
+DEFAULT_MODEL = "sonnet"
+# A library-block draft is a whole block (code, helpers, _example_ and its
+# BLOCKS entry) -- several thousand output tokens, which takes minutes
+# rather than seconds for a broad request.
+CLI_TIMEOUT_SECONDS = 600
 
 
 @register_provider("claude_cli")
@@ -24,6 +29,7 @@ class ClaudeCliProvider(LLMProvider):
 
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL", DEFAULT_MODEL)
+        self.timeout_seconds = float(os.environ.get("MODELMAKER_LLM_TIMEOUT_SECONDS", CLI_TIMEOUT_SECONDS))
         self.binary = shutil.which("claude")
         if not self.binary:
             raise RuntimeError("claude CLI not found on PATH; install Claude Code or choose a different LLM provider")
@@ -54,35 +60,32 @@ class ClaudeCliProvider(LLMProvider):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=CLI_TIMEOUT_SECONDS,
+                timeout=self.timeout_seconds,
             )
         except subprocess.TimeoutExpired as e:
-            # Observed cause in practice: the CLI hangs silently (no stdout/
-            # stderr at all) when --model names a model this login isn't
-            # entitled to run non-interactively, rather than failing fast.
-            # Surface that as the likely fix instead of a bare timeout.
+            # An unknown or unavailable model fails fast (is_error, below),
+            # so a timeout is a long draft -- or a hung CLI.
             raise RuntimeError(
                 f"claude CLI did not respond within {e.timeout:.0f}s using model "
-                f"{self.model!r}. If this model isn't available on your plan, the "
-                "CLI can hang instead of erroring -- try setting "
-                "MODELMAKER_LLM_MODEL to a model your `claude` login can run "
-                "(verify with `claude -p \"hi\" --model <model>` directly)."
+                f"{self.model!r}. A broad request can take minutes to draft -- set "
+                "MODELMAKER_LLM_TIMEOUT_SECONDS to wait longer, or narrow the request."
             ) from e
         finally:
             try:
                 os.unlink(system_path)
             except OSError:
                 pass
-        if result.returncode != 0:
-            raise RuntimeError(f"claude CLI exited {result.returncode}: {(result.stderr or result.stdout).strip()}")
-
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as e:
+            if result.returncode != 0:
+                raise RuntimeError(f"claude CLI exited {result.returncode}: {(result.stderr or result.stdout).strip()}") from e
             raise RuntimeError(f"claude CLI produced non-JSON output: {result.stdout[:500]!r}") from e
 
-        if payload.get("is_error"):
-            raise RuntimeError(f"claude CLI error: {payload.get('result')}")
+        # Errors (e.g. a model this login can't run) still come back as a
+        # JSON result, with a readable message, alongside a nonzero exit.
+        if payload.get("is_error") or result.returncode != 0:
+            raise RuntimeError(f"claude CLI error (model {self.model!r}): {payload.get('result') or result.stderr.strip()}")
 
         data = extract_json_response(payload["result"])
 
