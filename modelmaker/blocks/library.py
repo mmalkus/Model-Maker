@@ -213,19 +213,56 @@ BLOCKS = {
     },
     "display_table": {
         "display_name": "Display table",
-        "version": 1,
+        "version": 2,
         "block_type": "output",
         "tags": ["output"],
+        "display": "table",
         "inputs": [{"name": "df"}],
         "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "save_csv", "label": "Also save as CSV", "kind": "checkbox"},
+            {"key": "filename", "label": "CSV file name", "kind": "text", "placeholder": "<block id>.csv"},
+        ],
     },
     "display_value": {
         "display_name": "View value",
+        "version": 2,
+        "block_type": "output",
+        "tags": ["output"],
+        "display": "value",
+        "inputs": [{"name": "value", "type": "any"}],
+        "outputs": [{"name": "value", "type": "any"}],
+        "form": [
+            {"key": "save_csv", "label": "Also save as CSV", "kind": "checkbox"},
+            {"key": "filename", "label": "CSV file name", "kind": "text", "placeholder": "<block id>.csv"},
+        ],
+    },
+    "display_kpi": {
+        "display_name": "Headline number",
         "version": 1,
         "block_type": "output",
         "tags": ["output"],
+        "display": "kpi",
         "inputs": [{"name": "value", "type": "any"}],
-        "outputs": [{"name": "value", "type": "any"}],
+        "outputs": [{"name": "kpi", "type": "scalar_metric"}],
+        "form": [
+            {"key": "column", "label": "Column (or metric key)", "kind": "column"},
+            {
+                "key": "agg",
+                "label": "Aggregate rows",
+                "kind": "select",
+                "options": ["first", "last", "sum", "mean", "min", "max", "count"],
+            },
+            {"key": "label", "label": "Label", "kind": "text", "placeholder": "e.g. Total RWA"},
+            {
+                "key": "number_format",
+                "label": "Format",
+                "kind": "select",
+                "options": ["number", "compact", "percent"],
+            },
+            {"key": "decimals", "label": "Decimals", "kind": "number", "step": 1},
+            {"key": "unit", "label": "Unit", "kind": "text", "placeholder": "e.g. EUR"},
+        ],
     },
     "generate_image": {
         "display_name": "Generate image",
@@ -494,19 +531,112 @@ def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
     df.lazy().sink_csv(os.path.join(output_dir, filename))
 
 
-def display_table(df: pl.DataFrame) -> pl.DataFrame:
-    """A no-op pass-through: exists to mark a point in the pipeline as a
-    reportable table. The engine/UI can preview it like any dataframe
-    output; the compiled script carries it through unchanged."""
+def display_table(
+    df: pl.DataFrame, save_csv: bool = True, filename: str = "", output_dir: str = ".", block_id: str = "table"
+) -> pl.DataFrame:
+    """Shows a results table right on its canvas node -- the first rows and
+    the row count, updated whenever its upstream runs -- and passes `df` on
+    unchanged on `out`. With `save_csv` on (the default) it also writes the
+    whole table to `filename` (default `<block id>.csv`) in `output_dir`,
+    the run's output directory, which the engine injects -- leave it unset.
+    Use it for the tables worth reporting, e.g. a one-row RWA total."""
+    if save_csv:
+        _save_display_csv(df, filename, output_dir, block_id)
     return df
 
 
-def display_value(value):
-    """A no-op pass-through, like display_table, but for any port type --
-    a dataframe, a model/scalar_metric artifact (a plain dict), or an image.
-    Its ports are typed "any" so it wires up to whatever you point it at;
-    the UI figures out how to render whatever actually comes through."""
+def display_value(value, save_csv: bool = True, filename: str = "", output_dir: str = ".", block_id: str = "value"):
+    """Shows whatever comes in right on its canvas node and passes it on
+    unchanged: a dataframe (first rows and row count), a metric or model
+    dict (its keys and values) or an image. Its ports are typed "any" so it
+    wires up to whatever you point it at. A dataframe is also saved as CSV
+    like display_table does (`save_csv`, `filename`, `output_dir`)."""
+    if save_csv and isinstance(value, pl.DataFrame):
+        _save_display_csv(value, filename, output_dir, block_id)
     return value
+
+
+def _save_display_csv(df: pl.DataFrame, filename: str, output_dir: str, block_id: str) -> None:
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+    df.write_csv(os.path.join(output_dir, filename or f"{block_id}.csv"))
+
+
+_KPI_AGGS = ("first", "last", "sum", "mean", "min", "max", "count")
+
+
+def display_kpi(
+    value,
+    column: str = "",
+    agg: str = "first",
+    label: str = "",
+    number_format: str = "number",
+    decimals: int = 2,
+    unit: str = "",
+) -> dict:
+    """Shows one headline number, with a label, right on the canvas -- e.g.
+    the total RWA at the end of a capital pipeline, or a model's Gini.
+    `value` is a dataframe (its `column`, reduced over the rows by `agg`:
+    first, last, sum, mean, min, max or count), a metric dict such as
+    auc_gini's (its `column` key) or a plain number. Leave `column` empty
+    when there is only one numeric column or key. `label` defaults to the
+    column name; `number_format` (number, compact like 1.2M, percent),
+    `decimals` and `unit` only change how the number is shown. Returns
+    {"label", "value", "column", "agg", "number_format", "decimals", "unit"}
+    on `kpi`."""
+    import math
+    import numbers
+
+    if agg not in _KPI_AGGS:
+        raise ValueError(f"agg must be one of {', '.join(_KPI_AGGS)}, got {agg!r}")
+    if isinstance(value, pl.DataFrame):
+        if not column:
+            numeric = [c for c, t in value.schema.items() if t.is_numeric()]
+            if len(numeric) != 1:
+                raise ValueError(f"set `column`: the table has {len(numeric)} numeric columns ({', '.join(numeric)})")
+            column = numeric[0]
+        if column not in value.columns:
+            raise ValueError(f"no column {column!r}; columns are {', '.join(value.columns)}")
+        s = value[column]
+        if agg == "count":
+            number = s.drop_nulls().len()
+        elif s.is_empty():
+            number = None
+        else:
+            number = s[0] if agg == "first" else s[-1] if agg == "last" else getattr(s, agg)()
+    elif isinstance(value, dict):
+        if not column:
+            numeric = [k for k, v in value.items() if isinstance(v, numbers.Real) and not isinstance(v, bool)]
+            if len(numeric) != 1:
+                raise ValueError(f"set `column` to one of the metric's keys: {', '.join(map(str, value))}")
+            column = numeric[0]
+        if column not in value:
+            raise ValueError(f"no key {column!r}; keys are {', '.join(map(str, value))}")
+        number = value[column]
+    elif isinstance(value, numbers.Real):
+        number = value
+    else:
+        raise TypeError(f"display_kpi needs a dataframe, a metric dict or a number, got {type(value).__name__}")
+    if number is not None and not isinstance(number, numbers.Real):
+        raise TypeError(f"{column!r} isn't a number: {number!r}")
+    if isinstance(number, float) and not math.isfinite(number):
+        number = None
+    return {
+        "label": label or column or "value",
+        "value": number if number is None or isinstance(number, int) else float(number),
+        "column": column,
+        "agg": agg,
+        "number_format": number_format,
+        "decimals": int(decimals),
+        "unit": unit,
+    }
+
+
+def _example_display_kpi():
+    df = pl.DataFrame({"segment": ["retail", "sme"], "rwa": [120.0, 80.0]})
+    assert display_kpi(df, column="rwa", agg="sum", label="Total RWA")["value"] == 200.0
+    assert display_kpi({"gini": 0.42, "n": 1000}, column="gini")["label"] == "gini"
 
 
 def generate_image(

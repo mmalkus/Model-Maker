@@ -38,6 +38,7 @@ from typing import Any
 from .blocks.base import (
     BLOCK_REGISTRY,
     BLOCK_TYPES,
+    DISPLAY_KINDS,
     FIELD_KINDS,
     PORT_TYPES,
     BlockDefinition,
@@ -54,7 +55,7 @@ ALLOWED_MODULE_IMPORTS = {"polars", "__future__"}
 
 BLOCK_KEYS = {
     "display_name", "version", "block_type", "group", "tags", "requires", "inputs", "outputs",
-    "form", "meta", "hints", "renamed", "renamed_ports",
+    "form", "meta", "hints", "display", "renamed", "renamed_ports",
 }
 PORT_KEYS = {"name", "type", "required", "lazy", "aggregate"}
 FIELD_KEYS = {"key", "label", "kind", "placeholder", "step", "options", "auto_role"}
@@ -264,6 +265,11 @@ def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]
         errors.append(f"unknown tag(s) {sorted(tags)}")
     if m.get("hints") is not None and m["hints"] not in _known_hint_rules():
         errors.append(f"unknown hints rule {m['hints']!r}")
+    if m.get("display") is not None:
+        if m["display"] not in DISPLAY_KINDS:
+            errors.append(f"display must be one of {sorted(DISPLAY_KINDS)}")
+        elif not m.get("outputs"):
+            errors.append("a display block needs an output port to show")
     meta = m.get("meta") or {}
     if set(meta) - META_KEYS:
         errors.append(f"meta: unknown key(s) {sorted(set(meta) - META_KEYS)}")

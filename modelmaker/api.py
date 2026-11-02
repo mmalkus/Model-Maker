@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
 
 from dataclasses import asdict
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -285,6 +288,70 @@ def _definition_info(block) -> dict[str, Any] | None:
     return status_for(block)
 
 
+# A display block's node shows at most this much of its table -- enough for
+# a results table, small enough to send with every graph poll. The node says
+# how many rows and columns there are in all; "view full table" has the rest.
+DISPLAY_ROWS = 10
+DISPLAY_COLUMNS = 8
+DISPLAY_ITEMS = 12
+DISPLAY_TEXT = 600
+
+
+def _display_scalar(v: Any) -> Any:
+    """One cell or metric value, made JSON-safe for the graph response:
+    NaN/inf (which plain JSON can't carry) become null, anything that isn't
+    a plain scalar is shown as text."""
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (datetime, date, time)):
+        return v.isoformat()
+    return str(v)
+
+
+def _display_table(packet: DataFramePacket) -> dict[str, Any]:
+    df = packet.data
+    columns = df.columns[:DISPLAY_COLUMNS]
+    return {
+        "kind": "table",
+        "columns": [{"name": c, "dtype": str(df.schema[c])} for c in columns],
+        "rows": [[_display_scalar(v) for v in row] for row in df.head(DISPLAY_ROWS).select(columns).iter_rows()],
+        "row_count": df.height,
+        "column_count": df.width,
+    }
+
+
+def _display_out(block_id: str, definition, status: str) -> dict[str, Any] | None:
+    """What a display block's canvas node shows (see BlockDefinition.display):
+    its last result, small enough to ride along on every graph poll. None
+    for any other block, or one with nothing to show yet."""
+    if definition is None or not definition.display or status not in ("green", "orange"):
+        return None
+    st = SESSION.runner.state.get(block_id)
+    entry = SESSION.runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
+    port = definition.outputs[0].name if definition.outputs else None
+    if entry is None or port not in entry.outputs:
+        return None
+    value = entry.outputs[port]
+    if definition.display == "kpi" and isinstance(value, dict):
+        return {"kind": "kpi", **{k: _display_scalar(v) for k, v in value.items()}}
+    if isinstance(value, DataFramePacket):
+        return _display_table(value)
+    if isinstance(value, (bytes, bytearray)):
+        return {"kind": "image", "port": port}
+    if isinstance(value, dict) and 0 < len(value) <= DISPLAY_ITEMS and all(
+        v is None or isinstance(v, (bool, int, float, str)) for v in value.values()
+    ):
+        return {"kind": "value", "items": [[str(k), _display_scalar(v)] for k, v in value.items()]}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return {"kind": "value", "items": [["value", _display_scalar(value)]]}
+    text = json.dumps(value, default=str, indent=1)
+    return {"kind": "value", "text": text if len(text) <= DISPLAY_TEXT else text[:DISPLAY_TEXT] + "…"}
+
+
 def _block_out(block_id: str) -> dict[str, Any]:
     block = SESSION.graph.blocks[block_id]
     st = SESSION.runner.state.get(block_id)
@@ -320,7 +387,8 @@ def _block_out(block_id: str) -> dict[str, Any]:
         # mid-dispatch -- polars gives no finer-grained progress for a
         # single collect() call, so this is "how long has this been
         # running", not "how far along is it".
-        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,
+        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,        # A display block's result, shown on its node (see _display_out).
+        "display": _display_out(block_id, _definition_or_none(block), status),
     }
 
 

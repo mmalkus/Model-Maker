@@ -42,6 +42,14 @@ PORT_TYPES: frozenset[str] = frozenset(PortType.__args__)  # type: ignore[attr-d
 BlockType = Literal["input", "standard", "output"]
 BLOCK_TYPES: frozenset[str] = frozenset(BlockType.__args__)  # type: ignore[attr-defined]
 
+# How a display block shows its result right on its canvas node, with no
+# click (see api._display_out): `table` the first rows of its dataframe
+# output plus a row count, `kpi` one headline number with a label (its
+# scalar_metric output is {"label", "value", ...}), `value` whatever comes
+# through -- a table, a dict of numbers, or an image.
+DisplayKind = Literal["table", "kpi", "value"]
+DISPLAY_KINDS: frozenset[str] = frozenset(DisplayKind.__args__)  # type: ignore[attr-defined]
+
 # A block's core function is generic and plain-dataframe: it never touches
 # DataFramePacket/ColumnMeta. The engine unwraps packets before calling it
 # and rewraps the result afterward, applying the block's declared metadata
@@ -150,6 +158,7 @@ class BlockDefinition:
         self.form: tuple[FieldSpec, ...] = tuple(_field(f) for f in m.get("form", []))
         self.requires: tuple[str, ...] = tuple(m.get("requires", ()))
         self.hints: str | None = m.get("hints")
+        self.display: DisplayKind | None = m.get("display")
         self.metadata: dict[str, Any] = dict(m.get("meta") or {})
         self.renamed: dict[str, str] = dict(m.get("renamed") or {})
         self.renamed_ports: dict[str, str] = dict(m.get("renamed_ports") or {})
