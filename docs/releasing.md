@@ -40,6 +40,9 @@ The extension needs:
    - An **odd minor** (0.3, 0.5, …) goes to the Marketplace's pre-release
      channel, and an even one to stable. The workflow picks the channel from
      the version.
+   - To move to a newer uv, change `UV_VERSION` in `vscode/src/uv.ts` and
+     the file list in `vscode/test/unit/uv.test.ts`. Pick a version that's
+     been out for a couple of weeks.
    - If the release changes the HTTP API in a way older clients can't
      handle, bump `API_COMPAT_LEVEL` in `modelmaker/api.py` and `API_COMPAT`
      in `vscode/src/backend.ts` together. Also raise the minimum version in
@@ -56,15 +59,14 @@ The extension needs:
 5. **Smoke test** in a clean profile:
    1. Run `code --profile release-check`, and in it install Model-Maker from
       the Marketplace (switch to the pre-release version for an odd minor).
-   2. Open an empty folder, create a virtual environment, and select it as
-      the interpreter.
-   3. Run `pip install quantology-modelmaker && modelmaker-demo .` in that
-      environment, or let the extension offer the install when you open the
-      project.
-   4. Open `projects/demo_pd_model/model.json` with the canvas, then click
-      **Run all**. Every block should turn green.
-   5. If Copilot is signed in, ask agent mode to "describe this pipeline"
+   2. Open an empty folder and run **Model-Maker: Open Demo Project…**.
+      The first run sets up the managed environment from PyPI, which
+      exercises the newly published package. Then click **Run all**: every
+      block should turn green.
+   3. If Copilot is signed in, ask agent mode to "describe this pipeline"
       (it should call `#mmGraph`).
+   4. Run **Model-Maker: Reset Managed Python Environment** before the next
+      smoke test, so it starts from scratch again.
 
 ## v0.3.0 release notes (draft)
 

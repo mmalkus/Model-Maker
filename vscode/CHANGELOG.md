@@ -11,8 +11,12 @@ channel; 0.4.0 is planned as the first stable one. Needs
 switches the extension uses.
 
 - The Model-Maker canvas as a custom editor for a project's `model.json`.
-- One local, token-protected backend per open project, started from the
-  selected Python interpreter. The extension offers to install the package.
+- No Python setup needed. On first use the extension builds its own
+  environment with uv and installs the package; later starts are instant.
+  You can choose your own interpreter instead, and the extension then
+  offers to pip install the package into it.
+- One local, token-protected backend per open project.
+- Model-Maker: Open Demo Project… creates the demo projects and opens one.
 - GitHub Copilot as an AI provider, through a relay over VS Code's Language
   Model API.
 - Native dialogs for saving, picking paths, confirmations and downloads.

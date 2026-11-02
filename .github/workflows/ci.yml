@@ -118,9 +118,13 @@ jobs:
         working-directory: vscode
       - run: npm run typecheck
         working-directory: vscode
-      # Includes the chat tools against a real backend (the package above).
-      - run: MODELMAKER_TEST_PYTHON="$(command -v python)" npm run test:unit
+      # Includes the chat tools against a real backend (the package above),
+      # and the managed environment: uv from PyPI, a venv, this checkout.
+      - run: npm run test:unit
         working-directory: vscode
+        env:
+          MODELMAKER_TEST_PYTHON: python
+          MODELMAKER_TEST_MANAGED_SPEC: ${{ github.workspace }}
 
       - name: Package the .vsix
         working-directory: vscode
@@ -135,7 +139,7 @@ jobs:
           mkdir -p "$ws/.vscode"
           (cd "$ws" && modelmaker-demo .)
           printf '{"modelmaker.pythonPath": "%s", "modelmaker.autoInstall": "never"}\n' "$(command -v python)" > "$ws/.vscode/settings.json"
-          MODELMAKER_TEST_WORKSPACE="$ws" xvfb-run -a npm test
+          MODELMAKER_TEST_WORKSPACE="$ws" MODELMAKER_TEST_MANAGED_SPEC="$GITHUB_WORKSPACE" xvfb-run -a npm test
 
       - uses: actions/upload-artifact@v4
         with:

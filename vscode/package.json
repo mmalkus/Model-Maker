@@ -65,6 +65,11 @@
         "category": "Model-Maker"
       },
       {
+        "command": "modelmaker.openDemo",
+        "title": "Open Demo Project…",
+        "category": "Model-Maker"
+      },
+      {
         "command": "modelmaker.openCanvas",
         "title": "Open in Model-Maker Canvas",
         "category": "Model-Maker",
@@ -93,6 +98,11 @@
       {
         "command": "modelmaker.installPackage",
         "title": "Install / Upgrade Python Package",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.resetEnvironment",
+        "title": "Reset Managed Python Environment",
         "category": "Model-Maker"
       }
     ],
@@ -126,11 +136,25 @@
     "configuration": {
       "title": "Model-Maker",
       "properties": {
+        "modelmaker.environment": {
+          "type": "string",
+          "enum": [
+            "managed",
+            "selected"
+          ],
+          "enumDescriptions": [
+            "Model-Maker's own Python environment, set up automatically on first use (needs internet once).",
+            "The interpreter selected in the Python extension, else python3/python on PATH. Use this to run blocks with your own environment's packages."
+          ],
+          "default": "managed",
+          "scope": "resource",
+          "markdownDescription": "Which Python runs the Model-Maker backend. `managed` needs no setup: on first use the extension installs everything into a private environment. `modelmaker.pythonPath` overrides both."
+        },
         "modelmaker.pythonPath": {
           "type": "string",
           "default": "",
           "scope": "resource",
-          "markdownDescription": "Python interpreter that runs the Model-Maker backend. Empty: the interpreter selected in the Python extension, else `python3`/`python` on PATH."
+          "markdownDescription": "A specific Python interpreter for the backend. Overrides `modelmaker.environment`."
         },
         "modelmaker.autoInstall": {
           "type": "string",
@@ -140,12 +164,12 @@
             "never"
           ],
           "default": "ask",
-          "markdownDescription": "Whether to `pip install` the Model-Maker package into that interpreter when it's missing or too old."
+          "markdownDescription": "With `modelmaker.environment` set to `selected` (or `modelmaker.pythonPath`): whether to `pip install` the Model-Maker package into that interpreter when it's missing or too old. The managed environment always installs it."
         },
         "modelmaker.packageSpec": {
           "type": "string",
           "default": "quantology-modelmaker>=0.3.0",
-          "markdownDescription": "What `pip install -U` installs: a PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
+          "markdownDescription": "What gets installed into the backend's environment: a PyPI requirement (e.g. `quantology-modelmaker[anthropic]>=0.3.0`), a Git URL, or a local path for development."
         },
         "modelmaker.llm.useCopilot": {
           "type": "boolean",
