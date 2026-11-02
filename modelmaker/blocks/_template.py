@@ -50,6 +50,10 @@ BLOCKS = {
         # The decision-hint rule that judges this block's result for an AI
         # build (optional; see agent/hint_rules.py for the names).
         # "hints": "auc_gini",
+        # Show the result right on the canvas node (optional): "table" (first
+        # rows + row count of the first output), "kpi" (a {"label", "value"}
+        # dict as one headline number) or "value" (whatever comes through).
+        # "display": "table",
         # Param renamed since an earlier version: Update carries the value.
         # "renamed": {"threshold": "z"},
     },

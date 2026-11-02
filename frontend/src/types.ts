@@ -118,7 +118,35 @@ export interface BlockOut {
   // status is "running". A crude heartbeat, not real progress -- polars
   // gives no finer-grained signal for one collect() call.
   running_seconds: number | null
+  // A display block's last result, shown right on its node (see
+  // api._display_out); null for every other block and before a first run.
+  display: BlockDisplay | null
 }
+
+export type DisplayCell = string | number | boolean | null
+
+// A table display carries at most a few rows and columns; row_count and
+// column_count are the full table's.
+export type BlockDisplay =
+  | {
+      kind: 'table'
+      columns: { name: string; dtype: string }[]
+      rows: DisplayCell[][]
+      row_count: number
+      column_count: number
+    }
+  | {
+      kind: 'kpi'
+      label: string
+      value: number | null
+      column?: string
+      agg?: string
+      number_format?: 'number' | 'compact' | 'percent'
+      decimals?: number
+      unit?: string
+    }
+  | { kind: 'value'; items?: [string, DisplayCell][]; text?: string }
+  | { kind: 'image'; port: string }
 
 export interface WireOut {
   from_block: string

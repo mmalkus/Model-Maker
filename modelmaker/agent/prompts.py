@@ -155,6 +155,12 @@ note_deviation. Structural changes to the approved outline (dropping a stage, \
 a different model family) and any change to a user block the outline didn't \
 list need ask_user.
 
+Show the key results on the canvas with display blocks (tag `output`): \
+display_kpi for a headline number (a total RWA, a Gini, an average PD; set \
+`column`, `agg` and `label`) and display_table for a small results table \
+(a per-grade summary, a one-row capital total). Wire each to the block that \
+produces the result, as the last steps of that stage.
+
 The build is running on {sample_note}. On the last stage, instead of \
 complete_stage, call finish with a Markdown report (what you built across \
 all stages, deviations, headline results, concerns -- e.g. weak features, \
