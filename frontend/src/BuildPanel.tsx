@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
-import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut } from './types'
+import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut, PlanQuestion } from './types'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
@@ -29,6 +29,26 @@ const PHASE_LABEL: Record<string, string> = {
 
 const box: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, marginBottom: 8 }
 const label: React.CSSProperties = { fontSize: 11, color: '#6b7280', fontWeight: 600, marginBottom: 4 }
+const optionRow: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 4, margin: '4px 0 6px' }
+const optionPicked: React.CSSProperties = { background: '#b45309', borderColor: '#b45309', color: '#fff' }
+
+// Builds saved before plan questions had options store them as strings.
+const asQuestion = (q: PlanQuestion | string): PlanQuestion => (typeof q === 'string' ? { question: q } : q)
+
+// One-click answers (ask_user's options, or the plan questions'): the
+// textarea beside them is still there for anything else.
+function AnswerOptions({ options, picked, disabled, onPick }: { options?: string[]; picked?: string; disabled?: boolean; onPick: (o: string) => void }) {
+  if (!options?.length) return null
+  return (
+    <div style={optionRow}>
+      {options.map((o) => (
+        <button key={o} disabled={disabled} style={o === picked ? optionPicked : undefined} onClick={() => onPick(o)}>
+          {o}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 type Props = {
   graph: GraphOut
@@ -380,17 +400,31 @@ function Preflight({ build, graph, act }: { build: BuildOut; graph: GraphOut; ac
 // until it's done, so the buttons wait too.
 function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: GraphOut; act: Act; busy: boolean }) {
   const [feedback, setFeedback] = useState('')
+  // The option picked per plan question (by index), sent with the feedback.
+  const [picked, setPicked] = useState<Record<number, string>>({})
   const plan = build.plan
+  const questions = (plan?.questions ?? []).map(asQuestion)
+  const answers = questions.flatMap((q, i) => (picked[i] ? [`${q.question}\n→ ${picked[i]}`] : []))
+  const message = [...answers, feedback.trim()].filter(Boolean).join('\n\n')
   return (
     <div>
       {plan ? (
-        <PlanView plan={plan} graph={graph} />
+        <PlanView
+          plan={plan}
+          graph={graph}
+          picked={picked}
+          busy={busy}
+          onPick={(i, o) => setPicked((p) => ({ ...p, [i]: p[i] === o ? '' : o }))}
+        />
       ) : build.pending_question ? (
-        <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+        <>
+          <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+          <AnswerOptions options={build.pending_options} disabled={busy} onPick={(o) => act(() => api.agentFeedback(o))} />
+        </>
       ) : (
         <div style={box}>The AI ended planning without a plan. Tell it what to do.</div>
       )}
-      <div style={label}>{plan?.questions?.length ? 'Answer its questions' : 'Feedback (optional)'}</div>
+      <div style={label}>{questions.length ? 'Answer its questions (pick above, or write)' : 'Feedback (optional)'}</div>
       <textarea
         value={feedback}
         onChange={(e) => setFeedback(e.target.value)}
@@ -400,13 +434,14 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
       />
       <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 8 }}>
         <button
-          disabled={busy || !feedback.trim()}
+          disabled={busy || !message}
           onClick={() => {
-            act(() => api.agentFeedback(feedback))
+            act(() => api.agentFeedback(message))
             setFeedback('')
+            setPicked({})
           }}
         >
-          Re-plan with feedback
+          {questions.length ? 'Send answers' : 'Re-plan with feedback'}
         </button>
         <button
           className="brand-primary"
@@ -421,14 +456,23 @@ function PlanReview({ build, graph, act, busy }: { build: BuildOut; graph: Graph
   )
 }
 
-function PlanView({ plan, graph }: { plan: BuildPlan; graph: GraphOut }) {
+type PlanViewProps = { plan: BuildPlan; graph: GraphOut; picked: Record<number, string>; busy: boolean; onPick: (i: number, option: string) => void }
+
+function PlanView({ plan, graph, picked, busy, onPick }: PlanViewProps) {
   return (
     <div>
       <div style={box}>{plan.summary}</div>
       {!!plan.questions?.length && (
         <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb' }}>
           <div style={label}>Questions</div>
-          <ul style={{ margin: 0, paddingLeft: 16 }}>{plan.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {plan.questions.map(asQuestion).map((q, i) => (
+              <li key={i}>
+                {q.question}
+                <AnswerOptions options={q.options} picked={picked[i]} disabled={busy} onPick={(o) => onPick(i, o)} />
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {!!plan.assumptions?.length && (
@@ -572,6 +616,7 @@ function Question({ build, act, busy }: { build: BuildOut; act: Act; busy: boole
   return (
     <div>
       <div style={{ ...box, borderColor: '#fde68a', background: '#fffbeb', whiteSpace: 'pre-wrap' }}>{build.pending_question}</div>
+      <AnswerOptions options={build.pending_options} disabled={busy} onPick={(o) => act(() => api.agentFeedback(o))} />
       <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} rows={3} style={{ width: '100%', boxSizing: 'border-box' }} />
       <button
         className="brand-primary"

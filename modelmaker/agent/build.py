@@ -177,6 +177,9 @@ class AgentBuild:
         self.stages: list[dict[str, Any]] = []
         self.stage_index = 0
         self.pending_question: str | None = None
+        # One-click answers offered with pending_question (ask_user's
+        # options, or "Continue" when the app itself paused the build).
+        self.pending_options: list[str] = []
         self.report: str | None = None
         self.key_outputs: list[dict[str, Any]] = []
         self.results: list[dict[str, Any]] = []
@@ -604,6 +607,7 @@ class AgentBuild:
             "stages": self.stages,
             "stage_index": self.stage_index,
             "pending_question": self.pending_question,
+            "pending_options": self.pending_options,
             "report": self.report,
             "results": self.results,
             "deviations": self.deviations,
