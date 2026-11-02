@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import { PortDataView } from './PortDataView'
 import type { GraphOut, PortType } from './types'
+import { host } from './host'
 
 export function PortInspector({
   blockId,
@@ -31,7 +32,7 @@ export function PortInspector({
 
   if (!block) {
     return (
-      <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, color: '#9ca3af', fontSize: 12 }}>
+      <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, color: 'var(--mm-faint)', fontSize: 12 }}>
         This block no longer exists.
       </div>
     )
@@ -42,11 +43,11 @@ export function PortInspector({
   const saveName = () => {
     setEditing(false)
     if (nameText.trim() === (dataName ?? '')) return
-    api.renamePort(blockId, port, nameText.trim() || null).then(onChanged).catch((err) => alert((err as Error).message))
+    api.renamePort(blockId, port, nameText.trim() || null).then(onChanged).catch((err) => host.notify((err as Error).message))
   }
 
   return (
-    <div style={{ width: 340, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', fontSize: 12 }}>
+    <div style={{ width: 340, borderLeft: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', fontSize: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
         {editing ? (
           <input
@@ -75,7 +76,7 @@ export function PortInspector({
         )}
         <button onClick={onClose}>Close</button>
       </div>
-      <div style={{ color: '#6b7280', marginBottom: 12 }}>
+      <div style={{ color: 'var(--mm-muted)', marginBottom: 12 }}>
         {block.name} :: {port}
       </div>
 

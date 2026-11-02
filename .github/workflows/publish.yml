@@ -1,4 +1,4 @@
-name: Publish to PyPI
+name: Publish (PyPI, then the VS Code extension)
 
 on:
   release:
@@ -77,3 +77,84 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The VS Code extension installs the package from PyPI, so it publishes
+  # after it (vscode-extension-plan.md §8).
+  build-vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check versions (package, extension, release tag)
+        run: |
+          py=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          ext=$(node -p "require('./vscode/package.json').version")
+          test "$py" = "$ext" || { echo "pyproject.toml is $py but vscode/package.json is $ext"; exit 1; }
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+            test "${tag#v}" = "$ext" || { echo "release tag $tag doesn't match version $ext"; exit 1; }
+          fi
+
+      # Marketplace convention: odd minor versions are pre-releases.
+      - name: Pick the release channel
+        id: channel
+        run: |
+          minor=$(node -p "require('./vscode/package.json').version.split('.')[1]")
+          echo "pre-release=$([ $((minor % 2)) -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build:vscode
+        working-directory: frontend
+      - run: npm ci
+        working-directory: vscode
+
+      - name: Package the .vsix
+        working-directory: vscode
+        run: npx vsce package --no-dependencies ${{ steps.channel.outputs.pre-release == 'true' && '--pre-release' || '' }} -o modelmaker.vsix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: vscode/modelmaker.vsix
+
+  publish-vscode:
+    needs: [publish, build-vscode]
+    runs-on: ubuntu-latest
+    environment:
+      name: vscode-marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=quantology.modelmaker
+    permissions:
+      contents: write # attach the .vsix to the GitHub release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The .vsix already carries the pre-release flag (vsce package
+      # --pre-release above); both marketplaces read it from there.
+      - name: Publish to the Visual Studio Marketplace
+        run: npx --yes @vscode/vsce publish --packagePath modelmaker.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to Open VSX
+        run: npx --yes ovsx publish modelmaker.vsix
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+
+      # For machines that can't reach either marketplace:
+      # code --install-extension modelmaker.vsix
+      - name: Attach the .vsix to the release
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" modelmaker.vsix --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}

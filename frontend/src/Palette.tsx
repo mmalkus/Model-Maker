@@ -31,7 +31,7 @@ function InlineAdd({ placeholder, onSubmit }: { placeholder: string; onSubmit: (
           if (e.key === 'Escape') setOpen(false)
         }}
         placeholder={placeholder}
-        style={{ flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 6 }}
+        style={{ flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--mm-border-strong)', borderRadius: 6 }}
       />
       <button onClick={submit} style={{ fontSize: 12, padding: '2px 6px' }}>
         Add
@@ -135,7 +135,7 @@ export function Palette({
   }
 
   return (
-    <div style={{ width: 200, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto' }}>
+    <div style={{ width: 200, borderRight: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto' }}>
       <h3 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--brand-ink)' }}>Blocks</h3>
 
       {tags.length > 0 && (
@@ -144,7 +144,7 @@ export function Palette({
           onChange={(e) => setTagFilter(e.target.value)}
           title={tags.find((t) => t.tag === tagFilter)?.about ?? 'Show only blocks with this tag'}
           aria-label="Filter blocks by tag"
-          style={{ width: '100%', marginBottom: 12, fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 6 }}
+          style={{ width: '100%', marginBottom: 12, fontSize: 12, padding: '4px 6px', border: '1px solid var(--mm-border-strong)', borderRadius: 6 }}
         >
           <option value="">All tags</option>
           {tags.map((t) => (
@@ -155,12 +155,12 @@ export function Palette({
         </select>
       )}
 
-      <div style={{ marginBottom: 14, paddingBottom: 10, borderBottom: '1px solid #f3f4f6' }}>
+      <div style={{ marginBottom: 14, paddingBottom: 10, borderBottom: '1px solid var(--mm-bg-hover)' }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
           <button
             onClick={onOpenLibrary}
             title="Browse, edit, import and export your block library"
-            style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: '#6b7280', textTransform: 'uppercase', cursor: 'pointer' }}
+            style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: 'var(--mm-muted)', textTransform: 'uppercase', cursor: 'pointer' }}
           >
             Library ↗
           </button>
@@ -180,7 +180,7 @@ export function Palette({
           ✦ Create with AI
         </button>
         {libraryFiles.length === 0 && (
-          <div style={{ fontSize: 11, color: '#9ca3af' }}>No library blocks yet -- create one with AI, or open the library.</div>
+          <div style={{ fontSize: 11, color: 'var(--mm-faint)' }}>No library blocks yet -- create one with AI, or open the library.</div>
         )}
         {libraryFiles.map((file) => {
           const blocks = file.blocks.filter((b) => !tagFilter || b.tags.includes(tagFilter))
@@ -203,14 +203,14 @@ export function Palette({
                   padding: 0,
                   marginBottom: 4,
                   fontSize: 11,
-                  color: file.is_draft ? '#6d28d9' : '#6b7280',
+                  color: file.is_draft ? 'var(--mm-ai-2)' : 'var(--mm-muted)',
                   cursor: 'pointer',
                 }}
               >
                 <span style={{ fontSize: 9 }}>{collapsed ? '▸' : '▾'}</span>
                 <span style={{ fontFamily: 'ui-monospace, monospace' }}>{file.is_draft ? `AI draft · ${file.name.slice(7)}` : file.name}</span>
               </button>
-              {file.file_errors.length > 0 && <div style={{ fontSize: 11, color: '#b91c1c' }}>{file.file_errors[0]}</div>}
+              {file.file_errors.length > 0 && <div style={{ fontSize: 11, color: 'var(--mm-error)' }}>{file.file_errors[0]}</div>}
               {!collapsed &&
                 blocks.map((b) => {
                   const reason = unplaceableReason(b, file)
@@ -252,7 +252,7 @@ export function Palette({
                 padding: 0,
                 marginBottom: 4,
                 fontSize: 11,
-                color: '#6b7280',
+                color: 'var(--mm-muted)',
                 textTransform: 'uppercase',
                 cursor: 'pointer',
               }}
@@ -278,7 +278,7 @@ export function Palette({
       })}
 
       <div>
-        <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>Lanes</div>
+        <div style={{ fontSize: 11, color: 'var(--mm-muted)', textTransform: 'uppercase', marginBottom: 4 }}>Lanes</div>
         <InlineAdd placeholder="lane name" onSubmit={onAddLane} />
       </div>
     </div>

@@ -199,11 +199,15 @@ def run_report(b: AgentBuild, block_id: str) -> dict[str, Any]:
 
 
 def is_statistics_table(b: AgentBuild, block_id: str, port: str) -> bool:
+    return is_statistics_output(b.session.graph, block_id, port)
+
+
+def is_statistics_output(graph, block_id: str, port: str) -> bool:
     """Whether a block's output port is one its definition declares a
     statistics table. Honored for built-ins only: a library block's flag
     is its author's claim (or the build's own, for a draft), which can't
     vouch for its rows."""
-    block = b.session.graph.blocks.get(block_id)
+    block = graph.blocks.get(block_id)
     if block is None or block.definition is not None:
         return False
     spec = BLOCK_REGISTRY.get(block.category)

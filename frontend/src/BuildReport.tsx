@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, buildReportId } from './api'
 import type { Artifact, ArtifactSummary } from './types'
+import { host } from './host'
 
 // An AI build's full report (see controller._attach_report) is a persistent
 // Artifact of kind "build_report", one per build. These are the two ways
@@ -41,12 +42,9 @@ export function ReportModal({ buildId, onClose }: { buildId: string; onClose: ()
 
   const download = () => {
     if (!artifact) return
-    const url = URL.createObjectURL(new Blob([artifact.document], { type: 'text/markdown' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `build-report-${buildId}.md`
-    a.click()
-    URL.revokeObjectURL(url)
+    host
+      .saveFile(`build-report-${buildId}.md`, new Blob([artifact.document], { type: 'text/markdown' }))
+      .catch((e) => host.notify((e as Error).message))
   }
 
   return (
@@ -58,8 +56,8 @@ export function ReportModal({ buildId, onClose }: { buildId: string; onClose: ()
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: '#fff',
-          border: '1px solid #d1d5db',
+          background: 'var(--mm-bg)',
+          border: '1px solid var(--mm-border-strong)',
           borderRadius: 8,
           padding: 16,
           width: 'min(760px, calc(100vw - 48px))',
@@ -75,7 +73,7 @@ export function ReportModal({ buildId, onClose }: { buildId: string; onClose: ()
           {artifact?.stale && (
             <span
               title="The block this report is attached to has changed since the report was written, so its numbers may be out of date"
-              style={{ fontSize: 11, color: '#b45309', background: '#fef3c7', borderRadius: 4, padding: '1px 6px' }}
+              style={{ fontSize: 11, color: 'var(--mm-warn-2)', background: 'var(--mm-warn-bg-2)', borderRadius: 4, padding: '1px 6px' }}
             >
               stale
             </span>
@@ -91,14 +89,14 @@ export function ReportModal({ buildId, onClose }: { buildId: string; onClose: ()
           </button>
         </div>
         {artifact && (
-          <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: 'var(--mm-muted)', marginTop: 2 }}>
             Attached to {artifact.block_name ? `${artifact.block_name}.${artifact.port}` : 'a block that has since been deleted'} · written{' '}
             {new Date(artifact.updated_at).toLocaleString()}
           </div>
         )}
-        <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 8, paddingTop: 8, overflowY: 'auto' }}>
-          {error && <div style={{ color: '#6b7280' }}>{error}</div>}
-          {!artifact && !error && <div style={{ color: '#6b7280' }}>Loading…</div>}
+        <div style={{ borderTop: '1px solid var(--mm-border)', marginTop: 8, paddingTop: 8, overflowY: 'auto' }}>
+          {error && <div style={{ color: 'var(--mm-muted)' }}>{error}</div>}
+          {!artifact && !error && <div style={{ color: 'var(--mm-muted)' }}>Loading…</div>}
           {artifact && <MarkdownLite text={artifact.document} />}
         </div>
       </div>
@@ -116,7 +114,7 @@ function MarkdownLite({ text }: { text: string }) {
       part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
         <strong key={i}>{part.slice(2, -2)}</strong>
       ) : part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
-        <code key={i} style={{ background: '#f3f4f6', borderRadius: 3, padding: '0 3px', fontSize: 12, wordBreak: 'break-word' }}>
+        <code key={i} style={{ background: 'var(--mm-bg-hover)', borderRadius: 3, padding: '0 3px', fontSize: 12, wordBreak: 'break-word' }}>
           {part.slice(1, -1)}
         </code>
       ) : (
@@ -135,12 +133,12 @@ function MarkdownLite({ text }: { text: string }) {
             </div>
           )
         }
-        if (/^\s*([-*_])\1{2,}\s*$/.test(line)) return <hr key={i} style={{ border: 'none', borderTop: '1px solid #e5e7eb', margin: '10px 0' }} />
+        if (/^\s*([-*_])\1{2,}\s*$/.test(line)) return <hr key={i} style={{ border: 'none', borderTop: '1px solid var(--mm-border)', margin: '10px 0' }} />
         const bullet = /^(\s*)[-*]\s+(.*)$/.exec(line)
         if (bullet) {
           return (
             <div key={i} style={{ display: 'flex', gap: 6, paddingLeft: 4 + bullet[1].length * 8 }}>
-              <span style={{ color: '#9ca3af' }}>•</span>
+              <span style={{ color: 'var(--mm-faint)' }}>•</span>
               <span style={{ minWidth: 0 }}>{inline(bullet[2])}</span>
             </div>
           )
@@ -175,8 +173,8 @@ export function BuildReportList({ refreshKey, onOpen }: { refreshKey: string; on
 
   if (reports.length === 0) return null
   return (
-    <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, padding: 8, marginBottom: 8 }}>
-      <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 600, marginBottom: 4 }}>Build reports</div>
+    <div style={{ border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8, marginBottom: 8 }}>
+      <div style={{ fontSize: 11, color: 'var(--mm-muted)', fontWeight: 600, marginBottom: 4 }}>Build reports</div>
       {reports.map((r) => (
         <button
           key={r.id}
@@ -190,7 +188,7 @@ export function BuildReportList({ refreshKey, onOpen }: { refreshKey: string; on
             textAlign: 'left',
             background: 'none',
             border: 'none',
-            borderTop: '1px solid #f3f4f6',
+            borderTop: '1px solid var(--mm-bg-hover)',
             padding: '4px 0',
             cursor: 'pointer',
             fontSize: 12,
@@ -199,9 +197,9 @@ export function BuildReportList({ refreshKey, onOpen }: { refreshKey: string; on
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {r.title.replace(/^AI build report -- /, '')}
           </span>
-          {r.stale && <span style={{ fontSize: 10, color: '#b45309' }}>stale</span>}
-          {!r.block_name && <span style={{ fontSize: 10, color: '#9ca3af' }}>block deleted</span>}
-          <span style={{ fontSize: 10, color: '#9ca3af', flexShrink: 0 }}>{new Date(r.created_at).toLocaleDateString()}</span>
+          {r.stale && <span style={{ fontSize: 10, color: 'var(--mm-warn-2)' }}>stale</span>}
+          {!r.block_name && <span style={{ fontSize: 10, color: 'var(--mm-faint)' }}>block deleted</span>}
+          <span style={{ fontSize: 10, color: 'var(--mm-faint)', flexShrink: 0 }}>{new Date(r.created_at).toLocaleDateString()}</span>
         </button>
       ))}
     </div>

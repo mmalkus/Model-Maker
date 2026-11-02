@@ -1,0 +1,9 @@
+# Everything but the bundle, the webview build and the listing files.
+**
+!dist/extension.js
+!media/**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!icon.png

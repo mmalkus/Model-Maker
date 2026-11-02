@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { host } from './host'
 
 // Mirrors modelmaker.packet.ColumnRole -- keep in sync with that enum.
 export const ROLE_LABELS: Record<string, string> = {
@@ -23,20 +24,10 @@ export const ASSIGNABLE_ROLES = ['id', 'target', 'weight', 'date', 'feature', 's
 const ASSIGN_ROLES_KEY = 'modelmaker.analyze.assignRoles'
 
 export function useAssignRolesPref(): [boolean, (v: boolean) => void] {
-  const [value, setValue] = useState(() => {
-    try {
-      return localStorage.getItem(ASSIGN_ROLES_KEY) !== 'false'
-    } catch {
-      return true
-    }
-  })
+  const [value, setValue] = useState(() => host.getState(ASSIGN_ROLES_KEY) !== 'false')
   const set = (v: boolean) => {
     setValue(v)
-    try {
-      localStorage.setItem(ASSIGN_ROLES_KEY, String(v))
-    } catch {
-      // storage unavailable -- the choice just won't be remembered
-    }
+    host.setState(ASSIGN_ROLES_KEY, String(v))
   }
   return [value, set]
 }

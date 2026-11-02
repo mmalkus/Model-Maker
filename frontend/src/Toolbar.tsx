@@ -6,6 +6,7 @@ import { FileBrowser } from './FileBrowser'
 import { GitPanel } from './GitPanel'
 import { SettingsPanel } from './SettingsPanel'
 import type { LLMSettingsOut } from './types'
+import { host } from './host'
 
 // Splits a server-side path into (directory, filename), tolerating both
 // '/' (POSIX) and '\' (Windows) separators, whichever the path was given
@@ -92,7 +93,7 @@ export function Toolbar({
       onChanged()
       return result
     } catch (e) {
-      alert((e as Error).message)
+      host.notify((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -101,12 +102,26 @@ export function Toolbar({
   const doCompile = () =>
     run(async () => {
       const { source } = await api.compile(undefined, compileStreaming)
-      setCompiled(source)
+      // In VS Code the script opens as a real editor tab (save, diff, run).
+      if (host.openText) host.openText(source, 'python')
+      else setCompiled(source)
     })
 
-  const doNew = () => {
-    if (dirty && !confirm('Discard unsaved changes and start a new project?')) return
+  const doNew = async () => {
+    if (dirty && !(await host.confirm('Discard unsaved changes and start a new project?'))) return
     run(() => api.new())
+  }
+
+  // VS Code's native dialogs where the host has them, else the in-app browser.
+  const openSave = () => {
+    if (!host.pickPath) return setShowSave(true)
+    host
+      .pickPath({ folders: true, mode: 'save', startPath: browseStartPath, defaultName: openName, title: 'Save project as' })
+      .then((path) => path && doSavePick(path))
+  }
+  const openLoad = () => {
+    if (!host.pickPath) return setShowLoad(true)
+    host.pickPath({ folders: true, startPath: browseStartPath, title: 'Load project' }).then((path) => path && doLoadPick(path))
   }
 
   const doSavePick = (path: string) => {
@@ -145,7 +160,7 @@ export function Toolbar({
         title="Quantology"
         style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12, textDecoration: 'none' }}
       >
-        <img src="/brand-quantology/icon-mark-light.svg" alt="" width={24} height={24} style={{ display: 'block' }} />
+        <img src={`${import.meta.env.BASE_URL}brand-quantology/icon-mark-light.svg`} alt="" width={24} height={24} style={{ display: 'block' }} />
         <strong style={{ color: 'var(--brand-ink)', fontFamily: 'var(--font-heading)', fontSize: 16, fontWeight: 600 }}>
           Quantology
         </strong>
@@ -174,7 +189,7 @@ export function Toolbar({
       {running && (
         <button
           onClick={() => run(() => api.cancelRun())}
-          style={{ color: '#b91c1c', borderColor: '#fecaca', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+          style={{ color: 'var(--mm-error)', borderColor: 'var(--mm-error-border)', display: 'inline-flex', alignItems: 'center', gap: 5 }}
           title="Stop the run in progress -- the block currently executing is interrupted immediately"
         >
           <span
@@ -241,16 +256,26 @@ export function Toolbar({
       </label>
 
       <span style={{ flex: 1 }} />
-      <button disabled={busy} onClick={doNew} title="Start a new, empty project">
-        New
-      </button>
-      <button disabled={busy} onClick={() => setShowSave(true)}>
-        Save{dirty ? ' •' : ''}
-      </button>
-      <button disabled={busy} onClick={() => setShowLoad(true)}>
-        Load
-      </button>
-      <span style={{ fontSize: 12, color: dirty ? '#92400e' : '#6b7280' }}>
+      {host.kind === 'vscode' ? (
+        // The editor tab is one project: Save writes it in place, and other
+        // projects open from VS Code (Model-Maker: Open Project...).
+        <button disabled={busy || !projectPath} onClick={() => run(() => api.save())} title="Save (Ctrl/Cmd-S)">
+          Save{dirty ? ' •' : ''}
+        </button>
+      ) : (
+        <>
+          <button disabled={busy} onClick={doNew} title="Start a new, empty project">
+            New
+          </button>
+          <button disabled={busy} onClick={openSave}>
+            Save{dirty ? ' •' : ''}
+          </button>
+          <button disabled={busy} onClick={openLoad}>
+            Load
+          </button>
+        </>
+      )}
+      <span style={{ fontSize: 12, color: dirty ? 'var(--mm-warn)' : 'var(--mm-muted)' }}>
         {projectPath ?? '(unsaved)'}
         {dirty && (
           <span title="Edits not yet written to the project file (always snapshotted for crash recovery; autosaves shortly if the project has a save location)">
@@ -259,19 +284,21 @@ export function Toolbar({
           </span>
         )}
         {!dirty && autosave.state === 'saved' && (
-          <span title="Automatically written to the project file after your last edit" style={{ color: '#6b7280' }}>
+          <span title="Automatically written to the project file after your last edit" style={{ color: 'var(--mm-muted)' }}>
             {' '}
             · autosaved {new Date(autosave.at).toLocaleTimeString()}
           </span>
         )}
         {autosave.state === 'error' && (
-          <span title={autosave.message} style={{ color: '#b91c1c' }}>
+          <span title={autosave.message} style={{ color: 'var(--mm-error)' }}>
             {' '}
             · autosave failed
           </span>
         )}
       </span>
 
+      {/* VS Code's own Source Control covers git there. */}
+      {host.kind !== 'vscode' && (
       <div style={{ position: 'relative' }}>
         <button
           onClick={() => setShowGit((s) => !s)}
@@ -282,6 +309,7 @@ export function Toolbar({
         </button>
         {showGit && <GitPanel projectPath={projectPath} onClose={() => setShowGit(false)} />}
       </div>
+      )}
 
       <div style={{ position: 'relative' }}>
         <button onClick={() => setShowSettings((s) => !s)}>Settings</button>
@@ -295,8 +323,8 @@ export function Toolbar({
           style={{
             position: 'fixed',
             inset: 40,
-            background: '#fff',
-            border: '1px solid #d1d5db',
+            background: 'var(--mm-bg)',
+            border: '1px solid var(--mm-border-strong)',
             borderRadius: 8,
             padding: 16,
             zIndex: 50,

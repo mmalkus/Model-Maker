@@ -367,7 +367,7 @@ def test_start_endpoint_rejects_an_unconfigured_provider_up_front(tmp_path, monk
     assert api.AGENT.build is None
     # Settings key + model make it acceptable (still no network call at start).
     api.LLM_SETTINGS.update(None, None, {"openai": {"api_key": "sk-x", "model": "gpt-x"}})
-    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini", "lmstudio"]
+    assert c.get("/api/llm/settings").json()["agent"]["capable_providers"] == ["claude_cli", "anthropic", "openai", "gemini", "lmstudio", "copilot"]
 
 
 def test_resume_after_a_terminal_tool_merges_into_the_trailing_user_turn(planning_build):

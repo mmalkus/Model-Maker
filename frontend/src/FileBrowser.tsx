@@ -97,8 +97,8 @@ export function FileBrowser({
         style={{
           width: 480,
           maxHeight: '70vh',
-          background: '#fff',
-          border: '1px solid #d1d5db',
+          background: 'var(--mm-bg)',
+          border: '1px solid var(--mm-border-strong)',
           borderRadius: 8,
           boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
           display: 'flex',
@@ -106,18 +106,18 @@ export function FileBrowser({
           fontSize: 12,
         }}
       >
-        <div style={{ padding: 10, borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ padding: 10, borderBottom: '1px solid var(--mm-border)', display: 'flex', alignItems: 'center', gap: 6 }}>
           <button disabled={!listing?.parent} onClick={() => listing?.parent && load(listing.parent)}>
             Up
           </button>
-          <div style={{ flex: 1, color: '#374151', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ flex: 1, color: 'var(--mm-fg-3)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {listing?.path ?? ''}
           </div>
           <button onClick={onClose}>Close</button>
         </div>
         <div style={{ overflowY: 'auto', flex: 1 }}>
-          {error && <div style={{ padding: 10, color: '#b91c1c' }}>{error}</div>}
-          {entries.length === 0 && <div style={{ padding: 10, color: '#9ca3af' }}>(empty)</div>}
+          {error && <div style={{ padding: 10, color: 'var(--mm-error)' }}>{error}</div>}
+          {entries.length === 0 && <div style={{ padding: 10, color: 'var(--mm-faint)' }}>(empty)</div>}
           {entries.map((e) => (
             <div
               key={e.path}
@@ -128,10 +128,10 @@ export function FileBrowser({
                 cursor: 'pointer',
                 display: 'flex',
                 gap: 6,
-                borderBottom: '1px solid #f3f4f6',
+                borderBottom: '1px solid var(--mm-bg-hover)',
                 fontWeight: folders && e.is_project ? 600 : undefined,
               }}
-              onMouseEnter={(ev) => (ev.currentTarget.style.background = '#f9fafb')}
+              onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--mm-bg-subtle)')}
               onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
             >
               <span>{folders ? (e.is_project ? '\u{1F4E6}' : '\u{1F4C1}') : e.is_dir ? '\u{1F4C1}' : '\u{1F4C4}'}</span>
@@ -140,7 +140,7 @@ export function FileBrowser({
           ))}
         </div>
         {mode === 'save' && (
-          <div style={{ padding: 10, borderTop: '1px solid #e5e7eb', display: 'flex', gap: 6 }}>
+          <div style={{ padding: 10, borderTop: '1px solid var(--mm-border)', display: 'flex', gap: 6 }}>
             <input
               autoFocus
               value={fileName}

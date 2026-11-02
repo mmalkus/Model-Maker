@@ -55,7 +55,7 @@ export function EnvVarField({ name }: { name: string }) {
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>Env var: {trimmedName}</div>
-      <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>
+      <div style={{ fontSize: 11, color: 'var(--mm-muted)', marginBottom: 4 }}>
         {status === null
           ? '…'
           : status.is_set
@@ -83,7 +83,7 @@ export function EnvVarField({ name }: { name: string }) {
           </button>
         )}
       </div>
-      {error && <div style={{ color: '#b91c1c', fontSize: 11 }}>{error}</div>}
+      {error && <div style={{ color: 'var(--mm-error)', fontSize: 11 }}>{error}</div>}
     </div>
   )
 }

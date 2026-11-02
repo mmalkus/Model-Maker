@@ -13,6 +13,7 @@ import type {
   LibraryOut,
   TryOut,
 } from './types'
+import { host } from './host'
 
 // Where Create with AI starts from: a fresh block, an existing library
 // block (Edit with AI), or a red placed block (Fix with AI).
@@ -25,17 +26,17 @@ export type LibraryView =
   | { kind: 'import' }
 
 const mono: CSSProperties = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' }
-const muted: CSSProperties = { color: '#6b7280' }
-const sectionTitle: CSSProperties = { fontSize: 11, color: '#6b7280', textTransform: 'uppercase', margin: '12px 0 4px' }
-const box: CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, background: '#fff' }
+const muted: CSSProperties = { color: 'var(--mm-muted)' }
+const sectionTitle: CSSProperties = { fontSize: 11, color: 'var(--mm-muted)', textTransform: 'uppercase', margin: '12px 0 4px' }
+const box: CSSProperties = { border: '1px solid var(--mm-border)', borderRadius: 8, padding: 10, background: 'var(--mm-bg)' }
 
 function Badge({ children, tone = 'neutral', title }: { children: ReactNode; tone?: 'neutral' | 'brand' | 'warn' | 'error' | 'ai'; title?: string }) {
   const tones: Record<string, CSSProperties> = {
-    neutral: { background: '#f3f4f6', color: '#374151' },
+    neutral: { background: 'var(--mm-bg-hover)', color: 'var(--mm-fg-3)' },
     brand: { background: 'var(--brand-light)', color: 'var(--brand)', border: '1px solid var(--brand-border)' },
-    warn: { background: '#fffbeb', color: '#92400e' },
-    error: { background: '#fef2f2', color: '#b91c1c' },
-    ai: { background: '#ede9fe', color: '#5b21b6' },
+    warn: { background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)' },
+    error: { background: 'var(--mm-error-bg)', color: 'var(--mm-error)' },
+    ai: { background: 'var(--mm-ai-bg-2)', color: 'var(--mm-ai-3)' },
   }
   return (
     <span title={title} style={{ fontSize: 10, fontWeight: 600, borderRadius: 4, padding: '1px 5px', whiteSpace: 'nowrap', ...tones[tone] }}>
@@ -54,12 +55,7 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 function download(url: string) {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
+  host.downloadUrl(url).catch((e) => host.notify((e as Error).message))
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -142,9 +138,9 @@ export function LibraryPanel({
       <div
         role="dialog"
         aria-label={title}
-        style={{ flex: 1, background: '#fcfbf8', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 50px rgba(11,35,64,0.3)' }}
+        style={{ flex: 1, background: 'var(--mm-bg-subtle-3)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 50px rgba(11,35,64,0.3)' }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: '1px solid #e5e7eb', background: '#fff' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--mm-border)', background: 'var(--mm-bg)' }}>
           {view.kind !== 'browse' && (
             <button onClick={() => setView({ kind: 'browse' })} style={{ fontSize: 12 }}>
               ← Library
@@ -177,7 +173,7 @@ export function LibraryPanel({
           </button>
         </div>
         {error && (
-          <div style={{ background: '#fef2f2', color: '#b91c1c', padding: '6px 16px', fontSize: 12 }}>
+          <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: '6px 16px', fontSize: 12 }}>
             {error}{' '}
             <button style={{ fontSize: 11 }} onClick={() => setError(null)}>
               dismiss
@@ -342,13 +338,13 @@ function Browser({
 
   return (
     <>
-      <div style={{ width: 320, borderRight: '1px solid #e5e7eb', overflowY: 'auto', padding: 12, background: '#fff' }}>
+      <div style={{ width: 320, borderRight: '1px solid var(--mm-border)', overflowY: 'auto', padding: 12, background: 'var(--mm-bg)' }}>
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search blocks…"
           aria-label="Search blocks"
-          style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '1px solid #d1d5db', borderRadius: 6, marginBottom: 6 }}
+          style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '1px solid var(--mm-border-strong)', borderRadius: 6, marginBottom: 6 }}
         />
         <select value={tag} onChange={(e) => setTag(e.target.value)} aria-label="Filter by tag" style={{ width: '100%', fontSize: 12, marginBottom: 6 }}>
           <option value="">All tags</option>
@@ -379,7 +375,7 @@ function Browser({
               </div>
               {f.doc && <div style={{ ...muted, fontSize: 11, margin: '1px 0 3px' }}>{f.doc.split('\n')[0]}</div>}
               {f.file_errors.map((e) => (
-                <div key={e} style={{ color: '#b91c1c', fontSize: 11 }}>
+                <div key={e} style={{ color: 'var(--mm-error)', fontSize: 11 }}>
                   {e}
                 </div>
               ))}
@@ -390,16 +386,16 @@ function Browser({
 
         {drafts.length > 0 && (
           <>
-            <div style={{ ...sectionTitle, color: '#6d28d9' }}>AI drafts</div>
+            <div style={{ ...sectionTitle, color: 'var(--mm-ai-2)' }}>AI drafts</div>
             <div style={{ ...muted, fontSize: 11, marginBottom: 4 }}>Blocks AI builds created. Keep the ones you want; discarding never breaks a model.</div>
             {drafts.map((f) => (
               <div key={f.name} style={{ marginBottom: 8 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ ...mono, fontSize: 11, color: '#6d28d9', flex: 1 }}>{f.name.slice(7)}</span>
+                  <span style={{ ...mono, fontSize: 11, color: 'var(--mm-ai-2)', flex: 1 }}>{f.name.slice(7)}</span>
                   <button
-                    style={{ fontSize: 10, padding: '1px 6px', color: '#b91c1c' }}
-                    onClick={() => {
-                      if (!confirm(`Discard ${f.name}? Placed blocks keep working: they embed their code.`)) return
+                    style={{ fontSize: 10, padding: '1px 6px', color: 'var(--mm-error)' }}
+                    onClick={async () => {
+                      if (!(await host.confirm(`Discard ${f.name}? Placed blocks keep working: they embed their code.`))) return
                       api.libraryDiscardDraft(f.name).then(onChanged).catch((e) => onError(e.message))
                     }}
                   >
@@ -488,10 +484,10 @@ function BlockDetail({
   const placeable = problems.length === 0 && block.unmet_requirements.length === 0
   const arch = block.architecture
 
-  const duplicate = () => {
-    const newId = prompt('Id for the copy (a Python function name):', `${block.id}_copy`)
+  const duplicate = async () => {
+    const newId = await host.prompt('Id for the copy (a Python function name):', `${block.id}_copy`)
     if (!newId) return
-    const to = prompt('Library file to put it in:', userFiles[0]?.name ?? 'my_blocks.py')
+    const to = await host.prompt('Library file to put it in:', userFiles[0]?.name ?? 'my_blocks.py')
     if (!to) return
     api
       .libraryDuplicate({ id: block.id, file: file?.name ?? null, new_id: newId, to })
@@ -523,14 +519,14 @@ function BlockDetail({
         {file?.is_draft && <Badge tone="ai">AI draft</Badge>}
       </div>
       {problems.length > 0 && (
-        <div style={{ background: '#fef2f2', color: '#b91c1c', padding: 8, borderRadius: 6, marginTop: 8, fontSize: 12 }}>
+        <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: 8, borderRadius: 6, marginTop: 8, fontSize: 12 }}>
           {problems.map((p) => (
             <div key={p}>{p}</div>
           ))}
         </div>
       )}
       {block.unmet_requirements.length > 0 && (
-        <div style={{ background: '#fffbeb', color: '#92400e', padding: 8, borderRadius: 6, marginTop: 8, fontSize: 12 }}>
+        <div style={{ background: 'var(--mm-warn-bg)', color: 'var(--mm-warn)', padding: 8, borderRadius: 6, marginTop: 8, fontSize: 12 }}>
           Needs {block.unmet_requirements.join(', ')} -- install it (pip) before placing this block.
         </div>
       )}
@@ -563,8 +559,8 @@ function BlockDetail({
             <button onClick={() => download(api.libraryExportUrl({ file: file.name }))}>Export file</button>
             {file.is_draft && (
               <button
-                onClick={() => {
-                  const to = prompt('Keep it in which library file?', userFiles[0]?.name ?? 'my_blocks.py')
+                onClick={async () => {
+                  const to = await host.prompt('Keep it in which library file?', userFiles[0]?.name ?? 'my_blocks.py')
                   if (to)
                     api
                       .libraryKeepDraft(file.name, block.id, to)
@@ -579,9 +575,9 @@ function BlockDetail({
               </button>
             )}
             <button
-              style={{ color: '#b91c1c', borderColor: '#fecaca', marginLeft: 'auto' }}
-              onClick={() => {
-                if (!confirm(`Delete ${block.id} from ${file.name}? Placed copies keep working.`)) return
+              style={{ color: 'var(--mm-error)', borderColor: 'var(--mm-error-border)', marginLeft: 'auto' }}
+              onClick={async () => {
+                if (!(await host.confirm(`Delete ${block.id} from ${file.name}? Placed copies keep working.`))) return
                 api
                   .libraryDeleteBlock(file.name, block.id)
                   .then(() => {
@@ -649,7 +645,7 @@ function BlockDetail({
           <div style={{ fontSize: 12 }}>Type: {block.block_type}</div>
           {block.tags.length > 0 && <div style={{ fontSize: 12 }}>Tags: {block.tags.join(', ')}</div>}
           {block.requires.length > 0 && <div style={{ fontSize: 12 }}>Requires: {block.requires.join(', ')}</div>}
-          {file && <div style={{ fontSize: 12 }}>Self-check: {file.examples.includes(block.id) ? 'yes' : <span style={{ color: '#92400e' }}>none</span>}</div>}
+          {file && <div style={{ fontSize: 12 }}>Self-check: {file.examples.includes(block.id) ? 'yes' : <span style={{ color: 'var(--mm-warn)' }}>none</span>}</div>}
           <div style={{ fontSize: 12 }}>
             Used in this project:{' '}
             {usage.length ? usage.map((id) => graph?.blocks[id]?.name ?? id).join(', ') : <span style={muted}>not placed</span>}
@@ -667,7 +663,7 @@ function ExampleList({ results, only }: { results: Record<string, ExampleResult>
     <div style={{ ...box, marginBottom: 12, fontSize: 12 }}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>Try it</div>
       {entries.map(([id, r]) => (
-        <div key={id} style={{ color: r.ok ? '#3f6259' : r.ok === null ? '#6b7280' : '#b91c1c' }}>
+        <div key={id} style={{ color: r.ok ? 'var(--mm-ok-3)' : r.ok === null ? 'var(--mm-muted)' : 'var(--mm-error)' }}>
           {r.ok ? '✓' : r.ok === null ? '–' : '✕'} {id === '__file__' ? 'file' : id}: {r.ok ? 'example passed' : (r.error ?? '')}
           {r.line ? ` (line ${r.line})` : ''}
         </div>
@@ -683,19 +679,19 @@ function Checklist({ check }: { check: LibraryCheck | null }) {
   return (
     <ul style={{ margin: 0, padding: 0, listStyle: 'none', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
       {check.file_errors.map((e) => (
-        <li key={e} style={{ color: '#b91c1c' }}>
+        <li key={e} style={{ color: 'var(--mm-error)' }}>
           ✕ {e}
         </li>
       ))}
-      {check.file_errors.length === 0 && <li style={{ color: '#3f6259' }}>✓ BLOCKS is a plain literal; imports are fine</li>}
+      {check.file_errors.length === 0 && <li style={{ color: 'var(--mm-ok-3)' }}>✓ BLOCKS is a plain literal; imports are fine</li>}
       {check.blocks.map((b) => (
         <li key={b.id}>
-          <div style={{ color: b.errors.length ? '#b91c1c' : '#3f6259' }}>
+          <div style={{ color: b.errors.length ? 'var(--mm-error)' : 'var(--mm-ok-3)' }}>
             {b.errors.length ? '✕' : '✓'} {b.id} <span style={muted}>v{b.version}</span>
-            {!check.examples.includes(b.id) && <span style={{ color: '#92400e' }}> · no self-check</span>}
+            {!check.examples.includes(b.id) && <span style={{ color: 'var(--mm-warn)' }}> · no self-check</span>}
           </div>
           {b.errors.map((e) => (
-            <div key={e} style={{ color: '#b91c1c', paddingLeft: 14 }}>
+            <div key={e} style={{ color: 'var(--mm-error)', paddingLeft: 14 }}>
               {e}
             </div>
           ))}
@@ -777,7 +773,7 @@ function FileEditor({
                 File name{' '}
                 <input value={name} onChange={(e) => setName(e.target.value)} style={{ ...mono, fontSize: 12, width: 220 }} />
               </label>
-              {existingNames.has(name) && <span style={{ color: '#b91c1c', fontSize: 12 }}>already exists</span>}
+              {existingNames.has(name) && <span style={{ color: 'var(--mm-error)', fontSize: 12 }}>already exists</span>}
             </>
           ) : (
             <span style={{ ...mono, fontSize: 12 }}>{file}</span>
@@ -797,7 +793,7 @@ function FileEditor({
           <CodeEditor value={source} onChange={setSource} onSave={save} fill />
         </div>
       </div>
-      <div style={{ width: 320, borderLeft: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', background: '#fff' }}>
+      <div style={{ width: 320, borderLeft: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', background: 'var(--mm-bg)' }}>
         <div style={sectionTitle}>Live check</div>
         <Checklist check={check} />
         <div style={sectionTitle}>Try it</div>
@@ -828,7 +824,7 @@ function FileEditor({
 
 function TryOutView({ result }: { result: TryOut }) {
   if ('examples' in result) return <ExampleList results={result.examples} />
-  if (!result.ok) return <div style={{ ...box, color: '#b91c1c', fontSize: 12 }}>✕ {result.error}</div>
+  if (!result.ok) return <div style={{ ...box, color: 'var(--mm-error)', fontSize: 12 }}>✕ {result.error}</div>
   return (
     <div style={{ ...box, fontSize: 12 }}>
       {Object.entries(result.outputs).map(([port, v]) => (
@@ -845,7 +841,7 @@ function TryOutView({ result }: { result: TryOut }) {
                 <thead>
                   <tr>
                     {v.columns.map((c) => (
-                      <th key={c.name} style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid #e5e7eb' }}>
+                      <th key={c.name} style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--mm-border)' }}>
                         {c.name}
                       </th>
                     ))}
@@ -974,9 +970,9 @@ function CreateWithAI({
 
   return (
     <>
-      <div style={{ width: 340, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', background: '#fff', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ width: 340, borderRight: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto', background: 'var(--mm-bg)', display: 'flex', flexDirection: 'column', gap: 10 }}>
         {fixBlock ? (
-          <div style={{ background: '#fef2f2', color: '#b91c1c', padding: 8, borderRadius: 6, fontSize: 12 }}>
+          <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: 8, borderRadius: 6, fontSize: 12 }}>
             <strong>{fixBlock.name}</strong> failed: {fixBlock.last_error}
           </div>
         ) : start.block ? (
@@ -1072,9 +1068,9 @@ function CreateWithAI({
             <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 8 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 {showDiff ? (
-                  <pre style={{ ...mono, fontSize: 11, margin: 0, height: '100%', overflow: 'auto', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 6, padding: 8 }}>
+                  <pre style={{ ...mono, fontSize: 11, margin: 0, height: '100%', overflow: 'auto', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)', borderRadius: 6, padding: 8 }}>
                     {draft.diff.split('\n').map((l, i) => (
-                      <div key={i} style={{ color: l.startsWith('+') ? '#166534' : l.startsWith('-') ? '#b91c1c' : undefined }}>
+                      <div key={i} style={{ color: l.startsWith('+') ? 'var(--mm-ok-2)' : l.startsWith('-') ? 'var(--mm-error)' : undefined }}>
                         {l}
                       </div>
                     ))}
@@ -1127,7 +1123,7 @@ function ImportView({ onDone, onError }: { onDone: () => void; onError: (msg: st
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-      <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 10, color: '#78350f', fontSize: 12, marginBottom: 12, maxWidth: 900 }}>
+      <div style={{ background: 'var(--mm-warn-bg)', border: '1px solid var(--mm-warn-border)', borderRadius: 8, padding: 10, color: 'var(--mm-warn-3)', fontSize: 12, marginBottom: 12, maxWidth: 900 }}>
         Blocks are Python code that runs on your machine when you run a model. Only import files from people you trust, and open each row to read
         its code. This preview only parses the files -- nothing has run.
       </div>
@@ -1137,7 +1133,7 @@ function ImportView({ onDone, onError }: { onDone: () => void; onError: (msg: st
           <thead>
             <tr>
               {['Block', 'Check', 'In your library', 'Action'].map((h) => (
-                <th key={h} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid #e5e7eb', color: '#4b5563' }}>
+                <th key={h} style={{ textAlign: 'left', padding: 6, borderBottom: '1px solid var(--mm-border)', color: 'var(--mm-fg-4)' }}>
                   {h}
                 </th>
               ))}
@@ -1149,7 +1145,7 @@ function ImportView({ onDone, onError }: { onDone: () => void; onError: (msg: st
                 {f.file_errors.length > 0 && (
                   <tr key={`${f.file}:err`}>
                     <td style={{ padding: 6, ...mono }}>{f.file}</td>
-                    <td style={{ padding: 6, color: '#b91c1c' }} colSpan={3}>
+                    <td style={{ padding: 6, color: 'var(--mm-error)' }} colSpan={3}>
                       ✕ {f.file_errors.join('; ')}
                     </td>
                   </tr>
@@ -1158,7 +1154,7 @@ function ImportView({ onDone, onError }: { onDone: () => void; onError: (msg: st
                   const key = `${f.file}:${b.id}`
                   return (
                     <Fragment key={key}>
-                      <tr style={{ borderBottom: '1px solid #f3f4f6' }}>
+                      <tr style={{ borderBottom: '1px solid var(--mm-bg-hover)' }}>
                         <td style={{ padding: 6 }}>
                           <strong>{b.display_name}</strong>
                           <div style={{ ...mono, ...muted, fontSize: 11 }}>
@@ -1170,19 +1166,19 @@ function ImportView({ onDone, onError }: { onDone: () => void; onError: (msg: st
                         </td>
                         <td style={{ padding: 6 }}>
                           {b.errors.length ? (
-                            <span style={{ color: '#b91c1c' }}>✕ {b.errors[0]}</span>
+                            <span style={{ color: 'var(--mm-error)' }}>✕ {b.errors[0]}</span>
                           ) : (
-                            <span style={{ color: '#3f6259', fontWeight: 600 }}>✓ Valid</span>
+                            <span style={{ color: 'var(--mm-ok-3)', fontWeight: 600 }}>✓ Valid</span>
                           )}
-                          {b.unmet_requirements.length > 0 && <div style={{ color: '#92400e' }}>needs {b.unmet_requirements.join(', ')}</div>}
+                          {b.unmet_requirements.length > 0 && <div style={{ color: 'var(--mm-warn)' }}>needs {b.unmet_requirements.join(', ')}</div>}
                         </td>
                         <td style={{ padding: 6 }}>
                           {!b.clash ? (
                             <span style={muted}>new</span>
                           ) : b.clash.kind === 'builtin' ? (
-                            <span style={{ color: '#92400e', fontWeight: 600 }}>same id as a built-in</span>
+                            <span style={{ color: 'var(--mm-warn)', fontWeight: 600 }}>same id as a built-in</span>
                           ) : (
-                            <span style={{ color: '#92400e', fontWeight: 600 }}>
+                            <span style={{ color: 'var(--mm-warn)', fontWeight: 600 }}>
                               exists in {b.clash.file} · v{b.clash.version}
                             </span>
                           )}

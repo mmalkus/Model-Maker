@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from './api'
 import { DataModal } from './DataModal'
+import { host } from './host'
 import type { BlockDisplay, BlockOut, DisplayCell, PreviewOut } from './types'
 
 // A display block's result, drawn right on its canvas node (see
@@ -33,7 +34,7 @@ function formatKpi(display: Extract<BlockDisplay, { kind: 'kpi' }>): string {
   return unit ? `${text} ${unit}` : text
 }
 
-const cellStyle = { padding: '2px 6px', borderBottom: '1px solid #f3f4f6', whiteSpace: 'nowrap' } as const
+const cellStyle = { padding: '2px 6px', borderBottom: '1px solid var(--mm-bg-hover)', whiteSpace: 'nowrap' } as const
 
 export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; display: BlockDisplay; onChanged?: () => void }) {
   // The full table, opened straight from the node -- portalled out of the
@@ -45,15 +46,15 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
     api
       .preview(block.id, { port, rows: 200, summary: true })
       .then(setFullTable)
-      .catch((e) => alert((e as Error).message))
+      .catch((e) => host.notify((e as Error).message))
   }
   const stale = block.status === 'orange'
-  const wrap = { marginTop: 6, opacity: stale ? 0.55 : 1, color: '#111827' }
+  const wrap = { marginTop: 6, opacity: stale ? 0.55 : 1, color: 'var(--mm-fg)' }
 
   if (display.kind === 'kpi') {
     return (
       <div style={{ ...wrap, textAlign: 'center', padding: '4px 0' }} title={stale ? 'Stale: re-run to update' : undefined}>
-        <div style={{ fontSize: 11, color: '#6b7280' }}>{display.label}</div>
+        <div style={{ fontSize: 11, color: 'var(--mm-muted)' }}>{display.label}</div>
         <div style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: 'tabular-nums', lineHeight: 1.2 }}>
           {formatKpi(display)}
         </div>
@@ -84,7 +85,7 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
         <tbody>
           {(display.items ?? []).map(([k, v]) => (
             <tr key={k}>
-              <td style={{ ...cellStyle, color: '#6b7280' }}>{k}</td>
+              <td style={{ ...cellStyle, color: 'var(--mm-muted)' }}>{k}</td>
               <td style={{ ...cellStyle, textAlign: typeof v === 'number' ? 'right' : 'left', fontVariantNumeric: 'tabular-nums' }}>
                 {formatCell(v)}
               </td>
@@ -99,10 +100,10 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
   const hiddenCols = display.column_count - display.columns.length
   return (
     <div style={wrap}>
-      <div className="nowheel" style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 4 }}>
+      <div className="nowheel" style={{ overflowX: 'auto', border: '1px solid var(--mm-border)', borderRadius: 4 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 10.5, width: '100%' }}>
           <thead>
-            <tr style={{ background: '#f9fafb' }}>
+            <tr style={{ background: 'var(--mm-bg-subtle)' }}>
               {display.columns.map((c) => (
                 <th key={c.name} title={`${c.name} (${c.dtype})`} style={{ ...cellStyle, textAlign: 'left', fontWeight: 600 }}>
                   {c.name}
@@ -125,7 +126,7 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
             ))}
             {display.rows.length === 0 && (
               <tr>
-                <td colSpan={display.columns.length || 1} style={{ ...cellStyle, color: '#9ca3af' }}>
+                <td colSpan={display.columns.length || 1} style={{ ...cellStyle, color: 'var(--mm-faint)' }}>
                   (no rows)
                 </td>
               </tr>
@@ -133,7 +134,7 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
           </tbody>
         </table>
       </div>
-      <div style={{ display: 'flex', gap: 6, marginTop: 3, fontSize: 10, color: '#6b7280' }}>
+      <div style={{ display: 'flex', gap: 6, marginTop: 3, fontSize: 10, color: 'var(--mm-muted)' }}>
         <span>
           {display.row_count.toLocaleString()} row{display.row_count === 1 ? '' : 's'}
           {hiddenRows > 0 && ` · first ${display.rows.length} shown`}
@@ -146,7 +147,7 @@ export function NodeDisplay({ block, display, onChanged }: { block: BlockOut; di
               e.stopPropagation()
               openTable()
             }}
-            style={{ marginLeft: 'auto', border: 'none', background: 'none', padding: 0, color: '#2563eb', cursor: 'pointer', fontSize: 10 }}
+            style={{ marginLeft: 'auto', border: 'none', background: 'none', padding: 0, color: 'var(--mm-link)', cursor: 'pointer', fontSize: 10 }}
           >
             all rows…
           </button>
