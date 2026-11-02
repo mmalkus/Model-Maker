@@ -487,3 +487,40 @@ def stage_feedback_prompt(build: AgentBuild, feedback: str) -> str:
 
 def answer_prompt(answer: str) -> str:
     return f"The user answered:\n\n{answer}\n\nContinue the build."
+
+
+ENDED_AS = {
+    "stopped": "was stopped",
+    "failed": "failed",
+    "done": "finished",
+    "done_with_errors": "finished, with blocks that failed on the full data",
+}
+
+
+def reopen_prompt(build: AgentBuild, text: str, ended_as: str, fresh: bool) -> str:
+    """The user carries on with an ended build (controller.reopen). `fresh`:
+    a new conversation (the old one is gone -- a reloaded build, or small
+    context), so this carries the build's context too."""
+    stage = build.current_stage
+    then = (
+        "When it's done and checked, call finish with an updated report -- it replaces the earlier one."
+        if build.is_last_stage()
+        else f"When stage {stage['name']!r} is built and checked, call complete_stage and end your turn."
+    )
+    ask = (
+        f"The build {ENDED_AS.get(ended_as, ended_as)}, and the user has picked it up again. They say:\n\n{text}\n\n"
+        f"Do what they ask, working in stage {stage['name']!r} (its blocks and lanes are yours to change; "
+        "plan_stage again only if you add a batch of new steps). Check the results with run_to. "
+        f"{then} If something needs the user's decision, call ask_user."
+    )
+    if not fresh:
+        return ask
+    parts = [build_prompt(build)]
+    decided = decisions_so_far(build)
+    if decided and not build.options.small_context:  # small_context's stage_prompt already has it
+        parts.append("What the earlier stages decided -- keep to it:\n\n" + decided)
+    if build.report:
+        parts.append(f"The report it ended with:\n\n{build.report}")
+    parts.append("---\n\n" + ask)
+    return "\n\n".join(parts)
+

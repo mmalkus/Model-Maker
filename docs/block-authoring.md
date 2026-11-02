@@ -176,6 +176,11 @@ Every block's output columns get their metadata from one rule:
   one column. For those, `if_taken` gives the column that role instead
   when another column already has it, and `displaced` re-tags any other
   column that has it.
+- `"new_only": true` applies a rule only when the block created the
+  column, not when a column with that name came through from an input.
+  The `predict` block uses it, so scoring a table that already carries
+  another model's prediction makes the new one `predicted` and the old
+  one a `feature`.
 
 ### Decision hints: `hints`
 
