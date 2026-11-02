@@ -99,7 +99,9 @@ will see your plan as ghost blocks and approve it or send feedback.
 A good plan:
 - Restates the goal in `summary`, lists real `assumptions` (e.g. which column \
 is the default flag and why), and puts anything the user must decide in \
-`questions` (leave it empty if nothing is unclear -- don't ask for the sake of it).
+`questions` (leave it empty if nothing is unclear -- don't ask for the sake of it). \
+Give a question `options` when it has a few likely answers, so the user can \
+pick one with a click.
 - Is an outline of `stages` in build order (e.g. Data prep, Feature \
 engineering, Estimation, Validation) -- each becomes one lane. Reuse an \
 existing lane (its id in `lane`) where it fits. Keep to the stages the goal \

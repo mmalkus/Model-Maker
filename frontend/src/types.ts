@@ -508,10 +508,17 @@ export interface PlanStage {
   lane?: string
 }
 
+export interface PlanQuestion {
+  question: string
+  // Likely answers, offered as one-click buttons.
+  options?: string[]
+}
+
 export interface BuildPlan {
   summary: string
   assumptions?: string[]
-  questions?: string[]
+  // Plain strings in builds saved before questions had options.
+  questions?: (PlanQuestion | string)[]
   stages: PlanStage[]
   changes_to_existing?: { block: string; change: string; why: string }[]
   // The bands of the lanes the outline would create (see agent/tools.layout_plan).
@@ -552,6 +559,8 @@ export interface BuildOut {
   stages: BuildStage[]
   stage_index: number
   pending_question: string | null
+  // One-click answers to pending_question.
+  pending_options?: string[]
   report: string | null
   results: { block: string; port: string | null; label?: string | null; value?: unknown; row_count?: number; error?: string }[]
   deviations: { plan_step?: string; what: string; why: string }[]

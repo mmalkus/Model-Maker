@@ -213,9 +213,11 @@ class BuildController:
         retry = f"The AI model didn't answer: {message}\n\nReply (e.g. \"continue\") to retry, or stop the build."
         if b.phase == PLANNING:
             b.pending_question = retry
+            b.pending_options = ["Continue"]
             b.set_phase(AWAITING_APPROVAL, note="the model didn't answer")
         elif b.phase == BUILDING:
             b.pending_question = retry
+            b.pending_options = ["Continue"]
             b.set_phase(AWAITING_INPUT, note="the model didn't answer")
         else:
             b.error = message
@@ -235,6 +237,7 @@ class BuildController:
             b.extend_budget()
             b.set_phase(AWAITING_STAGE_REVIEW, note="limit reached")
             return True
+        b.pending_options = ["Continue"]
         b.pending_question = (
             f"{b.limit_reached}\n\nReply (e.g. \"continue\", or what to do differently) to carry on with a fresh "
             "budget, or stop the build."
@@ -371,6 +374,7 @@ class BuildController:
                 b.plan_history.append({"plan": b.plan, "feedback": text})
                 b.plan = None
                 b.pending_question = None
+                b.pending_options = []
                 b.set_phase(PLANNING)
                 b.log("user", text=text)
 
@@ -401,6 +405,7 @@ class BuildController:
                 )
                 b.last_question = None
                 b.pending_question = None
+                b.pending_options = []
                 b.set_phase(BUILDING)
                 b.log("user", text=text)
 
@@ -453,6 +458,7 @@ class BuildController:
             b.error = None
             b.ended_at = None
             b.pending_question = b.last_question = None
+            b.pending_options = []
             b.extend_budget()
             b.user_inputs.append({"stage": stage["key"] if stage else None, "text": text})
             b.log("reopened", previous_phase=ended_as)
@@ -618,6 +624,7 @@ class BuildController:
             return
         if outcome.error:
             b.log("error", message=outcome.error)
+            b.pending_options = ["Continue"]
             b.pending_question = f"The AI hit an error: {outcome.error}\n\nReply to have it continue, or stop the build."
             b.set_phase(AWAITING_INPUT)
             return
@@ -633,6 +640,7 @@ class BuildController:
             else:
                 b.set_phase(AWAITING_STAGE_REVIEW)
             return
+        b.pending_options = ["Continue"]
         b.pending_question = (
             "The AI ended its turn without finishing the build"
             + (f":\n\n{outcome.final_text}" if outcome.final_text else ".")

@@ -273,7 +273,7 @@ def test_ask_user_pauses_and_the_answer_resumes(prepared):
     ANCHOR[:] = [anchor]
 
     def asks(call):
-        call("ask_user", {"question": "Which seed?"})
+        call("ask_user", {"question": "Which seed?", "options": ["1", " 7 ", ""]})
         return "Waiting."
 
     def finishes(call):
@@ -286,8 +286,10 @@ def test_ask_user_pauses_and_the_answer_resumes(prepared):
     controller.approve()
     controller.join(60)
     assert b.phase == AWAITING_INPUT and b.pending_question == "Which seed?"
+    assert b.to_dict()["pending_options"] == ["1", "7"]
     assert controller.canvas_locked()
     controller.feedback("Seed 7.")
+    assert b.pending_options == []
     controller.join(120)
     assert b.phase == DONE
     assert "Seed 7." in controller.loops["build"].prompts[-1]
@@ -638,7 +640,7 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
             {
                 "plan": {
                     "summary": "split",
-                    "questions": ["Which seed?"],
+                    "questions": ["Which seed?", {"question": "Which split?", "options": ["70/30", "80/20"]}],
                     "stages": [{"key": "est", "name": "Estimation", "goal": "holdout split", "blocks": ["train_test_split"]}],
                 }
             },
@@ -651,6 +653,10 @@ def test_auto_build_waits_when_the_plan_has_questions(prepared):
     controller.join(60)
     assert b.phase == AWAITING_APPROVAL
     assert any(e["kind"] == "auto_build_paused" for e in b.events_since())
+    assert b.plan["questions"] == [
+        {"question": "Which seed?", "options": []},
+        {"question": "Which split?", "options": ["70/30", "80/20"]},
+    ]
     # Answering re-plans; the new plan has no questions, so it builds.
     controller.feedback("Seed 1.")
     controller.join(300)
