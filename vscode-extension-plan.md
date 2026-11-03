@@ -63,6 +63,15 @@ Where the implementation differs from the plan below:
   the same (checked by a screenshot colour diff). Inside VS Code the tokens,
   the brand chrome, React Flow and CodeMirror map onto `--vscode-*`
   colours.
+- **Python is set up automatically (beyond §5.2).** By default
+  (`modelmaker.environment: managed`) the extension downloads a pinned uv
+  from PyPI and checks it against PyPI's sha256. uv creates a private
+  environment in the extension's global storage (on the remote, for remote
+  workspaces), using a Python 3.11–3.13 on the machine or a downloaded one,
+  and installs the package. Upgrades happen without asking, because the
+  environment is the extension's. The interpreter-plus-pip flow of §5.2
+  remains as `selected`, for people who want their own environment or
+  can't reach PyPI.
 - **The extension checks for a compatible backend through `/api/version`'s
   compat level only.** `modelmaker.packageSpec` defaults to an unpinned
   `quantology-modelmaker`. The first extension release therefore has to

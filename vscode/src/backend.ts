@@ -4,14 +4,14 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import type { CopilotRelay } from './copilot'
-import { resolvePython } from './python'
+import { type ManagedEnvironment, ManagedSetupError, PACKAGE } from './managed'
+import { downloadEnv, resolvePython } from './python'
 
 // The /api/version "api" level this extension speaks (modelmaker/api.py's
 // API_COMPAT_LEVEL). A backend reporting another level -- or none, from
 // before the endpoint existed -- is refused with an offer to upgrade.
 export const API_COMPAT = 1
 
-const PACKAGE = 'quantology-modelmaker'
 // The first release with the switches this extension sets (auth, CORS, /api/version).
 const DEFAULT_SPEC = `${PACKAGE}>=0.3.0`
 const HEALTH_TIMEOUT_MS = 90_000
@@ -63,10 +63,18 @@ export class Backend {
     return body as T
   }
 
-  stop() {
+  /** Kills the process tree; resolves once the server has exited (or
+   * after a few seconds regardless). */
+  stop(): Promise<void> {
     this.stopping = true
-    killTree(this.proc)
     this.exitEmitter.dispose()
+    if (this.exited) return Promise.resolve()
+    const exited = new Promise<void>((resolve) => {
+      this.proc.once('exit', () => resolve())
+      setTimeout(resolve, 5000).unref()
+    })
+    killTree(this.proc)
+    return exited
   }
 }
 
@@ -82,6 +90,7 @@ export class BackendManager implements vscode.Disposable {
   constructor(
     private readonly log: vscode.OutputChannel,
     private readonly relay: CopilotRelay,
+    private readonly managed: ManagedEnvironment,
   ) {}
 
   /** The folder's backend, started if needed; pair with release(). */
@@ -105,19 +114,30 @@ export class BackendManager implements vscode.Disposable {
     entry.backend.then((b) => b.stop()).catch(() => {})
   }
 
-  /** Restarts every running backend (or one folder's), keeping its users. */
-  async restart(folder?: string) {
+  /** Restarts every running backend (or one folder's), keeping its users.
+   * `beforeStart` runs once all of them have stopped (e.g. to rebuild the
+   * environment they run in). */
+  async restart(folder?: string, beforeStart?: () => void) {
     const keys = folder ? [path.resolve(folder)] : [...this.entries.keys()]
+    const running = keys.flatMap((key) => {
+      const entry = this.entries.get(key)
+      return entry ? [{ key, entry }] : []
+    })
+    await Promise.all(running.map(({ entry }) => entry.backend.then((b) => b.stop()).catch(() => {})))
+    let failed: unknown
+    try {
+      beforeStart?.()
+    } catch (e) {
+      failed = e // still bring the backends back, then report it
+    }
     await Promise.all(
-      keys.map(async (key) => {
-        const entry = this.entries.get(key)
-        if (!entry) return
-        entry.backend.then((b) => b.stop()).catch(() => {})
+      running.map(async ({ key, entry }) => {
         entry.backend = this.start(key)
         await entry.backend.catch(() => {})
         this.restartEmitter.fire(key)
       }),
     )
+    if (failed) throw failed
   }
 
   dispose() {
@@ -126,17 +146,30 @@ export class BackendManager implements vscode.Disposable {
     this.restartEmitter.dispose()
   }
 
+  /** The Python that runs `folder`'s backend, with the package installed:
+   * the managed environment (set up on first use), or the user's own. */
+  async preparePython(folder: string, progress: Progress): Promise<{ python: string; managed: boolean }> {
+    const choice = await resolvePython(vscode.Uri.file(folder))
+    if (choice.managed) {
+      const report = (message: string) => progress.report({ message })
+      return { python: await managedStep(() => this.managed.ensure(packageSpec(), report, downloadEnv())), managed: true }
+    }
+    await ensurePackage(choice.python, this.log, progress)
+    return { python: choice.python, managed: false }
+  }
+
   private async start(folder: string): Promise<Backend> {
-    const uri = vscode.Uri.file(folder)
-    const python = await resolvePython(uri)
     return vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Model-Maker: starting backend for ${path.basename(folder)}` },
       async (progress) => {
-        await ensurePackage(python, this.log, progress)
+        const report = (message: string) => progress.report({ message })
+        const { python, managed } = await this.preparePython(folder, progress)
         let backend = await this.spawnHealthy(folder, python, progress)
         if (!(await isCompatible(backend))) {
           backend.stop()
-          await offerUpgrade(python, this.log, progress)
+          // The managed environment is ours to upgrade; a user's isn't.
+          if (managed) await managedStep(() => this.managed.upgrade(packageSpec(), report, downloadEnv()))
+          else await offerUpgrade(python, this.log, progress)
           backend = await this.spawnHealthy(folder, python, progress)
           if (!(await isCompatible(backend))) {
             backend.stop()
@@ -310,9 +343,28 @@ export function installedVersion(python: string, log?: vscode.OutputChannel): Pr
   })
 }
 
+/** What gets installed: modelmaker.packageSpec. */
+export function packageSpec(): string {
+  return vscode.workspace.getConfiguration('modelmaker').get<string>('packageSpec', DEFAULT_SPEC).trim() || DEFAULT_SPEC
+}
+
+/** Runs a managed-environment step, explaining a failure in the terms the
+ * user can act on: most likely, no internet access to PyPI. */
+export async function managedStep<T>(step: () => Promise<T>): Promise<T> {
+  try {
+    return await step()
+  } catch (e) {
+    if (!(e instanceof ManagedSetupError)) throw e
+    throw new BackendError(
+      `couldn't set up Model-Maker's Python environment: ${e.message}. ` +
+        `If this machine can't reach PyPI, use a Python of your own instead: Model-Maker: Select Python Interpreter.`,
+    )
+  }
+}
+
 /** pip install -U <modelmaker.packageSpec> into `python`. */
 export async function installPackage(python: string, log: vscode.OutputChannel, progress?: Progress) {
-  const spec = vscode.workspace.getConfiguration('modelmaker').get<string>('packageSpec', DEFAULT_SPEC).trim() || DEFAULT_SPEC
+  const spec = packageSpec()
   progress?.report({ message: `pip install -U ${spec}` })
   log.appendLine(`$ ${python} -m pip install -U ${spec}`)
   const { code, out } = await run(python, ['-m', 'pip', 'install', '-U', ...spec.split(/\s+/)], log)

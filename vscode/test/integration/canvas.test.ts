@@ -91,4 +91,27 @@ suite('Model-Maker canvas', () => {
       backends.release(folder())
     }
   })
+
+  // Last: it switches this workspace to the managed environment. The
+  // checkout is the package spec, as the version under test isn't on PyPI.
+  test('starts the backend from the managed environment, built on demand', async function () {
+    const spec = process.env.MODELMAKER_TEST_MANAGED_SPEC
+    if (!spec) return this.skip()
+    this.timeout(15 * 60_000)
+    const { backends } = await activate()
+    const config = vscode.workspace.getConfiguration('modelmaker')
+    await config.update('packageSpec', spec, vscode.ConfigurationTarget.Workspace)
+    await config.update('pythonPath', undefined, vscode.ConfigurationTarget.Workspace)
+    await config.update('environment', 'managed', vscode.ConfigurationTarget.Workspace)
+    await backends.restart()
+    const backend = await backends.acquire(folder())
+    try {
+      assert.equal((await fetch(`${backend.apiBase}/api/health`)).status, 200)
+      assert.match(backend.python, /[\\/]env[\\/](bin|Scripts)[\\/]python/, `not the managed environment: ${backend.python}`)
+      const graph = await backend.json<{ blocks: Record<string, unknown> }>('/graph')
+      assert.ok(Object.keys(graph.blocks).length > 0)
+    } finally {
+      backends.release(folder())
+    }
+  })
 })

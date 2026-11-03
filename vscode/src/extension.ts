@@ -1,9 +1,11 @@
+import { execFile } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import { BackendManager, installPackage } from './backend'
+import { BackendManager, installPackage, managedStep, packageSpec } from './backend'
 import { CopilotRelay } from './copilot'
 import { ModelEditorProvider, VIEW_TYPE } from './editor'
-import { onPythonChanged, resolvePython } from './python'
+import { ManagedEnvironment } from './managed'
+import { downloadEnv, onPythonChanged, resolvePython, usesSelectedInterpreter } from './python'
 import { registerTools } from './tools'
 
 const PROJECT_FILE = 'model.json'
@@ -18,7 +20,9 @@ export type ExtensionApi = { backends: BackendManager }
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
   const log = vscode.window.createOutputChannel('Model-Maker')
   const relay = new CopilotRelay(log)
-  const backends = new BackendManager(log, relay)
+  // On the machine with the files (remote included), shared by all projects.
+  const managed = new ManagedEnvironment(context.globalStorageUri.fsPath, (text) => log.append(text))
+  const backends = new BackendManager(log, relay, managed)
   context.subscriptions.push(log, relay, backends)
   const editor = ModelEditorProvider.register(context, backends, log)
   registerTools(context, backends, editor)
@@ -43,32 +47,54 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     await openCanvas(file)
   })
   command('modelmaker.newProject', () => newProject(backends))
+  command('modelmaker.openDemo', () => openDemo(backends, log))
   command('modelmaker.save', () => editor.saveActive())
   command('modelmaker.restartBackend', () => backends.restart())
   command('modelmaker.showLog', () => log.show())
-  command('modelmaker.selectInterpreter', selectInterpreter)
+  command('modelmaker.selectInterpreter', () => selectInterpreter(managed))
   command('modelmaker.installPackage', async () => {
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd())
-    const python = await resolvePython(folder)
+    const choice = await resolvePython(folder)
     try {
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: 'Model-Maker: installing the Python package' },
-        (progress) => installPackage(python, log, progress),
+        (progress) =>
+          choice.managed
+            ? managedStep(() => managed.upgrade(packageSpec(), (message) => progress.report({ message }), downloadEnv()))
+            : installPackage(choice.python, log, progress),
       )
-      const choice = await vscode.window.showInformationMessage(`Installed into ${python}.`, 'Restart Backend')
-      if (choice) await backends.restart()
+      const where = choice.managed ? "Model-Maker's environment" : choice.python
+      const restart = await vscode.window.showInformationMessage(`Installed into ${where}.`, 'Restart Backend')
+      if (restart) await backends.restart()
     } catch (e) {
       vscode.window.showErrorMessage(String(e instanceof Error ? e.message : e))
     }
   })
+  command('modelmaker.resetEnvironment', async () => {
+    const ok = await vscode.window.showWarningMessage(
+      "Delete Model-Maker's managed Python environment? It's rebuilt on the next start (this needs internet access).",
+      { modal: true },
+      'Reset',
+    )
+    if (ok !== 'Reset') return
+    // Open canvases restart onto a freshly built environment.
+    try {
+      await backends.restart(undefined, () => managed.reset())
+    } catch (e) {
+      vscode.window.showErrorMessage(`Couldn't reset the environment: ${e instanceof Error ? e.message : e}`)
+    }
+  })
 
-  // A different interpreter means a different package: restart onto it.
-  onPythonChanged(() => backends.restart()).then((d) => context.subscriptions.push(d))
+  // A different interpreter means a different package: restart onto it --
+  // when the Python extension's selection is what runs the backend.
+  onPythonChanged(() => {
+    if (usesSelectedInterpreter()) backends.restart()
+  }).then((d) => context.subscriptions.push(d))
 
   // Settings a running backend was started with: offer to restart onto them.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
-      const keys = ['modelmaker.pythonPath', 'modelmaker.llm.useCopilot', 'modelmaker.backend.extraEnv']
+      const keys = ['modelmaker.pythonPath', 'modelmaker.environment', 'modelmaker.llm.useCopilot', 'modelmaker.backend.extraEnv']
       if (!keys.some((k) => e.affectsConfiguration(k))) return
       const choice = await vscode.window.showInformationMessage('Restart the Model-Maker backend to apply the new settings?', 'Restart')
       if (choice) await backends.restart()
@@ -164,16 +190,70 @@ async function newProject(backends: BackendManager) {
   }
 }
 
-async function selectInterpreter() {
-  if (vscode.extensions.getExtension('ms-python.python')) {
-    await vscode.commands.executeCommand('python.setInterpreter')
+/** Copies the demo projects (modelmaker-demo) into a folder and opens one:
+ * with the managed environment there's no modelmaker-demo on PATH. */
+async function openDemo(backends: BackendManager, log: vscode.OutputChannel) {
+  const parent = vscode.workspace.workspaceFolders?.[0]?.uri
+  const target = await vscode.window.showSaveDialog({
+    defaultUri: parent ? vscode.Uri.joinPath(parent, 'modelmaker-demo') : undefined,
+    title: 'Model-Maker demo: choose a folder to create',
+    saveLabel: 'Create Demo',
+  })
+  if (!target) return
+  const project = vscode.Uri.joinPath(target, 'projects', 'demo_pd_model', PROJECT_FILE)
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Model-Maker: creating the demo' },
+      async (progress) => {
+        const { python } = await backends.preparePython(path.dirname(target.fsPath), progress)
+        progress.report({ message: 'generating the demo data' })
+        await new Promise<void>((resolve, reject) => {
+          execFile(
+            python,
+            ['-c', 'from modelmaker.demo_data import workspace_main; workspace_main()', target.fsPath],
+            { windowsHide: true },
+            (err, stdout, stderr) => {
+              log.append(stdout + stderr)
+              if (err) reject(new Error(stderr.trim().split('\n').pop() || err.message))
+              else resolve()
+            },
+          )
+        })
+      },
+    )
+    await openCanvas(project)
+  } catch (e) {
+    vscode.window.showErrorMessage(`Couldn't create the demo: ${e instanceof Error ? e.message : e}`)
+  }
+}
+
+async function selectInterpreter(managed: ManagedEnvironment) {
+  const config = vscode.workspace.getConfiguration('modelmaker')
+  const target = vscode.ConfigurationTarget.Workspace
+  const hasPythonExtension = !!vscode.extensions.getExtension('ms-python.python')
+  type Item = vscode.QuickPickItem & { id: 'managed' | 'selected' | 'path' }
+  const items: Item[] = [
+    {
+      id: 'managed',
+      label: "Model-Maker's own environment",
+      description: 'recommended',
+      detail: `Set up automatically; nothing to install yourself (${managed.root})`,
+    },
+    {
+      id: 'selected',
+      label: hasPythonExtension ? "The Python extension's interpreter" : 'python3 / python on PATH',
+      detail: 'Blocks can use the packages in your own environment; Model-Maker is pip-installed into it',
+    },
+    { id: 'path', label: 'Enter a path…', detail: 'A specific python executable' },
+  ]
+  const picked = await vscode.window.showQuickPick(items, { title: 'Which Python runs the Model-Maker backend?' })
+  if (!picked) return
+  if (picked.id === 'path') {
+    const value = await vscode.window.showInputBox({ title: 'Path to a python executable', value: config.get<string>('pythonPath') ?? '' })
+    if (value !== undefined) await config.update('pythonPath', value, target)
     return
   }
-  const config = vscode.workspace.getConfiguration('modelmaker')
-  const value = await vscode.window.showInputBox({
-    title: 'Python interpreter for the Model-Maker backend',
-    prompt: 'Path to a python executable (install the Python extension to pick from a list)',
-    value: config.get<string>('pythonPath') ?? '',
-  })
-  if (value !== undefined) await config.update('pythonPath', value, vscode.ConfigurationTarget.Workspace)
+  await config.update('pythonPath', undefined, target)
+  await config.update('environment', picked.id, target)
+  if (picked.id === 'selected' && hasPythonExtension) await vscode.commands.executeCommand('python.setInterpreter')
 }

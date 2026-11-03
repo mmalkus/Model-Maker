@@ -7,15 +7,24 @@ GitHub Copilot can be the AI that drafts blocks and runs AI model builds.
 
 ## What you need
 
-- Python 3.11 or newer. The extension runs the
-  [`quantology-modelmaker`](https://pypi.org/project/quantology-modelmaker/)
-  package in it and offers to `pip install` the package if it's missing.
-  A virtual environment is the safe choice; pick it with the
-  [Python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
-  or the `modelmaker.pythonPath` setting.
-- Optional: GitHub Copilot, for the AI features. Without it, the canvas's
-  Settings offers the other providers (Anthropic, OpenAI, Gemini, a local
-  LM Studio, the Claude Code CLI).
+Nothing besides the extension. The first time you open a project, it sets
+up its own Python environment with the
+[`quantology-modelmaker`](https://pypi.org/project/quantology-modelmaker/)
+package. That takes a minute or two, needs internet access once, and shows
+its progress. After that, projects open instantly. It uses a Python
+3.11–3.13 already on the machine if there is one, or downloads one, and
+keeps everything in the extension's own storage.
+
+Optional: GitHub Copilot, for the AI features. Without it, the canvas's
+Settings offers the other providers (Anthropic, OpenAI, Gemini, a local LM
+Studio, the Claude Code CLI).
+
+### Your own Python instead
+
+Run **Model-Maker: Select Python Interpreter** and pick "The Python
+extension's interpreter" or a path. You want this when blocks need packages
+from your own environment, or when the machine can't reach PyPI. The
+extension then offers to `pip install` the package into that interpreter.
 
 ## Use it
 
@@ -24,8 +33,7 @@ GitHub Copilot can be the AI that drafts blocks and runs AI model builds.
   editor title bar. You can also run **Model-Maker: Open Project…**. When
   a workspace contains a project, the extension offers to open it.
 - **Start a project:** run **Model-Maker: New Project…**.
-- **Try the demo:** run `modelmaker-demo .` in a terminal, then open
-  `projects/demo_pd_model/model.json`.
+- **Try the demo:** run **Model-Maker: Open Demo Project…**.
 
 The canvas autosaves to `model.json` a couple of seconds after each edit,
 and **Ctrl/Cmd+S** saves straight away. Git works through VS Code's
@@ -78,15 +86,18 @@ does: column names, types, roles and summary statistics, never your rows.
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |
 | Model-Maker: Show Backend Log | Backend output, pip installs, relay errors |
-| Model-Maker: Select Python Interpreter | Choose the interpreter that runs the backend |
-| Model-Maker: Install / Upgrade Python Package | `pip install -U` the package into it |
+| Model-Maker: Open Demo Project… | Create the demo projects in a folder and open one |
+| Model-Maker: Select Python Interpreter | Model-Maker's own environment (default), or your own Python |
+| Model-Maker: Install / Upgrade Python Package | Upgrade the package in the backend's environment |
+| Model-Maker: Reset Managed Python Environment | Delete Model-Maker's environment; it's rebuilt on the next start |
 
 ## Settings
 
 | Setting | Default | |
 |---|---|---|
-| `modelmaker.pythonPath` | (empty) | Interpreter for the backend; empty uses the Python extension's selection |
-| `modelmaker.autoInstall` | `ask` | `ask`, `always` or `never` install the package when missing or too old |
+| `modelmaker.environment` | `managed` | `managed`: Model-Maker's own environment, set up automatically. `selected`: the Python extension's interpreter |
+| `modelmaker.pythonPath` | (empty) | A specific interpreter; overrides `modelmaker.environment` |
+| `modelmaker.autoInstall` | `ask` | For your own interpreter: `ask`, `always` or `never` install the package when it's missing or too old |
 | `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.0` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
 | `modelmaker.llm.useCopilot` | `true` | Offer Copilot to the backend and make it the default provider |
 | `modelmaker.backend.extraEnv` | `{}` | Extra environment variables for the backend, e.g. API keys |
