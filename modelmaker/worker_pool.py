@@ -1,34 +1,57 @@
 """Pre-started, single-use worker processes for block runs (see
-Runner._run_tasks in runner.py).
+execution/local.py's LocalExecutor, which Runner._run_tasks in runner.py
+goes through).
 
 Every task still runs in a process of its own that is used for exactly one
 task and then exits -- the isolation contract described in run_worker.py
 is unchanged, and nothing a block does can leak into another block's run.
-What changes is only *when* that process starts. A "spawn" child (see
-runner.MP_CONTEXT) spends almost all of its life importing polars, and
-sklearn/scipy for the modelling and test blocks, before doing a few
-milliseconds of actual work: ~0.6s for a filter, ~3s for a logistic
-regression. So a few spares are started, and their imports done, ahead of
-time, and a dispatch hands its task to one that is already warm instead
-of paying that start-up in line. Each spare taken is replaced in the
-background.
+What changes is only *when* that process starts. A fresh interpreter
+spends almost all of its life importing polars, and sklearn/scipy for the
+modelling and test blocks, before doing a few milliseconds of actual work:
+~0.6s for a filter, ~3s for a logistic regression. So a few spares are
+started, and their imports done, ahead of time, and a dispatch hands its
+task to one that is already warm instead of paying that start-up in line.
+Each spare taken is replaced in the background.
+
+How a worker process is started (see Worker): on POSIX it is exec'd
+directly -- `subprocess.Popen` of this interpreter with a small bootstrap,
+one end of a socketpair passed as its only extra fd -- with the secrets
+already removed from its environment (execution/env.py). That is the point
+of not using multiprocessing's "spawn" here: spawn execs the child with
+this process's *current* environment, and deleting variables inside the
+child afterwards leaves them readable in /proc/self/environ, which keeps
+whatever the process was exec'd with. Popen takes the environment as an
+argument, so nothing has to mutate this process's os.environ around a
+start either (which wouldn't be thread-safe: the API dispatches from
+several threads). Elsewhere -- Windows, a frozen app -- it falls back to
+multiprocessing's spawn (`runner.MP_CONTEXT`) and removes the secrets from
+os.environ first thing in the child: good against a block reading
+os.environ, not against one reading the process's original environment
+block. Either way, every message the parent *receives* is bytes it decodes
+itself (execution/wire.py), never a pickle.
 
 A spare is started before it is known what it will run, so it can't rely
-on what it inherited at spawn time: the parent's *current* os.environ and
-cwd travel with each task and are applied before the task runs (e.g.
-api.set_env_var relies on a block seeing an env var set after server
-start). The one thing that can't be carried over is a module that reads
-the environment at import time -- polars' POLARS_MAX_THREADS, say -- which
-in a spare sees the environment as of the spare's start.
+on what it inherited at start: the parent's *current* (scrubbed)
+os.environ and cwd travel with each task and are applied before the task
+runs (e.g. api.set_env_var relies on a block seeing an env var set after
+server start). The one thing that can't be carried over is a module that
+reads the environment at import time -- polars' POLARS_MAX_THREADS, say --
+which in a spare sees the environment as of the spare's start.
 """
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import os
+import socket
+import subprocess
 import sys
 import threading
-from typing import Any
+import weakref
+from typing import Any, Literal
+
+from .execution.env import is_secret, scrubbed_environ
 
 # Imported by every worker before it takes a task: what nearly every block
 # run needs (the block modules themselves register the registry blocks --
@@ -48,6 +71,24 @@ BASE_PRELOAD = (
 # single `from sklearn.linear_model import ...` pulls in hundreds).
 MAX_LEARNED_MODULES = 5000
 
+Launcher = Literal["exec", "multiprocessing"]
+
+
+def default_launcher() -> Launcher:
+    """The exec launcher wherever Popen can pass the socket's fd (POSIX),
+    unless this is a frozen app, where sys.executable isn't a Python that
+    runs `-c`; multiprocessing's spawn everywhere else.
+    MODELMAKER_WORKER_LAUNCHER=multiprocessing forces the fallback (an
+    escape hatch, and how the fallback gets tested on POSIX)."""
+    if os.environ.get("MODELMAKER_WORKER_LAUNCHER") == "multiprocessing":
+        return "multiprocessing"
+    if os.name == "posix" and sys.executable and not getattr(sys, "frozen", False):
+        return "exec"
+    return "multiprocessing"
+
+
+# ---- the worker process's side ----------------------------------------------
+
 
 def _preload(names: list[str]) -> None:
     for name in names:
@@ -59,35 +100,50 @@ def _preload(names: list[str]) -> None:
 
 class _ConnResult:
     """Stands in for the result queue the run_worker entry points report
-    to, sending `(task_key, ok, payload)` back over this worker's pipe
-    instead, plus every module the task imported that the worker hadn't
-    preloaded -- the parent preloads those into future spares (see
-    WorkerPool.learn), which is how a session that keeps running logistic
-    regressions stops paying for the sklearn import after the first."""
+    to: encodes `(task_key, ok, payload)` into one wire frame (see
+    execution/wire.py) and sends it back over this worker's socket as raw
+    bytes. The frame also lists every module the task imported that the
+    worker hadn't preloaded -- the parent preloads those into future spares
+    (see WorkerPool.learn), which is how a session that keeps running
+    logistic regressions stops paying for the sklearn import after the
+    first.
+
+    A result that can't be encoded (an object that isn't data, or one over
+    the size cap) becomes the task's error here, in the task process, with
+    a message saying why -- it never reaches the parent at all."""
 
     def __init__(self, conn: Any, modules_before: set[str]) -> None:
         self._conn = conn
         self._before = modules_before
 
     def put(self, item: tuple[Any, bool, Any]) -> None:
+        from .execution import wire
+
+        _key, ok, payload = item
         learned = [m for m in sys.modules if m not in self._before and not m.startswith("__")]
-        self._conn.send((*item, learned))
+        fields = {"ok": ok, "error": None if ok else str(payload), "modules": learned}
+        try:
+            frame = wire.encode_frame(fields, payload if ok else None)
+        except (wire.WireError, RecursionError) as e:
+            fields.update(ok=False, error=str(e) if isinstance(e, wire.WireError) else "RecursionError: result nested too deeply")
+            frame = wire.encode_frame(fields, None)
+        self._conn.send_bytes(frame)
 
 
 # What a spare sends once its preload is done (see WorkerPool.acquire).
-READY = "ready"
+READY = b"ready"
 
 
-def spare_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
+def worker_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
     """A worker process's whole life: import `preload`, wait for exactly
     one task, run it, report, exit. A parent that discards a spare unused
-    just closes its end of the pipe, which ends this at recv()."""
+    just closes its end of the connection, which ends this at recv()."""
     _preload(preload)
     if announce_ready:
-        conn.send(READY)
+        conn.send_bytes(READY)
     modules_before = set(sys.modules)
     try:
-        entry_name, args, task_key, env, cwd = conn.recv()
+        entry_name, args, env, cwd = conn.recv()  # from the parent: trusted
     except (EOFError, OSError):
         return
     os.environ.clear()
@@ -95,33 +151,165 @@ def spare_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
     os.chdir(cwd)
     from . import run_worker
 
-    getattr(run_worker, entry_name)(*args, result_queue=_ConnResult(conn, modules_before), task_key=task_key)
+    try:
+        getattr(run_worker, entry_name)(*args, result_queue=_ConnResult(conn, modules_before), task_key=None)
+    except (BrokenPipeError, EOFError, OSError):
+        pass  # the parent stopped waiting (cancelled, or gone)
+
+
+def _mp_child_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
+    """The multiprocessing fallback's target: this process was started with
+    the parent's whole environment, so drop the secrets from os.environ
+    before anything else runs. Best effort -- see the module docstring."""
+    for name in [n for n in os.environ if is_secret(n)]:
+        os.environ.pop(name, None)
+    worker_main(conn, preload, announce_ready)
+
+
+# The exec launcher's `-c` program: the fd of its end of the socketpair is
+# argv[1]; the first message on it (pickled -- it's from the parent) is
+# this process's sys.path, so modelmaker imports exactly as in the parent,
+# plus what to preload. Runs under -P so nothing in the cwd can shadow the
+# stdlib modules imported before sys.path is replaced. The fd is made
+# non-inheritable again (pass_fds made it inheritable), so a program the
+# block starts doesn't hold the socket open after this process dies.
+_BOOTSTRAP = """\
+import os, sys
+from multiprocessing.connection import Connection
+os.set_inheritable(int(sys.argv[1]), False)
+conn = Connection(int(sys.argv[1]))
+try:
+    sys.path[:], preload, announce_ready = conn.recv()
+except (EOFError, OSError):
+    raise SystemExit(0)
+from modelmaker.worker_pool import worker_main
+worker_main(conn, preload, announce_ready)
+"""
+
+
+# ---- the parent's side --------------------------------------------------------
+
+
+class _PopenProcess:
+    """A Popen with the slice of multiprocessing.Process's interface the
+    pool and the executor use."""
+
+    def __init__(self, popen: subprocess.Popen) -> None:
+        self._popen = popen
+        self.pid = popen.pid
+
+    def is_alive(self) -> bool:
+        return self._popen.poll() is None
+
+    @property
+    def exitcode(self) -> int | None:
+        return self._popen.poll()
+
+    def terminate(self) -> None:
+        try:
+            self._popen.terminate()
+        except OSError:
+            pass
+
+    def kill(self) -> None:
+        try:
+            self._popen.kill()
+        except OSError:
+            pass
+
+    def join(self, timeout: float | None = None) -> None:
+        try:
+            self._popen.wait(timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+# Every worker not yet stopped, so none outlives this process (the
+# multiprocessing launcher's daemon flag did this for free; a Popen child
+# doesn't get it). A spare would exit on its own once its socket closes,
+# but a task still running wouldn't, until it finished.
+_LIVE: weakref.WeakSet[Worker] = weakref.WeakSet()
+_LIVE_LOCK = threading.Lock()
+
+
+@atexit.register
+def _stop_live_workers() -> None:
+    with _LIVE_LOCK:
+        workers = list(_LIVE)
+    for worker in workers:
+        worker.stop()
+
+
+def _interpreter_flags() -> list[str]:
+    flags = list(getattr(subprocess, "_args_from_interpreter_flags", list)())
+    return flags if "-P" in flags else [*flags, "-P"]
 
 
 class Worker:
-    """The parent's handle on one (possibly still preloading) worker."""
+    """The parent's handle on one (possibly still preloading) worker:
+    `conn` (send to it pickled, receive from it bytes only) and `process`."""
 
-    def __init__(self, ctx: Any, preload: list[str], spare: bool = False) -> None:
-        self.conn, child_conn = ctx.Pipe(duplex=True)
-        self.process = ctx.Process(target=spare_main, args=(child_conn, preload, spare), daemon=True)
+    def __init__(self, ctx: Any, preload: list[str], spare: bool = False, launcher: Launcher | None = None) -> None:
         self._ready = False
-        self.process.start()
-        # The parent must drop its copy of the child's end, or the pipe
-        # never reports EOF when the child dies and a crash would read as
-        # a hang.
-        child_conn.close()
+        self.launcher: Launcher = launcher or default_launcher()
+        if self.launcher == "exec":
+            from multiprocessing.connection import Connection
+
+            parent_sock, child_sock = socket.socketpair()
+            try:
+                popen = subprocess.Popen(
+                    [sys.executable, *_interpreter_flags(), "-c", _BOOTSTRAP, str(child_sock.fileno())],
+                    env=scrubbed_environ(),
+                    pass_fds=(child_sock.fileno(),),
+                    stdin=subprocess.DEVNULL,
+                )
+            except BaseException:
+                parent_sock.close()
+                raise
+            finally:
+                # The parent must drop its copy of the child's end, or the
+                # socket never reports EOF when the child dies and a crash
+                # would read as a hang.
+                child_sock.close()
+            self.conn = Connection(parent_sock.detach())
+            self.process: Any = _PopenProcess(popen)
+            try:
+                self.conn.send((list(sys.path), list(preload), spare))
+            except OSError:
+                pass  # died at start -- reported as a crash when its task is waited on
+        else:
+            self.conn, child_conn = ctx.Pipe(duplex=True)
+            self.process = ctx.Process(target=_mp_child_main, args=(child_conn, preload, spare), daemon=True)
+            self.process.start()
+            child_conn.close()  # see above
+        with _LIVE_LOCK:
+            _LIVE.add(self)
 
     def is_ready(self) -> bool:
         """For a spare: whether it has finished its preload (never blocks)."""
         if not self._ready:
             try:
-                self._ready = self.conn.poll() and self.conn.recv() == READY
+                self._ready = self.conn.poll() and self.conn.recv_bytes(len(READY)) == READY
             except (EOFError, OSError):
                 return False
         return self._ready
 
-    def send_task(self, entry_name: str, args: tuple[Any, ...], task_key: Any) -> None:
-        self.conn.send((entry_name, args, task_key, dict(os.environ), os.getcwd()))
+    def send_task(self, entry_name: str, args: tuple[Any, ...]) -> None:
+        self.conn.send((entry_name, args, scrubbed_environ(), os.getcwd()))
+
+    def recv_frame(self, max_bytes: int) -> bytes:
+        """The task's result frame (raw bytes, for execution/wire.py to
+        decode). Raises EOFError when the worker died without reporting,
+        and wire.ValueTooLarge when it announces more than `max_bytes`
+        (checked before a byte of the payload is read)."""
+        from .execution.wire import ValueTooLarge
+
+        try:
+            return self.conn.recv_bytes(max_bytes)
+        except OSError as e:
+            if str(e) == "bad message length":
+                raise ValueTooLarge(f"block result is over the {max_bytes / 1024**2:,.1f} MB limit") from None
+            raise EOFError(str(e)) from None
 
     def crash_message(self) -> str:
         self.process.join(timeout=5)
@@ -131,16 +319,22 @@ class Worker:
         if self.process.is_alive():
             self.process.terminate()
         self.process.join(timeout=5)
+        if self.process.is_alive() and hasattr(self.process, "kill"):
+            self.process.kill()
+            self.process.join(timeout=5)
         self.conn.close()
+        with _LIVE_LOCK:
+            _LIVE.discard(self)
 
 
 class WorkerPool:
     """Keeps `size` spares started ahead of use. Thread-safe: the API
     server dispatches from several background threads at once."""
 
-    def __init__(self, ctx: Any, size: int) -> None:
+    def __init__(self, ctx: Any, size: int, launcher: Launcher | None = None) -> None:
         self._ctx = ctx
         self.size = size
+        self.launcher: Launcher = launcher or default_launcher()
         self._spares: list[Worker] = []
         self._learned: dict[str, None] = {}  # insertion-ordered set: parents before submodules
         self._lock = threading.Lock()
@@ -164,7 +358,7 @@ class WorkerPool:
             self._top_up_locked()
         # A cold start only preloads the base set: it's about to be told
         # what it runs, and the learned set may well be more than that needs.
-        return worker or Worker(self._ctx, list(BASE_PRELOAD))
+        return worker or Worker(self._ctx, list(BASE_PRELOAD), launcher=self.launcher)
 
     def prewarm(self) -> None:
         """Start the spares now rather than at the first dispatch, so even
@@ -182,7 +376,7 @@ class WorkerPool:
     def _top_up_locked(self) -> None:
         preload = [*BASE_PRELOAD, *self._learned]
         while len(self._spares) < self.size:
-            self._spares.append(Worker(self._ctx, preload, spare=True))
+            self._spares.append(Worker(self._ctx, preload, spare=True, launcher=self.launcher))
 
     def shutdown(self) -> None:
         with self._lock:
