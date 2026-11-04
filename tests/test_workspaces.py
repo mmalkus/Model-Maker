@@ -41,7 +41,7 @@ def workspaces(tmp_path):
         api.set_workspace_resolver(None)
         for ws in (a, b):
             ws.session.runner.cancel()
-            ws.agent.stop() if ws.agent.build is not None and ws.agent._busy() else None
+            ws.agent.join(30)
 
 
 def _client(ws: Workspace) -> TestClient:
@@ -182,7 +182,8 @@ def test_llm_settings_are_per_workspace(workspaces, monkeypatch):
 
     # And the providers each workspace builds: A's key never reaches B's.
     assert a.provider().api_key == "sk-only-a" and a.provider().model == "gpt-a"
-    assert b.provider("openai").api_key is None
+    with pytest.raises(RuntimeError, match="no OpenAI API key"):
+        b.provider("openai")
     assert a.resolve_api_key("openai") == "sk-only-a" and b.resolve_api_key("openai") is None
     assert "sk-only-a" not in os.environ.values()
 
