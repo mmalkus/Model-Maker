@@ -241,6 +241,22 @@ block's `format` and `name` params. A block with a `dataset` or `source`
 field never joins a streaming run's fusion (the engine resolves its file
 first).
 
+#### Restricted mode: features
+
+Capabilities are about what *blocks* reach. A workspace also has feature
+flags (`Workspace(features=...)`, see `modelmaker/features.py`) for the
+app's own tools: `custom_blocks` (the block library, its editor, imports,
+AI drafting of blocks, placing library blocks, opening projects that embed
+library code), `ai_builder`, `ai_drafting`, `llm_settings`, `env_vars`,
+`git` and `git_remote`. The local app has all of them. An embedding
+application can switch some off: the API refuses them with a 403 (a path
+table checked for every request, plus checks inside the routes a path
+can't decide, such as placing a library block or loading a project with
+embedded code), and the UI reads `GET /api/capabilities` (`features`) at
+start and hides what's off. With `custom_blocks` off, a workspace runs
+built-in blocks only, and the AI builder can't create or use library
+blocks.
+
 ### Column metadata: `meta`
 
 Every block's output columns get their metadata from one rule:
