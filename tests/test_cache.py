@@ -177,3 +177,28 @@ def test_a_key_never_names_a_path_outside_the_directory(tmp_path):
     store.set("../escape", {"out": 1})
     assert store.get("../escape").outputs["out"] == 1
     assert not (tmp_path / "escape.mmw").exists()
+
+
+def test_store_touches_no_folder_until_it_writes(tmp_path):
+    """Creating a store (which every session does, including at API import)
+    must not create its folder: a server process may start where it can't
+    write. The folder appears on the first write."""
+    from modelmaker.cache import CacheStore
+
+    folder = tmp_path / "cache"
+    store = CacheStore(folder)
+    assert not folder.exists()
+    store.set("k1", {"out": 1})
+    assert folder.is_dir() and any(folder.iterdir())
+    assert CacheStore(folder).get("k1").outputs == {"out": 1}
+
+
+def test_an_unwritable_cache_folder_keeps_entries_in_memory(tmp_path):
+    from modelmaker.cache import CacheStore
+
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a folder")
+    store = CacheStore(blocker / "cache")  # can't be created, even as root
+    store.set("k1", {"out": 2})
+    assert store.get("k1").outputs == {"out": 2}
+    assert blocker.is_file()
