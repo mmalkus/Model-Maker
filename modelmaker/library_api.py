@@ -1,6 +1,6 @@
 """HTTP routes for the block library (see library_store.py) and for moving
 placed blocks between definition versions (see library_updates.py).
-Included by api.py; reads the live session from there."""
+Included by api.py; works on the request's workspace (api.current_workspace)."""
 
 from __future__ import annotations
 
@@ -23,10 +23,14 @@ from .packet import DataFramePacket
 router = APIRouter()
 
 
-def _session():
+def _workspace():
     from . import api
 
-    return api.SESSION
+    return api.current_workspace()
+
+
+def _session():
+    return _workspace().session
 
 
 def _fail(e: Exception) -> HTTPException:
@@ -246,9 +250,12 @@ def try_library_file(name: str, req: TryRequest) -> dict[str, Any]:
             source = store.get_file(name).source
         except store.LibraryError as e:
             raise HTTPException(404, str(e))
-    session = _session()
+    ws = _workspace()
+    session = ws.session
+    # The workspace's own env vars reach the task like they do a canvas run.
+    env = ws.env_vars.snapshot()
     if req.block is None:
-        return {"examples": bl.run_examples(source, name, req.blocks, executor=session.runner.executor)}
+        return {"examples": bl.run_examples(source, name, req.blocks, executor=session.runner.executor, env=env)}
     parsed = bl.parse_source(source, name)
     d = next((x for x in parsed.definitions if x.id == req.block), None)
     if d is None:
@@ -264,7 +271,7 @@ def try_library_file(name: str, req: TryRequest) -> dict[str, Any]:
         if port is None:
             raise HTTPException(400, f"{d.id} has no input port to feed")
         kwargs[port] = value.data if isinstance(value, DataFramePacket) else value
-    ok, result = bl.try_call(d, kwargs, executor=session.runner.executor)
+    ok, result = bl.try_call(d, kwargs, executor=session.runner.executor, env=env)
     if not ok:
         return {"ok": False, "error": result}
     outputs = result if isinstance(result, tuple) else (result,)
@@ -504,7 +511,7 @@ def ai_draft(req: AIDraftRequest) -> dict[str, Any]:
     previous = (req.previous_code, req.previous_block or {}) if req.previous_code else None
     try:
         provider = api._provider_for(req.provider)
-        include_reference = bool(api.LLM_SETTINGS.include_reference)
+        include_reference = bool(_workspace().llm_settings.include_reference)
         result = library_ai.draft(
             provider,
             req.instruction.strip() or "Fix the error.",

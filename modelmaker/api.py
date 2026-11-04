@@ -5,12 +5,16 @@ import math
 import os
 import re
 import secrets
+import sys
+import types
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from dataclasses import asdict
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,23 +25,24 @@ from pydantic import BaseModel
 from . import gitops, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
-from .agent.controller import BuildController, BuildError
-from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop, make_loop
+from .agent.controller import BuildError
+from .agent.loop import AGENT_CAPABLE_PROVIDERS, AgentLoop
 from .agent.tools import tools_for_phase
 from .blocks.base import BLOCK_REGISTRY
 from .compiler import CompileError, compile_graph
 from .forms import block_form
-from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider, get_provider
+from .llm import ColumnInfo, DraftContext, LLM_PROVIDER_REGISTRY, LLMProvider
 from .llm import claude_cli_provider as _claude_cli_provider
 from .llm import copilot_provider as _copilot_provider
 from .llm import gemini_provider as _gemini_provider
 from .llm import lmstudio_provider as _lmstudio_provider
 from .llm import openai_provider as _openai_provider
 from .llm.redact import column_info_for_llm
-from .llm.settings import LLMSettingsStore
 from .packet import ColumnRole, DataFramePacket
-from .runslot import RunBusy, RunFailed, RunSlot
-from .session import CACHE_DIR, ProjectSession, wire_is_valid
+from .runslot import RunBusy, RunFailed
+from .session import ProjectSession, wire_is_valid
+from .workspace import API_KEY_ENV_VARS as _API_KEY_ENV_VARS
+from .workspace import Workspace
 
 try:
     from .llm import anthropic_provider as _anthropic_provider
@@ -57,23 +62,124 @@ app = FastAPI(title="Model-Maker API")
 # CORS and the optional auth token are registered at the end of this module,
 # after every other middleware, so they wrap them (see _cors_kwargs).
 
-SESSION = ProjectSession()
-LLM_SETTINGS = LLMSettingsStore()
+# Where Save/Load default to when no project path is already known (see
+# Toolbar.tsx) -- a subdirectory next to wherever the server runs. Not
+# created at import time (nothing should touch the filesystem just from
+# importing this module, e.g. under test) -- see project_default_dir below,
+# which creates it on first request instead. The default workspace's; any
+# other workspace brings its own (Workspace.projects_dir).
+DEFAULT_PROJECTS_DIR = Path(os.environ.get("MODELMAKER_PROJECTS_DIR", "./projects")).expanduser().resolve()
 
-# Names set via PUT /api/env_vars (see below) -- lets the Settings-style
-# "is this set, and from where" distinction (env vs. override) extend to
-# arbitrary env vars too, e.g. a Read SQL block's connection_env. The value
-# itself lives only in os.environ, exactly where a block reading it (live
-# or compiled) already looks, and is never stored or echoed anywhere else.
-# Maps name -> whatever os.environ held right before the first override (or
-# None if it was unset), so DELETE can restore that instead of just wiping
-# a name that happened to already be set from the shell/.env.
-_ENV_VAR_OVERRIDES: dict[str, str | None] = {}
+# ---- workspaces ----------------------------------------------------------
+#
+# Everything per-user -- the open project, the run slot, the AI builder,
+# the LLM settings and the env vars set from the UI -- lives in a
+# Workspace (see workspace.py), and every route works on the workspace of
+# its request: current_workspace(). The local app has exactly one, this
+# default; an application embedding this API can host several in one
+# process by installing a resolver (set_workspace_resolver) that picks the
+# workspace from the request -- by a header, a path prefix, a session
+# cookie: this module doesn't care how.
+
+DEFAULT_WORKSPACE = Workspace("default", projects_dir=DEFAULT_PROJECTS_DIR)
+
+WorkspaceResolver = Callable[[Request], Workspace]
+_resolver: WorkspaceResolver | None = None
+
+# The request being handled, set by _WorkspaceScope for each HTTP request:
+# {"scope": its ASGI scope, "workspace": the resolved one, once asked}.
+# Resolution is lazy -- only routes that touch per-user state pay for it,
+# so /api/health and static files never call the resolver. A dict shared by
+# reference, so resolving on a threadpool thread (sync routes run there,
+# with a copy of this context) caches it for the rest of the request.
+_REQUEST: ContextVar[dict[str, Any] | None] = ContextVar("modelmaker_request", default=None)
+
+
+def set_workspace_resolver(resolver: WorkspaceResolver | None) -> None:
+    """Install the function that picks each request's workspace -- the one
+    hook an embedding application needs to host several users in one
+    process. It's called at most once per request, the first time a route
+    (or the AI-build canvas lock) needs the workspace, with the Starlette
+    Request (headers, URL, cookies; the body isn't read, and path params
+    aren't parsed yet), on whatever thread asked -- so it must be
+    thread-safe. It returns a Workspace, or raises HTTPException (e.g. 401
+    or 404) to refuse the request. None restores the default: every
+    request gets DEFAULT_WORKSPACE.
+
+    One request the resolver must route without the embedder's own
+    credentials: the claude CLI agent's MCP bridge (/api/agent/mcp/...)
+    calls back to the address the build was started from
+    (Workspace.agent_callback_url) carrying only its X-Agent-Token header.
+    A path-prefix scheme gets this for free; a header-based one can match
+    that token against its workspaces' `agent.token`."""
+    global _resolver
+    _resolver = resolver
+
+
+def current_workspace() -> Workspace:
+    """The workspace the current request works on -- or, outside any
+    request (a test calling a helper directly, a script), the one bound by
+    workspace_context(), else DEFAULT_WORKSPACE.
+
+    Background threads don't inherit this: a route that hands work to
+    another thread (a run, an AI build) binds the workspace's objects
+    first, so the thread never has to ask."""
+    holder = _REQUEST.get()
+    if holder is None:
+        return DEFAULT_WORKSPACE
+    ws = holder.get("workspace")
+    if ws is None:
+        resolver = _resolver
+        ws = DEFAULT_WORKSPACE if resolver is None else resolver(Request(holder["scope"]))
+        if not isinstance(ws, Workspace):
+            raise TypeError(f"the workspace resolver returned {type(ws).__name__}, not a Workspace")
+        holder["workspace"] = ws
+    return ws
+
+
+@contextmanager
+def workspace_context(ws: Workspace) -> Iterator[Workspace]:
+    """Make current_workspace() return `ws` inside the block, outside of a
+    request -- for scripts and tests driving the module's helpers
+    directly."""
+    token = _REQUEST.set({"scope": None, "workspace": ws})
+    try:
+        yield ws
+    finally:
+        _REQUEST.reset(token)
+
+
+class _WorkspaceScope:
+    """ASGI middleware: records the request for current_workspace(). Pure
+    ASGI (not @app.middleware) so it adds no task hop of its own."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = _REQUEST.set({"scope": scope, "workspace": None})
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _REQUEST.reset(token)
+
+
+def _session() -> ProjectSession:
+    return current_workspace().session
+
+
+def _llm_settings():
+    return current_workspace().llm_settings
+
+
+def _agent():
+    return current_workspace().agent
+
+
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-# Run orchestration: at most one run is active at a time, shared between
-# the canvas endpoints below and an AI build's own runs -- see RunSlot.
-RUN_SLOT = RunSlot()
 
 
 # How long a run endpoint waits for its run before answering "still
@@ -82,13 +188,20 @@ RUN_SLOT = RunSlot()
 RUN_WAIT_SECONDS = 20.0
 
 
-def _start_background_run(fn: Callable[[], Any], wait_seconds: float | None = None) -> Any:
-    """Returns fn()'s return value if it finishes within wait_seconds
-    (default RUN_WAIT_SECONDS; the common case -- callers that don't care,
-    like the single-block run endpoints, can just ignore it and re-read
-    block state), else None to mean "still running" (poll GET /api/graph)."""
+def _start_background_run(fn: Callable[[ProjectSession], Any], wait_seconds: float | None = None) -> Any:
+    """Runs fn(session) in the request's workspace's run slot. Returns its
+    return value if it finishes within wait_seconds (default
+    RUN_WAIT_SECONDS; the common case -- callers that don't care, like the
+    single-block run endpoints, can just ignore it and re-read block
+    state), else None to mean "still running" (poll GET /api/graph). The
+    session is bound here, on the request thread: the run thread can't
+    look up the request's workspace itself."""
+    ws = current_workspace()
+    session = ws.session
     try:
-        return RUN_SLOT.start_background(fn, RUN_WAIT_SECONDS if wait_seconds is None else wait_seconds)
+        return ws.run_slot.start_background(
+            lambda: fn(session), RUN_WAIT_SECONDS if wait_seconds is None else wait_seconds
+        )
     except (RunBusy, RunFailed) as e:
         raise HTTPException(409, str(e))
 
@@ -105,14 +218,6 @@ CLAUDE_CLI_KNOWN_MODELS = [
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
 ]
-
-# Where Save/Load default to when no project path is already known (see
-# Toolbar.tsx) -- a subdirectory next to wherever the server runs. Not
-# created at import time (nothing should touch the filesystem just from
-# importing this module, e.g. under test) -- see project_default_dir below,
-# which creates it on first request instead.
-DEFAULT_PROJECTS_DIR = Path(os.environ.get("MODELMAKER_PROJECTS_DIR", "./projects")).expanduser().resolve()
-
 
 # ---- schemas -----------------------------------------------------------
 
@@ -331,8 +436,8 @@ def _display_out(block_id: str, definition, status: str) -> dict[str, Any] | Non
     for any other block, or one with nothing to show yet."""
     if definition is None or not definition.display or status not in ("green", "orange"):
         return None
-    st = SESSION.runner.state.get(block_id)
-    entry = SESSION.runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
+    st = _session().runner.state.get(block_id)
+    entry = _session().runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
     port = definition.outputs[0].name if definition.outputs else None
     if entry is None or port not in entry.outputs:
         return None
@@ -354,14 +459,14 @@ def _display_out(block_id: str, definition, status: str) -> dict[str, Any] | Non
 
 
 def _block_out(block_id: str) -> dict[str, Any]:
-    block = SESSION.graph.blocks[block_id]
-    st = SESSION.runner.state.get(block_id)
-    status = SESSION.runner.status(block_id)
+    block = _session().graph.blocks[block_id]
+    st = _session().runner.state.get(block_id)
+    status = _session().runner.status(block_id)
     return {
         # Why a stale block is stale (see Runner.stale_reason) -- only ever
         # asked for an orange block, since that's the state whose cause isn't
         # self-evident: grey has never run and red carries its error.
-        "stale_reason": SESSION.runner.stale_reason(block_id) if status == "orange" else None,
+        "stale_reason": _session().runner.stale_reason(block_id) if status == "orange" else None,
         "id": block.id,
         "block_type": block.block_type,
         "category": block.category,
@@ -388,31 +493,31 @@ def _block_out(block_id: str) -> dict[str, Any]:
         # mid-dispatch -- polars gives no finer-grained progress for a
         # single collect() call, so this is "how long has this been
         # running", not "how far along is it".
-        "running_seconds": SESSION.runner.running_elapsed(block_id) if status == "running" else None,        # A display block's result, shown on its node (see _display_out).
+        "running_seconds": _session().runner.running_elapsed(block_id) if status == "running" else None,        # A display block's result, shown on its node (see _display_out).
         "display": _display_out(block_id, _definition_or_none(block), status),
     }
 
 
 def _graph_out() -> dict[str, Any]:
-    run_error = RUN_SLOT.take_error()
+    run_error = current_workspace().run_slot.take_error()
     return {
-        "project_name": SESSION.project_name,
+        "project_name": _session().project_name,
         # The project *folder*, not the PROJECT_FILENAME inside it -- that's
-        # the unit Save/Load/the Git panel all operate on; SESSION.project_path
+        # the unit Save/Load/the Git panel all operate on; _session().project_path
         # itself stays the full file path internally (see project.py).
-        "project_path": str(SESSION.project_path.parent) if SESSION.project_path else None,
-        "dirty": SESSION.dirty,
-        "can_undo": SESSION.can_undo,
-        "can_redo": SESSION.can_redo,
-        "sample_rows": SESSION.runner.sample_rows,
+        "project_path": str(_session().project_path.parent) if _session().project_path else None,
+        "dirty": _session().dirty,
+        "can_undo": _session().can_undo,
+        "can_redo": _session().can_redo,
+        "sample_rows": _session().runner.sample_rows,
         # True only while a Run all/Force run all sweep is actually in
         # flight (see Runner._sweep) -- keeps the frontend polling through
         # the gaps between one block's dispatch ending and the next one
         # starting, so per-block status colors visibly progress through the
         # sweep instead of jumping straight from all-grey to done.
-        "sweep_running": SESSION.runner.sweep_running,
-        "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in SESSION.graph.lanes.items()},
-        "blocks": {bid: _block_out(bid) for bid in SESSION.graph.blocks},
+        "sweep_running": _session().runner.sweep_running,
+        "lanes": {lid: {"name": l.name, "order": l.order, "height": l.height} for lid, l in _session().graph.lanes.items()},
+        "blocks": {bid: _block_out(bid) for bid in _session().graph.blocks},
         "run_error": run_error,
         "wires": {
             wid: {
@@ -420,9 +525,9 @@ def _graph_out() -> dict[str, Any]:
                 "from_port": w.from_port,
                 "to_block": w.to_block,
                 "to_port": w.to_port,
-                "valid": wire_is_valid(SESSION.graph, w),
+                "valid": wire_is_valid(_session().graph, w),
             }
-            for wid, w in SESSION.graph.wires.items()
+            for wid, w in _session().graph.wires.items()
         },
     }
 
@@ -466,15 +571,15 @@ def _packet_preview(
 
 
 def _input_schema_for_block(block_id: str) -> dict[str, list[ColumnInfo]]:
-    result: dict[str, list[ColumnInfo]] = {p.name: [] for p in SESSION.graph.blocks[block_id].inputs}
-    for port, wire in SESSION.graph.input_wires(block_id).items():
+    result: dict[str, list[ColumnInfo]] = {p.name: [] for p in _session().graph.blocks[block_id].inputs}
+    for port, wire in _session().graph.input_wires(block_id).items():
         result.setdefault(port, [])
-        if SESSION.runner.status(wire.from_block) not in ("green", "orange"):
+        if _session().runner.status(wire.from_block) not in ("green", "orange"):
             continue
-        st = SESSION.runner.state.get(wire.from_block)
+        st = _session().runner.state.get(wire.from_block)
         if st is None or st.last_successful_key is None:
             continue
-        entry = SESSION.runner.cache.get(st.last_successful_key)
+        entry = _session().runner.cache.get(st.last_successful_key)
         if entry is None:
             continue
         packet = entry.outputs.get(wire.from_port)
@@ -566,8 +671,9 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
 
 @app.get("/api/project/default_dir")
 def project_default_dir() -> dict[str, str]:
-    DEFAULT_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    return {"path": str(DEFAULT_PROJECTS_DIR)}
+    projects_dir = current_workspace().projects_dir
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    return {"path": str(projects_dir)}
 
 
 @app.post("/api/project/new")
@@ -576,7 +682,7 @@ def new_project_ep() -> dict[str, Any]:
     blank one. Nothing is written to disk -- an existing project file on
     disk is untouched, and the crash-recovery snapshot for the discarded
     graph is cleared so it isn't offered back on the next reload."""
-    SESSION.new()
+    _session().new()
     return _graph_out()
 
 
@@ -586,7 +692,7 @@ def load_project_ep(req: LoadRequest) -> dict[str, Any]:
     if not project.is_project_dir(folder):
         raise HTTPException(404, f"not a project folder (no {project.PROJECT_FILENAME} in it): {req.path}")
     try:
-        SESSION.load(folder / project.PROJECT_FILENAME)
+        _session().load(folder / project.PROJECT_FILENAME)
     except FileNotFoundError:
         raise HTTPException(404, f"project file not found: {req.path}")
     return _graph_out()
@@ -596,16 +702,16 @@ def load_project_ep(req: LoadRequest) -> dict[str, Any]:
 def save_project_ep(req: SaveRequest) -> dict[str, Any]:
     target = Path(req.path) / project.PROJECT_FILENAME if req.path else None
     try:
-        path = SESSION.save(target)
+        path = _session().save(target)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"path": str(path.parent)}
 
 
 def _project_dir() -> Path:
-    if SESSION.project_path is None:
+    if _session().project_path is None:
         raise HTTPException(400, "save the project first -- git needs a project folder to work in")
-    return SESSION.project_path.parent
+    return _session().project_path.parent
 
 
 @app.get("/api/project/git/status")
@@ -615,7 +721,7 @@ def git_status_ep() -> dict[str, Any]:
     upstream it is -- backs the Toolbar's Git panel. Never raises for "no
     project open yet" (unlike the write endpoints below): the panel wants to
     show "not a repo" rather than an error in that case."""
-    if SESSION.project_path is None:
+    if _session().project_path is None:
         return {"is_repo": False, "branch": None, "remote": None, "changes": [], "ahead": 0, "behind": 0}
     return gitops.status(_project_dir())
 
@@ -673,13 +779,13 @@ def git_pull_ep() -> dict[str, Any]:
 def recovery_info_ep() -> dict[str, Any]:
     """Metadata about the crash-recovery snapshot, if there is one. Offered
     to the user on a fresh start; never applied on its own."""
-    return {"recovery": SESSION.recovery_info()}
+    return {"recovery": _session().recovery_info()}
 
 
 @app.post("/api/project/recover")
 def recover_ep() -> dict[str, Any]:
     try:
-        SESSION.recover()
+        _session().recover()
     except ValueError as e:
         raise HTTPException(404, str(e))
     return _graph_out()
@@ -690,20 +796,20 @@ def dismiss_recovery_ep() -> dict[str, str]:
     """Discard the crash-recovery snapshot without applying it -- called
     when the user declines the restore prompt, so the same stale snapshot
     doesn't keep coming back on every future startup."""
-    SESSION.clear_recovery()
+    _session().clear_recovery()
     return {"status": "ok"}
 
 
 @app.post("/api/undo")
 def undo_ep() -> dict[str, Any]:
-    if not SESSION.undo():
+    if not _session().undo():
         raise HTTPException(409, "nothing to undo")
     return _graph_out()
 
 
 @app.post("/api/redo")
 def redo_ep() -> dict[str, Any]:
-    if not SESSION.redo():
+    if not _session().redo():
         raise HTTPException(409, "nothing to redo")
     return _graph_out()
 
@@ -715,7 +821,7 @@ def set_sample_mode(req: SampleModeUpdate) -> dict[str, Any]:
     until asked. Safe mid-run: a run in flight is pinned to the sample
     setting it started with (see Runner.pin)."""
     try:
-        SESSION.set_sample_rows(req.rows)
+        _session().set_sample_rows(req.rows)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _graph_out()
@@ -724,13 +830,13 @@ def set_sample_mode(req: SampleModeUpdate) -> dict[str, Any]:
 @app.post("/api/blocks")
 def create_block(req: BlockCreate) -> dict[str, Any]:
     try:
-        with SESSION.edit():
+        with _session().edit():
             definition = library_ref = None
             if req.library is not None:
                 from . import library_store
 
                 definition, library_ref = library_store.placeable(req.library["file"], req.library["id"])
-            block = SESSION.add_block(
+            block = _session().add_block(
                 category=req.category,
                 name=req.name,
                 lane=req.lane,
@@ -747,10 +853,10 @@ def create_block(req: BlockCreate) -> dict[str, Any]:
 
 @app.patch("/api/blocks/{block_id}")
 def update_block(block_id: str, req: BlockUpdate) -> dict[str, Any]:
-    if block_id not in SESSION.graph.blocks:
+    if block_id not in _session().graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
-    with SESSION.edit():
-        SESSION.update_block(block_id, **req.model_dump(exclude_unset=True))
+    with _session().edit():
+        _session().update_block(block_id, **req.model_dump(exclude_unset=True))
     return _block_out(block_id)
 
 
@@ -764,8 +870,8 @@ def set_column_role(block_id: str, req: ColumnRoleUpdate) -> dict[str, Any]:
     invalidation."""
     _require_block(block_id)
     try:
-        with SESSION.edit():
-            SESSION.set_column_role(block_id, req.column, req.role)
+        with _session().edit():
+            _session().set_column_role(block_id, req.column, req.role)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _block_out(block_id)
@@ -782,8 +888,8 @@ def input_schema_ep(block_id: str) -> dict[str, list[dict[str, Any]]]:
 
 @app.delete("/api/blocks/{block_id}")
 def delete_block(block_id: str) -> dict[str, str]:
-    with SESSION.edit():
-        SESSION.delete_block(block_id)
+    with _session().edit():
+        _session().delete_block(block_id)
     return {"deleted": block_id}
 
 
@@ -792,16 +898,16 @@ def _get_cached_output(block_id: str, port: str | None, want_type: str | None = 
     to its declared port of `want_type`, or its first output port). Raises
     the appropriate HTTPException if the block isn't runnable, has no
     matching port, or nothing is cached yet."""
-    if block_id not in SESSION.graph.blocks:
+    if block_id not in _session().graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
-    status = SESSION.runner.status(block_id)
+    status = _session().runner.status(block_id)
     if status not in ("green", "orange"):
         raise HTTPException(409, f"block '{block_id}' has no output to view (status={status})")
-    st = SESSION.runner.state[block_id]
-    entry = SESSION.runner.cache.get(st.last_successful_key)  # type: ignore[arg-type]
+    st = _session().runner.state[block_id]
+    entry = _session().runner.cache.get(st.last_successful_key)  # type: ignore[arg-type]
     if entry is None:
         raise HTTPException(409, "cached output missing")
-    block = SESSION.graph.blocks[block_id]
+    block = _session().graph.blocks[block_id]
     if port is None and want_type is not None:
         port = next((p.name for p in block.outputs if p.type == want_type), None)
     port = port or (block.outputs[0].name if block.outputs else None)
@@ -815,7 +921,7 @@ def preview_block(block_id: str, port: str | None = None, rows: int = 20, summar
     value = _get_cached_output(block_id, port)
     if not isinstance(value, DataFramePacket):
         raise HTTPException(400, "output port is not a dataframe")
-    return _packet_preview(value, rows=rows, with_summary=summary, tags=SESSION.graph.blocks[block_id].column_tags)
+    return _packet_preview(value, rows=rows, with_summary=summary, tags=_session().graph.blocks[block_id].column_tags)
 
 
 @app.get("/api/blocks/{block_id}/image")
@@ -842,11 +948,11 @@ def block_value(block_id: str, port: str | None = None) -> Any:
 @app.post("/api/wires")
 def create_wire(req: WireCreate) -> dict[str, Any]:
     for bid in (req.from_block, req.to_block):
-        if bid not in SESSION.graph.blocks:
+        if bid not in _session().graph.blocks:
             raise HTTPException(404, f"no such block: {bid}")
     try:
-        with SESSION.edit():
-            wire = SESSION.add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
+        with _session().edit():
+            wire = _session().add_wire(req.from_block, req.from_port, req.to_block, req.to_port)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {
@@ -855,14 +961,14 @@ def create_wire(req: WireCreate) -> dict[str, Any]:
         "from_port": wire.from_port,
         "to_block": wire.to_block,
         "to_port": wire.to_port,
-        "valid": wire_is_valid(SESSION.graph, wire),
+        "valid": wire_is_valid(_session().graph, wire),
     }
 
 
 @app.delete("/api/wires/{wire_id}")
 def delete_wire(wire_id: str) -> dict[str, str]:
-    with SESSION.edit():
-        SESSION.delete_wire(wire_id)
+    with _session().edit():
+        _session().delete_wire(wire_id)
     return {"deleted": wire_id}
 
 
@@ -874,8 +980,8 @@ def rename_port(block_id: str, req: PortNameUpdate) -> dict[str, Any]:
     variable name for it (see compiler.compile_graph)."""
     _require_block(block_id)
     try:
-        with SESSION.edit():
-            SESSION.rename_port(block_id, req.port, req.name)
+        with _session().edit():
+            _session().rename_port(block_id, req.port, req.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _block_out(block_id)
@@ -883,61 +989,61 @@ def rename_port(block_id: str, req: PortNameUpdate) -> dict[str, Any]:
 
 @app.put("/api/lanes")
 def upsert_lane(req: LaneUpsert) -> dict[str, Any]:
-    with SESSION.edit():
-        SESSION.set_lane(req.id, req.name, req.order, height=req.height)
+    with _session().edit():
+        _session().set_lane(req.id, req.name, req.order, height=req.height)
     return _graph_out()["lanes"]
 
 
 @app.delete("/api/lanes/{lane_id}")
 def delete_lane(lane_id: str) -> dict[str, Any]:
-    with SESSION.edit():
-        SESSION.delete_lane(lane_id)
+    with _session().edit():
+        _session().delete_lane(lane_id)
     return _graph_out()["lanes"]
 
 
 def _require_block(block_id: str) -> None:
-    if block_id not in SESSION.graph.blocks:
+    if block_id not in _session().graph.blocks:
         raise HTTPException(404, f"no such block: {block_id}")
 
 
 @app.post("/api/blocks/{block_id}/run")
 def run_block_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    _start_background_run(lambda: SESSION.runner.run_block(block_id))
+    _start_background_run(lambda session: session.runner.run_block(block_id))
     return _block_out(block_id)
 
 
 @app.post("/api/blocks/{block_id}/run_to_here")
 def run_to_here_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    _start_background_run(lambda: SESSION.runner.run_to_here(block_id))
+    _start_background_run(lambda session: session.runner.run_to_here(block_id))
     return _block_out(block_id)
 
 
 @app.post("/api/blocks/{block_id}/refresh")
 def refresh_ep(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    if SESSION.graph.blocks[block_id].block_type != "input":
+    if _session().graph.blocks[block_id].block_type != "input":
         raise HTTPException(400, "refresh is only valid for input blocks")
-    _start_background_run(lambda: SESSION.runner.refresh(block_id))
+    _start_background_run(lambda session: session.runner.refresh(block_id))
     return _block_out(block_id)
 
 
 @app.post("/api/blocks/{block_id}/check_changes")
 def check_changes(block_id: str) -> dict[str, Any]:
     _require_block(block_id)
-    return {"block_id": block_id, "changed": SESSION.runner.check_for_changes(block_id)}
+    return {"block_id": block_id, "changed": _session().runner.check_for_changes(block_id)}
 
 
 @app.post("/api/run_all")
 def run_all() -> dict[str, Any]:
-    report = _start_background_run(lambda: SESSION.runner.run_all())
+    report = _start_background_run(lambda session: session.runner.run_all())
     return report if report is not None else {"started": True}
 
 
 @app.post("/api/force_run_all")
 def force_run_all() -> dict[str, Any]:
-    report = _start_background_run(lambda: SESSION.runner.force_run_all())
+    report = _start_background_run(lambda session: session.runner.force_run_all())
     return report if report is not None else {"started": True}
 
 
@@ -949,13 +1055,13 @@ def run_all_streaming() -> dict[str, Any]:
     materialize at every block boundary. A precondition failure (sample
     mode is on) surfaces the same way run_to_here's does -- see
     _start_background_run."""
-    report = _start_background_run(lambda: SESSION.runner.run_all_streaming())
+    report = _start_background_run(lambda session: session.runner.run_all_streaming())
     return report if report is not None else {"started": True}
 
 
 @app.post("/api/refresh_all")
 def refresh_all() -> dict[str, Any]:
-    report = _start_background_run(lambda: SESSION.runner.refresh_all())
+    report = _start_background_run(lambda session: session.runner.refresh_all())
     return report if report is not None else {"started": True}
 
 
@@ -967,20 +1073,20 @@ def cancel_run() -> dict[str, bool]:
     subprocess(es) are terminated immediately (see Runner._dispatch/
     _dispatch_fused_group); a cascade also stops issuing further blocks rather
     than continuing on to the next one."""
-    return {"cancelled": SESSION.runner.cancel()}
+    return {"cancelled": _session().runner.cancel()}
 
 
 @app.post("/api/check_all_sources")
 def check_all_sources() -> dict[str, bool]:
-    return SESSION.runner.check_all_sources()
+    return _session().runner.check_all_sources()
 
 
 @app.post("/api/compile")
 def compile_ep(req: CompileRequest) -> dict[str, str]:
     try:
         source = compile_graph(
-            SESSION.graph,
-            runner=SESSION.runner,
+            _session().graph,
+            runner=_session().runner,
             output_blocks=req.output_blocks,
             strict=req.strict,
             stream=req.stream,
@@ -990,30 +1096,17 @@ def compile_ep(req: CompileRequest) -> dict[str, str]:
     return {"source": source}
 
 
-# Env vars (beyond the per-provider override stored in LLM_SETTINGS) each
-# key-requiring provider's API key can fall back to, in priority order --
-# mirrors what each provider's own __init__ checks, used only to report
-# *whether* a key is available, never its value.
-_API_KEY_ENV_VARS: dict[str, list[str]] = {
-    "anthropic": ["ANTHROPIC_API_KEY"],
-    "openai": ["MODELMAKER_OPENAI_API_KEY", "OPENAI_API_KEY"],
-    "gemini": ["MODELMAKER_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
-}
+# Env vars (beyond the per-provider override stored in the workspace's
+# LLM settings) each key-requiring provider's API key can fall back to:
+# _API_KEY_ENV_VARS, from workspace.py.
 
 
 def _resolve_api_key(provider_name: str) -> str | None:
     """The API key that would actually be used for this provider right now
-    (a Settings override, else the first set env var) -- never exposed to
-    the client, only used server-side to call the provider or check
-    liveness (e.g. for /api/llm/models)."""
-    override = LLM_SETTINGS.for_provider(provider_name).get("api_key")
-    if override:
-        return override
-    for var in _API_KEY_ENV_VARS.get(provider_name, []):
-        value = os.environ.get(var)
-        if value:
-            return value
-    return None
+    (the workspace's Settings override, else the first set env var) --
+    never exposed to the client, only used server-side to call the
+    provider or check liveness (e.g. for /api/llm/models)."""
+    return current_workspace().resolve_api_key(provider_name)
 
 
 def _redacted_provider_settings(provider_name: str, **fields: Any) -> dict[str, Any]:
@@ -1024,7 +1117,7 @@ def _redacted_provider_settings(provider_name: str, **fields: Any) -> dict[str, 
     surfaced to the client."""
     result: dict[str, Any] = dict(fields)
     if provider_name in _API_KEY_ENV_VARS:
-        override = LLM_SETTINGS.for_provider(provider_name).get("api_key")
+        override = _llm_settings().for_provider(provider_name).get("api_key")
         if override:
             result["api_key_set"] = True
             result["api_key_source"] = "override"
@@ -1044,10 +1137,10 @@ def _effective_llm_settings() -> dict[str, Any]:
     fields and checkboxes always show a real value instead of blank. API
     keys are the exception: only their presence/source is reported, never
     the value (see _redacted_provider_settings)."""
-    lmstudio_override = LLM_SETTINGS.for_provider("lmstudio")
-    claude_cli_override = LLM_SETTINGS.for_provider("claude_cli")
-    openai_override = LLM_SETTINGS.for_provider("openai")
-    gemini_override = LLM_SETTINGS.for_provider("gemini")
+    lmstudio_override = _llm_settings().for_provider("lmstudio")
+    claude_cli_override = _llm_settings().for_provider("claude_cli")
+    openai_override = _llm_settings().for_provider("openai")
+    gemini_override = _llm_settings().for_provider("gemini")
     settings: dict[str, Any] = {
         "lmstudio": _redacted_provider_settings(
             "lmstudio",
@@ -1073,19 +1166,19 @@ def _effective_llm_settings() -> dict[str, Any]:
         ),
         # Only usable inside VS Code, whose extension relays Copilot to us.
         "copilot": {
-            "model": LLM_SETTINGS.for_provider("copilot").get("model") or os.environ.get("MODELMAKER_COPILOT_MODEL"),
+            "model": _llm_settings().for_provider("copilot").get("model") or os.environ.get("MODELMAKER_COPILOT_MODEL"),
             "available": _copilot_provider.relay() is not None,
         },
     }
     if _anthropic_provider is not None:
-        anthropic_override = LLM_SETTINGS.for_provider("anthropic")
+        anthropic_override = _llm_settings().for_provider("anthropic")
         settings["anthropic"] = _redacted_provider_settings(
             "anthropic",
             model=anthropic_override.get("model")
             or os.environ.get("MODELMAKER_LLM_MODEL")
             or _anthropic_provider.DEFAULT_MODEL,
         )
-    active = LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
+    active = _llm_settings().active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
 
     def agent_choice(stored: dict[str, Any]) -> dict[str, Any]:
         provider = stored.get("provider") or active
@@ -1097,16 +1190,16 @@ def _effective_llm_settings() -> dict[str, Any]:
         "active_provider": active,
         # Tri-state: null means "each provider's own default" (on for LM
         # Studio, off elsewhere) rather than an explicit choice.
-        "include_reference": LLM_SETTINGS.include_reference,
+        "include_reference": _llm_settings().include_reference,
         "settings": settings,
         # The AI builder's two LLMs, resolved (see agent_llm_choice), plus
         # which providers can drive a build at all (tool calling).
         "agent": {
-            "plan": agent_choice(LLM_SETTINGS.agent_plan),
-            "build": agent_choice(LLM_SETTINGS.agent_build),
+            "plan": agent_choice(_llm_settings().agent_plan),
+            "build": agent_choice(_llm_settings().agent_build),
             "capable_providers": list(AGENT_CAPABLE_PROVIDERS),
-            "small_context": LLM_SETTINGS.agent_small_context,
-            "decision_hints": LLM_SETTINGS.agent_decision_hints,
+            "small_context": _llm_settings().agent_small_context,
+            "decision_hints": _llm_settings().agent_decision_hints,
         },
     }
 
@@ -1124,7 +1217,7 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
         provider = (choice or {}).get("provider")
         if provider and provider not in AGENT_CAPABLE_PROVIDERS:
             raise HTTPException(400, f"{provider} can't drive an AI build; use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}")
-    LLM_SETTINGS.update(
+    _llm_settings().update(
         req.active_provider,
         req.include_reference,
         req.settings,
@@ -1143,12 +1236,14 @@ class EnvVarUpdate(BaseModel):
 def _env_var_status(name: str) -> dict[str, Any]:
     """Whether-and-where a given env var is set -- never the value itself.
     Same write-only shape as an LLM provider's api_key_set/api_key_source
-    (see _redacted_provider_settings): 'override' means this endpoint set
-    it for the running server process; 'env' means it was already present
-    (shell env or .env) before that."""
-    if name not in os.environ:
-        return {"name": name, "is_set": False, "source": None}
-    return {"name": name, "is_set": True, "source": "override" if name in _ENV_VAR_OVERRIDES else "env"}
+    (see _redacted_provider_settings): 'override' means it was set through
+    this endpoint, for this workspace; 'env' means it's present in the
+    server process's own environment (shell env or .env)."""
+    if name in current_workspace().env_vars:
+        return {"name": name, "is_set": True, "source": "override"}
+    if name in os.environ:
+        return {"name": name, "is_set": True, "source": "env"}
+    return {"name": name, "is_set": False, "source": None}
 
 
 @app.get("/api/env_vars/{name}")
@@ -1158,35 +1253,30 @@ def get_env_var(name: str) -> dict[str, Any]:
 
 @app.put("/api/env_vars/{name}")
 def set_env_var(name: str, req: EnvVarUpdate) -> dict[str, Any]:
-    """Sets an env var for the rest of this server process's lifetime --
-    e.g. a Read SQL block's connection string. Deliberately writes straight
-    into os.environ (unlike LLM_SETTINGS' own separate override dict):
-    block functions run in a worker subprocess (see worker_pool.py), which
-    is handed the parent's *current* os.environ with each task -- minus
-    the secrets in execution/env.py, so a variable on that denylist set
-    here never reaches a block -- which is what actually makes the value
-    visible there. Never written to disk,
-    never persisted in a project file, and never echoed back by any
-    endpoint -- gone on restart, exactly like an LLM API key override."""
+    """Sets an env var for this workspace's blocks -- e.g. a Read SQL
+    block's connection string -- until it's cleared or the server stops.
+    Stored in the workspace (Workspace.env_vars), never in this process's
+    os.environ: several workspaces can share one process, and each must
+    see only its own. Every task the workspace runs gets it on top of the
+    process's environment (see execution.base.Task.env), and so does its
+    "check for changes" probe -- minus the secrets in execution/env.py, so
+    a variable on that denylist set here never reaches a block. It
+    overrides a variable of the same name from the process environment for
+    this workspace's blocks only. Never written to disk, never persisted
+    in a project file, and never echoed back by any endpoint -- gone on
+    restart, exactly like an LLM API key override."""
     if not _ENV_VAR_NAME_RE.match(name):
         raise HTTPException(400, f"not a valid environment variable name: {name!r}")
-    if name not in _ENV_VAR_OVERRIDES:
-        _ENV_VAR_OVERRIDES[name] = os.environ.get(name)
-    os.environ[name] = req.value
+    current_workspace().env_vars.set(name, req.value)
     return _env_var_status(name)
 
 
 @app.delete("/api/env_vars/{name}")
 def clear_env_var(name: str) -> dict[str, Any]:
-    # Restores whatever this name held before it was first overridden
-    # (possibly nothing) -- a name that was already present in the
-    # shell/.env before any PUT here is left alone entirely.
-    if name in _ENV_VAR_OVERRIDES:
-        prior = _ENV_VAR_OVERRIDES.pop(name)
-        if prior is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = prior
+    # Drops this workspace's override, if any: a variable of the same name
+    # in the process environment (shell/.env) applies again, and is never
+    # touched itself.
+    current_workspace().env_vars.unset(name)
     return _env_var_status(name)
 
 
@@ -1249,11 +1339,7 @@ def _provider_for(name: str | None) -> LLMProvider:
     override if given, else the Settings panel's active provider, else the
     env var default -- configured with whatever overrides (model, base_url)
     are on file for it."""
-    provider_name = name or LLM_SETTINGS.active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
-    overrides = dict(LLM_SETTINGS.for_provider(provider_name))
-    if LLM_SETTINGS.include_reference is not None:
-        overrides.setdefault("include_reference", LLM_SETTINGS.include_reference)
-    return get_provider(provider_name, **overrides)
+    return current_workspace().provider(name)
 
 
 def _draft_context_for_block(block, block_id: str, instruction: str, error: str | None = None) -> DraftContext:
@@ -1263,7 +1349,7 @@ def _draft_context_for_block(block, block_id: str, instruction: str, error: str 
     for its existing parameters ("params_only" mode)."""
     input_ports = _input_schema_for_block(block_id)
     param_names = list(block.params)
-    include_reference = LLM_SETTINGS.include_reference if LLM_SETTINGS.include_reference is not None else False
+    include_reference = _llm_settings().include_reference if _llm_settings().include_reference is not None else False
     definition = _definition_or_none(block)
     if definition is None:
         raise HTTPException(400, f"unknown block category: {block.category}")
@@ -1286,7 +1372,7 @@ def draft_block(block_id: str, req: DraftRequest) -> dict[str, Any]:
     Never applied automatically -- returns the proposal for the caller to
     review and save via PATCH /api/blocks/{id}."""
     _require_block(block_id)
-    block = SESSION.graph.blocks[block_id]
+    block = _session().graph.blocks[block_id]
     if not req.instruction.strip():
         raise HTTPException(400, "instruction is required")
 
@@ -1306,8 +1392,8 @@ def suggest_fix(block_id: str, req: DraftRequest = DraftRequest()) -> dict[str, 
     never auto-applied. A fix to the code itself is made in the library
     (Fix with AI, /api/library/ai/draft)."""
     _require_block(block_id)
-    block = SESSION.graph.blocks[block_id]
-    st = SESSION.runner.state.get(block_id)
+    block = _session().graph.blocks[block_id]
+    st = _session().runner.state.get(block_id)
     if st is None or not st.last_error:
         raise HTTPException(400, "block has no recorded error to fix")
 
@@ -1340,7 +1426,7 @@ def _apply_suggested_roles(block_id: str, packet: DataFramePacket, params: dict[
     set_column_role rejects (unknown role, or a unique role already taken)
     is skipped rather than failing the whole analysis. Returns what was
     actually applied."""
-    block = SESSION.graph.blocks[block_id]
+    block = _session().graph.blocks[block_id]
     applied: dict[str, str] = {}
     for key, role in params.items():
         if not key.startswith(ROLE_PARAM_PREFIX) or not isinstance(role, str):
@@ -1353,7 +1439,7 @@ def _apply_suggested_roles(block_id: str, packet: DataFramePacket, params: dict[
         if role in (ColumnRole.UNASSIGNED.value, ColumnRole.PREDICTED.value):
             continue
         try:
-            SESSION.set_column_role(block_id, column, role, actor="agent")
+            _session().set_column_role(block_id, column, role, actor="agent")
         except ValueError:
             continue
         applied[column] = role
@@ -1374,7 +1460,7 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     written into the project's files/ folder when one has been saved, so
     it's there to reopen later rather than only living in this one response."""
     _require_block(block_id)
-    block = SESSION.graph.blocks[block_id]
+    block = _session().graph.blocks[block_id]
     packet = _get_cached_output(block_id, req.port)
     if not isinstance(packet, DataFramePacket):
         raise HTTPException(400, "output port is not a dataframe")
@@ -1405,15 +1491,15 @@ def analyze_data(block_id: str, req: AnalyzeDataRequest = AnalyzeDataRequest()) 
     port = req.port or block.outputs[0].name
     artifact_title = f"{block.name} :: {port} -- data analysis"
     roles: dict[str, str] = {}
-    with SESSION.edit():
-        SESSION.set_column_tags(block_id, tags)
+    with _session().edit():
+        _session().set_column_tags(block_id, tags)
         if req.assign_roles:
             roles = _apply_suggested_roles(block_id, packet, result.params or {})
-        artifact = SESSION.upsert_data_analysis_artifact(block_id, port, artifact_title, result.explanation)
+        artifact = _session().upsert_data_analysis_artifact(block_id, port, artifact_title, result.explanation)
 
     document_path = None
-    if SESSION.project_path is not None and result.explanation.strip():
-        files_dir = SESSION.project_path.parent / "files"
+    if _session().project_path is not None and result.explanation.strip():
+        files_dir = _session().project_path.parent / "files"
         files_dir.mkdir(parents=True, exist_ok=True)
         doc_file = files_dir / f"{_slug(block.name)}_data_analysis.md"
         doc_file.write_text(result.explanation, encoding="utf-8")
@@ -1433,19 +1519,19 @@ def list_artifacts() -> list[dict[str, Any]]:
     """Every generated document attached to a block's output (today: AI
     data-analysis write-ups -- see analyze_data above), newest-updated
     first, each flagged `stale` when its source block has since changed."""
-    return SESSION.list_artifacts()
+    return _session().list_artifacts()
 
 
 def _require_artifact(artifact_id: str) -> None:
-    if artifact_id not in SESSION.graph.artifacts:
+    if artifact_id not in _session().graph.artifacts:
         raise HTTPException(404, f"no such artifact: {artifact_id}")
 
 
 @app.get("/api/artifacts/{artifact_id}")
 def get_artifact(artifact_id: str) -> dict[str, Any]:
     _require_artifact(artifact_id)
-    artifact = SESSION.graph.artifacts[artifact_id]
-    block = SESSION.graph.blocks.get(artifact.block_id)
+    artifact = _session().graph.artifacts[artifact_id]
+    block = _session().graph.blocks.get(artifact.block_id)
     return {
         "id": artifact.id,
         "kind": artifact.kind,
@@ -1456,7 +1542,7 @@ def get_artifact(artifact_id: str) -> dict[str, Any]:
         "document": artifact.document,
         "created_at": artifact.created_at,
         "updated_at": artifact.updated_at,
-        "stale": SESSION.artifact_is_stale(artifact),
+        "stale": _session().artifact_is_stale(artifact),
     }
 
 
@@ -1466,16 +1552,16 @@ def rename_artifact(artifact_id: str, req: ArtifactRename) -> dict[str, Any]:
     title = req.title.strip()
     if not title:
         raise HTTPException(400, "title must not be empty")
-    with SESSION.edit():
-        SESSION.rename_artifact(artifact_id, title)
+    with _session().edit():
+        _session().rename_artifact(artifact_id, title)
     return get_artifact(artifact_id)
 
 
 @app.delete("/api/artifacts/{artifact_id}")
 def delete_artifact(artifact_id: str) -> None:
     _require_artifact(artifact_id)
-    with SESSION.edit():
-        SESSION.delete_artifact(artifact_id)
+    with _session().edit():
+        _session().delete_artifact(artifact_id)
 
 
 @app.post("/api/blocks/{block_id}/suggest_names")
@@ -1491,12 +1577,12 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
     so this can never silently fail to apply or clash with a name already
     used elsewhere in the graph."""
     _require_block(block_id)
-    block = SESSION.graph.blocks[block_id]
+    block = _session().graph.blocks[block_id]
 
     entry = None
-    st = SESSION.runner.state.get(block_id)
+    st = _session().runner.state.get(block_id)
     if st and st.last_successful_key:
-        entry = SESSION.runner.cache.get(st.last_successful_key)
+        entry = _session().runner.cache.get(st.last_successful_key)
 
     input_ports: dict[str, list[ColumnInfo]] = {}
     for port_spec in block.outputs:
@@ -1508,7 +1594,7 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
         )
 
     used_elsewhere = sorted(
-        {name for bid, other in SESSION.graph.blocks.items() if bid != block_id for name in other.port_names.values()}
+        {name for bid, other in _session().graph.blocks.items() if bid != block_id for name in other.port_names.values()}
     )
     ctx = DraftContext(
         instruction=(
@@ -1528,9 +1614,9 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
         raise HTTPException(502, f"LLM suggest_names failed: {e}")
 
     proposed_name = result.params.get("name")
-    with SESSION.edit():
+    with _session().edit():
         if isinstance(proposed_name, str) and proposed_name.strip():
-            SESSION.update_block(block_id, name=proposed_name.strip())
+            _session().update_block(block_id, name=proposed_name.strip())
         for port_spec in block.outputs:
             proposal = result.params.get(port_spec.name)
             if not isinstance(proposal, str) or not proposal.strip():
@@ -1540,7 +1626,7 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
             suffix = 2
             while suffix <= 50:
                 try:
-                    SESSION.rename_port(block_id, port_spec.name, candidate)
+                    _session().rename_port(block_id, port_spec.name, candidate)
                     break
                 except ValueError:
                     candidate = f"{base}_{suffix}"
@@ -1553,33 +1639,25 @@ def suggest_names(block_id: str, req: SuggestNamesRequest = SuggestNamesRequest(
 
 
 def agent_llm_choice(stored: dict[str, Any], override: dict[str, Any] | None) -> LLMChoice:
-    """Resolve the plan or build LLM: a per-build override, else Settings'
-    AI-builder choice, else the active provider -- with the model falling
-    back to that provider's configured model (else the loop's default)."""
-    provider = (override or {}).get("provider") or stored.get("provider") or LLM_SETTINGS.active_provider or os.environ.get(
-        "MODELMAKER_LLM_PROVIDER", "claude_cli"
-    )
-    model = (override or {}).get("model") or stored.get("model") or LLM_SETTINGS.for_provider(provider).get("model")
-    return LLMChoice(provider=provider, model=model)
+    """Resolve the plan or build LLM for the current workspace (see
+    Workspace.agent_llm_choice)."""
+    return current_workspace().agent_llm_choice(stored, override)
 
 
 def _agent_loop_factory(choice: LLMChoice, phase: str) -> AgentLoop:
-    provider = choice.provider or "claude_cli"
-    return make_loop(
-        provider,
-        choice.model,
-        api_base_url=_AGENT_CALLBACK["url"],
-        token=AGENT.token or "",
-        api_key=_resolve_api_key(provider),
-        base_url=LLM_SETTINGS.for_provider(provider).get("base_url"),
-    )
+    """A loop factory for a BuildController made outside a Workspace (the
+    test suite's): the current workspace's (see Workspace.agent_loop).
+    Called from the build's own thread, where that is DEFAULT_WORKSPACE --
+    a Workspace's own controller uses its bound agent_loop instead."""
+    return current_workspace().agent_loop(choice, phase)
 
 
-AGENT = BuildController(lambda: SESSION, RUN_SLOT, _agent_loop_factory)
-# Where the claude CLI loop's MCP bridge calls back to -- this server's own
-# address, taken from the request that started the build (the Vite proxy
-# rewrites Host to it; see vite.config.ts), overridable for unusual setups.
-_AGENT_CALLBACK: dict[str, str] = {"url": ""}
+def _set_agent_callback(ws: Workspace, request: Request) -> None:
+    """Where the claude CLI loop's MCP bridge calls back to -- this server's
+    own address, taken from the request that started the build (the Vite
+    proxy rewrites Host to it; see vite.config.ts), overridable for unusual
+    setups."""
+    ws.agent_callback_url = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
 
 # Mutating endpoints that stay open while a build is changing the graph:
 # the agent's own routes, and things that don't touch the graph.
@@ -1595,10 +1673,24 @@ async def _agent_canvas_lock(request: Request, call_next):
         request.method in ("POST", "PUT", "PATCH", "DELETE")
         and request.url.path.startswith("/api/")
         and not request.url.path.startswith(_AGENT_LOCK_ALLOWED)
-        and AGENT.canvas_locked()
+        and _canvas_locked()
     ):
         return JSONResponse({"detail": "an AI build is in progress -- stop it to edit the graph"}, status_code=409)
     return await call_next(request)
+
+
+def _canvas_locked() -> bool:
+    try:
+        return current_workspace().agent.canvas_locked()
+    except HTTPException:
+        # The resolver refused the request: let the route raise it again,
+        # through FastAPI's own error handling.
+        return False
+
+
+# Added after the canvas lock, so it wraps it: the lock checks the
+# request's workspace's build.
+app.add_middleware(_WorkspaceScope)
 
 
 class AgentLLMChoice(BaseModel):
@@ -1645,8 +1737,9 @@ def _agent_call(fn: Callable[[], Any], cursor: int = 0) -> dict[str, Any]:
 
 @app.post("/api/agent/builds")
 def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
-    plan = agent_llm_choice(LLM_SETTINGS.agent_plan, req.plan_llm.model_dump() if req.plan_llm else None)
-    build = agent_llm_choice(LLM_SETTINGS.agent_build, req.build_llm.model_dump() if req.build_llm else None)
+    ws = current_workspace()
+    plan = agent_llm_choice(ws.llm_settings.agent_plan, req.plan_llm.model_dump() if req.plan_llm else None)
+    build = agent_llm_choice(ws.llm_settings.agent_build, req.build_llm.model_dump() if req.build_llm else None)
     for label, choice in (("plan", plan), ("build", build)):
         if choice.provider not in AGENT_CAPABLE_PROVIDERS:
             raise HTTPException(
@@ -1655,27 +1748,28 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         # Construct the loop once up front (no network call) so a missing
         # API key / model / CLI is a clear 400 now, not a failed build later.
         try:
-            AGENT.loop_factory(choice, label)
+            ws.agent.loop_factory(choice, label)
         except Exception as e:  # noqa: BLE001 -- each SDK raises its own type for a missing key
             raise HTTPException(400, f"{label} LLM ({choice.provider}): {e}")
-    _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
+    _set_agent_callback(ws, request)
     options = BuildOptions(
         final_full_run=req.final_full_run,
         sample_rows=req.sample_rows,
         auto_build=req.auto_build,
         allow_new_blocks=req.allow_new_blocks,
         use_library_blocks=req.use_library_blocks,
-        small_context=LLM_SETTINGS.agent_small_context if req.small_context is None else req.small_context,
-        decision_hints=LLM_SETTINGS.agent_decision_hints if req.decision_hints is None else req.decision_hints,
+        small_context=ws.llm_settings.agent_small_context if req.small_context is None else req.small_context,
+        decision_hints=ws.llm_settings.agent_decision_hints if req.decision_hints is None else req.decision_hints,
     )
-    return _agent_call(lambda: AGENT.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
+    return _agent_call(lambda: ws.agent.start(req.goal, req.anchors, plan, build, options, token=secrets.token_urlsafe(24)))
 
 
 @app.get("/api/agent/builds/current")
 def agent_current(cursor: int = 0) -> dict[str, Any]:
-    if AGENT.build is None:
+    agent = _agent()
+    if agent.build is None:
         return {"build": None}
-    return {"build": AGENT.build.to_dict(cursor), "busy": AGENT._busy(), "canvas_locked": AGENT.canvas_locked()}
+    return {"build": agent.build.to_dict(cursor), "busy": agent._busy(), "canvas_locked": agent.canvas_locked()}
 
 
 @app.get("/api/agent/builds/{build_id}/log")
@@ -1684,10 +1778,11 @@ def agent_build_log(build_id: str) -> dict[str, Any]:
     plan rounds, outcome, usage and every event."""
     if not re.fullmatch(r"build_[0-9a-f]+", build_id):
         raise HTTPException(400, "bad build id")
-    current = AGENT.build
+    current = _agent().build
     if current is not None and current.id == build_id:
         return current.log_record()
-    candidates = [build_log_dir(SESSION) / f"{build_id}.json", CACHE_DIR / BUILD_LOG_DIRNAME / f"{build_id}.json"]
+    session = _session()
+    candidates = [build_log_dir(session) / f"{build_id}.json", session.cache_dir / BUILD_LOG_DIRNAME / f"{build_id}.json"]
     for path in candidates:
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))
@@ -1699,7 +1794,8 @@ def _saved_build_logs() -> list[Path]:
     and the cache's (builds started before the project was saved) --
     newest first."""
     paths: dict[str, Path] = {}
-    for directory in (CACHE_DIR / BUILD_LOG_DIRNAME, build_log_dir(SESSION)):
+    session = _session()
+    for directory in (session.cache_dir / BUILD_LOG_DIRNAME, build_log_dir(session)):
         if directory.is_dir():
             for path in directory.glob("build_*.json"):
                 paths[path.name] = path
@@ -1722,7 +1818,7 @@ def agent_continuable() -> list[dict[str, Any]]:
             continue
         if record.get("phase") not in CONTINUABLE_PHASES or not record.get("stages"):
             continue
-        blocks = [b for b in record.get("owned_blocks") or [] if b in SESSION.graph.blocks]
+        blocks = [b for b in record.get("owned_blocks") or [] if b in _session().graph.blocks]
         if not blocks:
             continue
         out.append(
@@ -1745,60 +1841,63 @@ def agent_continue(build_id: str, req: AgentText, request: Request) -> dict[str,
     its saved log."""
     if not re.fullmatch(r"build_[0-9a-f]+", build_id):
         raise HTTPException(400, "bad build id")
-    _AGENT_CALLBACK["url"] = os.environ.get("MODELMAKER_AGENT_CALLBACK_URL") or str(request.base_url)
-    current = AGENT.build
+    ws = current_workspace()
+    _set_agent_callback(ws, request)
+    current = ws.agent.build
     if current is not None and current.id == build_id:
-        return _agent_call(lambda: AGENT.reopen(req.text))
+        return _agent_call(lambda: ws.agent.reopen(req.text))
     path = next((p for p in _saved_build_logs() if p.stem == build_id), None)
     if path is None:
         raise HTTPException(404, f"no saved log for {build_id}")
     record = json.loads(path.read_text(encoding="utf-8"))
-    build = AgentBuild.from_record(SESSION, RUN_SLOT, record, path)
+    build = AgentBuild.from_record(ws.session, ws.run_slot, record, path)
     try:
-        AGENT.loop_factory(build.build_llm, "build")
+        ws.agent.loop_factory(build.build_llm, "build")
     except Exception as e:  # noqa: BLE001 -- see agent_start
         raise HTTPException(400, f"build LLM ({build.build_llm.provider}): {e}")
-    return _agent_call(lambda: AGENT.reopen(req.text, build=build, token=secrets.token_urlsafe(24)))
+    return _agent_call(lambda: ws.agent.reopen(req.text, build=build, token=secrets.token_urlsafe(24)))
 
 
 @app.post("/api/agent/builds/current/recheck")
 def agent_recheck() -> dict[str, Any]:
-    return _agent_call(AGENT.recheck)
+    return _agent_call(_agent().recheck)
 
 
 @app.post("/api/agent/builds/current/run_upstream")
 def agent_run_upstream() -> dict[str, Any]:
-    return _agent_call(AGENT.run_upstream)
+    return _agent_call(_agent().run_upstream)
 
 
 @app.post("/api/agent/builds/current/proceed")
 def agent_proceed() -> dict[str, Any]:
-    return _agent_call(AGENT.proceed)
+    return _agent_call(_agent().proceed)
 
 
 @app.post("/api/agent/builds/current/feedback")
 def agent_feedback(req: AgentText) -> dict[str, Any]:
-    return _agent_call(lambda: AGENT.feedback(req.text))
+    agent = _agent()
+    return _agent_call(lambda: agent.feedback(req.text))
 
 
 @app.post("/api/agent/builds/current/approve")
 def agent_approve() -> dict[str, Any]:
-    return _agent_call(AGENT.approve)
+    return _agent_call(_agent().approve)
 
 
 @app.post("/api/agent/builds/current/stop")
 def agent_stop() -> dict[str, Any]:
-    return _agent_call(AGENT.stop)
+    return _agent_call(_agent().stop)
 
 
 @app.post("/api/agent/builds/current/discard")
 def agent_discard() -> dict[str, Any]:
-    return _agent_call(AGENT.discard)
+    return _agent_call(_agent().discard)
 
 
 def _require_agent_token(token: str | None) -> AgentBuild:
-    build = AGENT.build
-    if build is None or not AGENT.token or not secrets.compare_digest(token or "", AGENT.token):
+    agent = _agent()
+    build = agent.build
+    if build is None or not agent.token or not secrets.compare_digest(token or "", agent.token):
         raise HTTPException(403, "not the current AI build's token")
     return build
 
@@ -1817,7 +1916,7 @@ def agent_mcp_call(req: AgentToolCall, x_agent_token: str | None = Header(defaul
     return build.call_tool(req.name, req.args)
 
 
-from .library_api import router as _library_router  # noqa: E402 -- reads SESSION from this module at call time
+from .library_api import router as _library_router  # noqa: E402 -- reads _session() from this module at call time
 
 app.include_router(_library_router)
 
@@ -1910,6 +2009,38 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs())
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
+
+
+# ---- compatibility aliases --------------------------------------------------
+#
+# Before workspaces, the per-user state was these module globals; code and
+# tests built on this module still read and replace them (api.SESSION = ...,
+# monkeypatch.setattr(api, "AGENT", ...)). They stay, as aliases for the
+# *default* workspace's objects -- never the current request's: reading or
+# assigning one is the same as doing it on DEFAULT_WORKSPACE. Module
+# attributes can't be properties, so the module's class is swapped for a
+# subclass that has them (the documented way to customise attribute access
+# on a module).
+
+
+def _default_alias(attr: str, doc: str) -> property:
+    def fget(module: types.ModuleType) -> Any:
+        return getattr(DEFAULT_WORKSPACE, attr)
+
+    def fset(module: types.ModuleType, value: Any) -> None:
+        setattr(DEFAULT_WORKSPACE, attr, value)
+
+    return property(fget, fset, doc=doc)
+
+
+class _ApiModule(types.ModuleType):
+    SESSION = _default_alias("session", "DEFAULT_WORKSPACE.session")
+    RUN_SLOT = _default_alias("run_slot", "DEFAULT_WORKSPACE.run_slot")
+    AGENT = _default_alias("agent", "DEFAULT_WORKSPACE.agent")
+    LLM_SETTINGS = _default_alias("llm_settings", "DEFAULT_WORKSPACE.llm_settings")
+
+
+sys.modules[__name__].__class__ = _ApiModule
 
 
 def main() -> None:

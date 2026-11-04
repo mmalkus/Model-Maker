@@ -1,6 +1,7 @@
 """GET/PUT/DELETE /api/env_vars/{name}: lets the UI set an env var (e.g. a
-Read SQL block's connection_env) for the running server process without
-ever writing it to disk or echoing it back -- see api._env_var_status.
+Read SQL block's connection_env) for the workspace's blocks without ever
+writing it to disk, into the server's own os.environ, or echoing it back --
+see api._env_var_status.
 """
 
 import os
@@ -13,13 +14,13 @@ import modelmaker.api as api_module
 
 @pytest.fixture
 def client():
-    # PUT writes straight into the real process os.environ (that's the
-    # point -- see api.set_env_var), so unlike monkeypatch.setenv it isn't
-    # auto-reverted; clean up explicitly on both sides of each test so one
-    # test's override can't leak into the next.
-    api_module._ENV_VAR_OVERRIDES = {}
+    # PUT stores the value in the default workspace (never os.environ), which
+    # lives as long as the module -- clear it on both sides of each test so
+    # one test's override can't leak into the next.
+    api_module.DEFAULT_WORKSPACE.env_vars.clear()
     os.environ.pop("MM_TEST_DB_URL", None)
     yield TestClient(api_module.app)
+    api_module.DEFAULT_WORKSPACE.env_vars.clear()
     os.environ.pop("MM_TEST_DB_URL", None)
 
 
@@ -40,12 +41,12 @@ def test_set_var_is_never_echoed_back_but_presence_is_reported(client):
     assert "super-secret" not in resp2.text
 
 
-def test_set_var_is_visible_to_os_environ(client):
-    import os
-
+def test_set_var_is_stored_in_the_workspace_not_os_environ(client):
     client.put("/api/env_vars/MM_TEST_DB_URL", json={"value": "postgresql://x"})
-    assert os.environ["MM_TEST_DB_URL"] == "postgresql://x"
+    assert "MM_TEST_DB_URL" not in os.environ
+    assert api_module.DEFAULT_WORKSPACE.env_vars.get("MM_TEST_DB_URL") == "postgresql://x"
     client.delete("/api/env_vars/MM_TEST_DB_URL")
+    assert "MM_TEST_DB_URL" not in api_module.DEFAULT_WORKSPACE.env_vars
 
 
 def test_clear_removes_a_var_this_endpoint_set(client):
@@ -60,11 +61,11 @@ def test_clear_restores_a_var_that_pre_existed_in_the_environment(client, monkey
     client.put("/api/env_vars/MM_TEST_DB_URL", json={"value": "postgresql://overridden"})
     resp = client.get("/api/env_vars/MM_TEST_DB_URL")
     assert resp.json()["source"] == "override"
+    # The server's own environment is never touched, only the workspace's view.
+    assert os.environ["MM_TEST_DB_URL"] == "sqlite://original.db"
 
     resp2 = client.delete("/api/env_vars/MM_TEST_DB_URL")
     assert resp2.json() == {"name": "MM_TEST_DB_URL", "is_set": True, "source": "env"}
-
-    import os
 
     assert os.environ["MM_TEST_DB_URL"] == "sqlite://original.db"
 
@@ -74,8 +75,6 @@ def test_clear_leaves_a_pre_existing_env_var_alone_if_never_overridden(client, m
 
     resp = client.delete("/api/env_vars/MM_TEST_DB_URL")
     assert resp.json() == {"name": "MM_TEST_DB_URL", "is_set": True, "source": "env"}
-
-    import os
 
     assert os.environ["MM_TEST_DB_URL"] == "sqlite://original.db"
 

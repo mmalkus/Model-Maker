@@ -22,10 +22,14 @@ router = APIRouter(prefix="/api/assistant")
 ERROR_CHARS = 1200
 
 
-def _session():
+def _workspace():
     from . import api
 
-    return api.SESSION
+    return api.current_workspace()
+
+
+def _session():
+    return _workspace().session
 
 
 def _block_brief(bid: str) -> dict[str, Any]:
