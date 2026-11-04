@@ -14,9 +14,11 @@ A block with neither gets no fingerprint and never reports a change.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 from .blocks.base import BlockDefinition
+from .execution.env import task_environ
 
 # Instance params the architecture reads and the runner never passes on.
 SOURCE_PARAMS = frozenset({"probe_query"})
@@ -30,7 +32,7 @@ def _file_fingerprint(path: Any) -> Any:
     return (st.st_mtime, st.st_size)
 
 
-def _sql_fingerprint(definition: BlockDefinition, params: dict[str, Any]) -> Any:
+def _sql_fingerprint(definition: BlockDefinition, params: dict[str, Any], environ: Mapping[str, str]) -> Any:
     query = params.get("probe_query")
     env_field = next((f for f in definition.form if f.kind == "env"), None)
     if not query or env_field is None:
@@ -38,22 +40,29 @@ def _sql_fingerprint(definition: BlockDefinition, params: dict[str, Any]) -> Any
     try:
         import polars as pl
 
-        uri = os.environ[params[env_field.key]]
+        uri = environ[params[env_field.key]]
         result = pl.read_database_uri(query, uri)
     except Exception:  # noqa: BLE001 -- an unreachable source is "unknown", not an error
         return None
     return str(result.row(0)) if result.height else ""
 
 
-def fingerprint(definition: BlockDefinition, params: dict[str, Any]) -> Any:
+def fingerprint(definition: BlockDefinition, params: dict[str, Any], environ: Mapping[str, str] | None = None) -> Any:
     """A cheap, read-only value that changes when the block's source does,
-    or None when the block's form gives nothing to watch."""
+    or None when the block's form gives nothing to watch.
+
+    `environ` is where a probe looks up the connection variable: the
+    environment the block itself would run with (default: this process's,
+    minus the secrets -- see execution.env.task_environ). The runner passes
+    its workspace's, so a variable the user set from the UI is found
+    without ever being written into this process's os.environ, and a
+    probe can't reach a variable the block couldn't."""
     parts: dict[str, Any] = {}
     for f in definition.form:
         if f.kind == "path" and params.get(f.key):
             parts[f.key] = _file_fingerprint(params[f.key])
     if any(f.kind == "sql" for f in definition.form):
-        sql = _sql_fingerprint(definition, params)
+        sql = _sql_fingerprint(definition, params, task_environ() if environ is None else environ)
         if sql is not None:
             parts["probe_query"] = sql
     return parts or None

@@ -502,9 +502,10 @@ def _default_executor():
     return runner.EXECUTOR
 
 
-def _run_task(entry: str, args: tuple[Any, ...], timeout: float, executor=None) -> tuple[bool, Any]:
+def _run_task(entry: str, args: tuple[Any, ...], timeout: float, executor=None, env=None) -> tuple[bool, Any]:
     """Run one run_worker entry point through `executor` with a timeout:
-    (True, its value) or (False, a one-line error)."""
+    (True, its value) or (False, a one-line error). `env`: the workspace's
+    own environment variables for the task (see execution.base.Task.env)."""
     import threading
 
     from .execution import Task, TaskCancelled
@@ -515,7 +516,7 @@ def _run_task(entry: str, args: tuple[Any, ...], timeout: float, executor=None) 
     timer.daemon = True
     timer.start()
     try:
-        (result,) = executor.wait([executor.submit(Task(entry, args))], stop, max_concurrent=1)
+        (result,) = executor.wait([executor.submit(Task(entry, args, env))], stop, max_concurrent=1)
     except TaskCancelled:
         return False, f"timed out after {timeout:.0f}s"
     finally:
@@ -550,22 +551,27 @@ def _example_report(raw: Any) -> dict[str, dict[str, Any]]:
 
 
 def run_examples(
-    source: str, origin: str, ids: list[str] | None = None, timeout: float = EXAMPLE_TIMEOUT, executor=None
+    source: str,
+    origin: str,
+    ids: list[str] | None = None,
+    timeout: float = EXAMPLE_TIMEOUT,
+    executor=None,
+    env=None,
 ) -> dict[str, dict[str, Any]]:
     """Run a file's `_example_<id>` self-checks as a task: {block id: {"ok":
     True|False|None (no example), "error", "line"}}; a file that fails to
     run at all reports under "__file__" (see run_worker.run_examples_entry)."""
-    ok, result = _run_task("run_examples_entry", (source, origin, ids), timeout, executor)
+    ok, result = _run_task("run_examples_entry", (source, origin, ids), timeout, executor, env)
     return _example_report(result) if ok else {"__file__": {"ok": False, "error": result}}
 
 
 def try_call(
-    definition: BlockDefinition, kwargs: dict[str, Any], timeout: float = EXAMPLE_TIMEOUT, executor=None
+    definition: BlockDefinition, kwargs: dict[str, Any], timeout: float = EXAMPLE_TIMEOUT, executor=None, env=None
 ) -> tuple[bool, Any]:
     """Call a definition's function once on real inputs (a canvas block's
     output) as a task: (ok, result or error message)."""
     code = definition.code if definition.source == "library" else None
-    return _run_task("run_worker_entry", (definition.id, code, kwargs, None), timeout, executor)
+    return _run_task("run_worker_entry", (definition.id, code, kwargs, None), timeout, executor, env)
 
 
 # ---- writing literals ----------------------------------------------------

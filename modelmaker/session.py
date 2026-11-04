@@ -4,11 +4,12 @@ import copy
 import json
 import os
 import uuid
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from .block_library import definition_from_embedded
 from .blocks.base import BLOCK_REGISTRY, BlockDefinition
@@ -18,9 +19,15 @@ from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
 from .project import graph_from_dict, graph_to_dict, load_project, save_project
 from .runner import RunState, Runner
 
+if TYPE_CHECKING:
+    from .execution import Executor
+
 # Relative to the server's cwd by default. Overridable so several processes
 # on one checkout (parallel test workers, a test-spawned server) don't
-# share -- and clobber -- one cache and one recovery snapshot.
+# share -- and clobber -- one cache and one recovery snapshot. This is the
+# default workspace's directory; every other workspace (see workspace.py)
+# brings its own, since the same directory also holds the recovery
+# snapshot and AI build logs.
 CACHE_DIR = Path(os.environ.get("MODELMAKER_CACHE_DIR") or ".modelmaker-cache")
 # Where the crash-recovery snapshot lives. Inside the (gitignored) cache
 # directory deliberately: it is regenerable working state, not part of the
@@ -60,12 +67,31 @@ def wire_is_valid(graph: Graph, wire: Wire) -> bool:
 
 class ProjectSession:
     """In-memory holder for the currently-open graph, its runner, and where
-    it was last loaded from/saved to. One session per running server process
-    -- there's no multi-project or multi-user concept yet."""
+    it was last loaded from/saved to. One session per workspace (see
+    workspace.py; the local app has exactly one).
 
-    def __init__(self, recovery_path: Path | None = RECOVERY_PATH) -> None:
+    `cache_dir` holds the result cache (and, by default, the recovery
+    snapshot and unsaved builds' logs); `executor` is where its runs go
+    (None: the process default, runner.EXECUTOR); `task_env` supplies the
+    environment variables its tasks get on top of the process's (the
+    workspace's user-set ones, see Runner.task_env). All three carry over
+    to the fresh runner a load or a new project makes. Assignable after
+    construction too -- a workspace adopting a session it was handed sets
+    `task_env`."""
+
+    def __init__(
+        self,
+        recovery_path: Path | None = RECOVERY_PATH,
+        *,
+        cache_dir: Path | None = None,
+        executor: Executor | None = None,
+        task_env: Callable[[], Mapping[str, str]] | None = None,
+    ) -> None:
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
+        self.executor = executor
+        self.task_env = task_env
         self.graph = Graph()
-        self.runner = Runner(self.graph, CacheStore(CACHE_DIR))
+        self.runner = self._new_runner()
         self.project_path: Path | None = None
         self.project_name = "untitled"
         self.recovery_path = recovery_path
@@ -79,6 +105,19 @@ class ProjectSession:
         # bumps the revision and writes recovery, but pushes no undo point
         # of its own (the transaction pushed one on entry).
         self._transaction_depth = 0
+
+    def _new_runner(self, sample_rows: int | None = None) -> Runner:
+        return Runner(
+            self.graph,
+            CacheStore(self.cache_dir),
+            sample_rows=sample_rows,
+            executor=self.executor,
+            task_env=self._current_task_env,
+        )
+
+    def _current_task_env(self) -> Mapping[str, str]:
+        # Indirect, so assigning `task_env` later reaches the live runner.
+        return self.task_env() if self.task_env is not None else {}
 
     # ---- edit bookkeeping ---------------------------------------------
 
@@ -261,7 +300,7 @@ class ProjectSession:
         project path, and a clean edit history. Never touches the
         filesystem; nothing exists on disk until the next Save."""
         self.graph = Graph()
-        self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)
+        self.runner = self._new_runner(sample_rows=self.runner.sample_rows)
         self.project_path = None
         self.project_name = "untitled"
         self._undo.clear()
@@ -272,7 +311,7 @@ class ProjectSession:
 
     def load(self, path: Path) -> None:
         self.graph = load_project(path)
-        self.runner = Runner(self.graph, CacheStore(CACHE_DIR), sample_rows=self.runner.sample_rows)
+        self.runner = self._new_runner(sample_rows=self.runner.sample_rows)
         self.project_path = path
         # `path` is always <project folder>/PROJECT_FILENAME -- the folder is
         # the project, so its name is the project's name, not the fixed
