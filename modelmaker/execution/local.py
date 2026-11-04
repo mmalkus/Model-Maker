@@ -83,7 +83,7 @@ class LocalExecutor:
                 batch.append(handle)
             for handle in batch:
                 try:
-                    running[handle].send_task(handle.task.entry, handle.task.args)
+                    running[handle].send_task(handle.task.entry, handle.task.args, handle.task.env)
                 except (BrokenPipeError, EOFError, OSError):
                     pass  # died before taking the task -- reported as a crash by the loop below
 

@@ -188,7 +188,13 @@ parameters the app fills in (`output_dir`, `block_id`, role params such as
   instance setting detect new data.
 - `env`: the *name* of an environment variable, such as a connection URI.
   The UI can set it for the session. The secret itself is never stored in
-  the project.
+  the project. A value set from the UI is kept in memory by the app and
+  handed to the block's run (and to its change probe) on top of the
+  server's own environment; it isn't written into the server process's
+  environment. Names the app treats as secrets (its own and the LLM
+  providers' API keys, git host tokens, anything listed in
+  `MODELMAKER_WORKER_ENV_DENY`) never reach block code however they're
+  set, so give a connection variable an ordinary name such as `DWH_URI`.
 
 ### Column metadata: `meta`
 

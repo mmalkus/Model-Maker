@@ -32,9 +32,9 @@ itself (execution/wire.py), never a pickle.
 
 A spare is started before it is known what it will run, so it can't rely
 on what it inherited at start: the parent's *current* (scrubbed)
-os.environ and cwd travel with each task and are applied before the task
-runs (e.g. api.set_env_var relies on a block seeing an env var set after
-server start). The one thing that can't be carried over is a module that
+os.environ and cwd travel with each task, together with the task's own
+variables (the ones the user set from the UI for their workspace, see
+execution.base.Task.env), and are applied before the task runs. The one thing that can't be carried over is a module that
 reads the environment at import time -- polars' POLARS_MAX_THREADS, say --
 which in a spare sees the environment as of the spare's start.
 """
@@ -49,9 +49,10 @@ import subprocess
 import sys
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from .execution.env import is_secret, scrubbed_environ
+from .execution.env import is_secret, scrubbed_environ, task_environ
 
 # Imported by every worker before it takes a task: what nearly every block
 # run needs (the block modules themselves register the registry blocks --
@@ -298,8 +299,12 @@ class Worker:
                 return False
         return self._ready
 
-    def send_task(self, entry_name: str, args: tuple[Any, ...]) -> None:
-        self.conn.send((entry_name, args, scrubbed_environ(), os.getcwd()))
+    def send_task(self, entry_name: str, args: tuple[Any, ...], env: Mapping[str, str] | None = None) -> None:
+        """Hand this worker its one task, with the environment it runs in:
+        this process's current one minus the secrets, plus the task's own
+        variables (`env`, see execution.base.Task) -- also minus the
+        secrets."""
+        self.conn.send((entry_name, args, task_environ(env), os.getcwd()))
 
     def recv_frame(self, max_bytes: int) -> bytes:
         """The task's result frame (raw bytes, for execution/wire.py to

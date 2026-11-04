@@ -27,7 +27,8 @@ actually needs:
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -40,10 +41,19 @@ class Task:
     The args travel *to* the task process, which is the trusted direction:
     they come from this process (the graph, params, upstream outputs), so a
     local executor may pickle them. Only what comes back is untrusted -- see
-    wire.py."""
+    wire.py.
+
+    `env` is the environment variables this task adds on top of the task
+    process's base environment (this process's, minus the secrets -- see
+    env.task_environ): the variables the user of the workspace that started
+    the run has set, e.g. the one a Read SQL block names. They travel with
+    each task rather than through this process's os.environ because
+    several workspaces can share one process, and each must see only its
+    own. A name on the secret denylist is dropped even here."""
 
     entry: str
     args: tuple[Any, ...]
+    env: Mapping[str, str] | None = field(default=None, hash=False)
 
 
 @dataclass(frozen=True, eq=False)

@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -19,6 +20,7 @@ from .metadata_transforms import schema_diff
 from .sources import SOURCE_PARAMS, fingerprint
 from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
 from .execution import Executor, Task, TaskCancelled
+from .execution.env import task_environ
 from .execution.local import LocalExecutor
 from .worker_pool import WorkerPool, pool_size_from_env
 from .signature import SignatureError
@@ -52,7 +54,9 @@ MP_CONTEXT = multiprocessing.get_context("spawn")
 WORKER_POOL = WorkerPool(MP_CONTEXT, pool_size_from_env())
 
 # Where every Runner's block calls run unless it's given another executor
-# (see execution/: the seam a sandboxed RemoteExecutor plugs into).
+# (see execution/: the seam a sandboxed RemoteExecutor plugs into). Several
+# workspaces (see workspace.py) can share it: it holds no per-user state,
+# each task carrying its own environment variables (Task.env).
 EXECUTOR: Executor = LocalExecutor(WORKER_POOL)
 
 
@@ -322,11 +326,18 @@ class Runner:
         output_dir: str = "./output",
         sample_rows: int | None = None,
         executor: Executor | None = None,
+        task_env: Callable[[], Mapping[str, str]] | None = None,
     ):
         self.graph = graph
         # Read at each dispatch (not bound here) so the default can be
         # swapped process-wide; None means the module's EXECUTOR.
         self._executor = executor
+        # The environment variables this runner's tasks get on top of the
+        # process's scrubbed environment (see execution.base.Task.env) --
+        # the owning workspace's user-set ones, read fresh at each dispatch
+        # so a variable set mid-session applies to the next run. None:
+        # none beyond the process's own.
+        self.task_env = task_env
         self.cache = cache or CacheStore()
         self.output_dir = output_dir
         # Sample mode: when set, every input block's dataframe outputs are
@@ -810,6 +821,10 @@ class Runner:
         process-wide default (read at each use, so it can be swapped)."""
         return self._executor or EXECUTOR
 
+    def _task_env(self) -> dict[str, str] | None:
+        """A snapshot of task_env for one dispatch (None when there is none)."""
+        return dict(self.task_env()) if self.task_env is not None else None
+
     def _run_tasks(
         self, active_ids: list[str], tasks: dict[Any, tuple[str, tuple[Any, ...]]], max_workers: int
     ) -> tuple[dict[Any, Any], dict[Any, str]]:
@@ -827,6 +842,7 @@ class Runner:
         (segfault, OS OOM-kill) becomes an error entry, never a hang, and so
         does a result the executor refuses to accept (not data, too big)."""
         executor = self.executor
+        env = self._task_env()
         cancel_event = threading.Event()
         results: dict[Any, Any] = {}
         errors: dict[Any, str] = {}
@@ -837,7 +853,7 @@ class Runner:
                 self._active[aid] = {"cancel_event": cancel_event, "started_at": started_at}
         try:
             keys = list(tasks)
-            handles = [executor.submit(Task(entry, args)) for entry, args in tasks.values()]
+            handles = [executor.submit(Task(entry, args, env)) for entry, args in tasks.values()]
             try:
                 outcomes = executor.wait(handles, cancel_event, max_concurrent=max(1, max_workers))
             except TaskCancelled:
@@ -1550,7 +1566,7 @@ class Runner:
         if definition is None:
             return False
         st = self._st(block_id)
-        current = fingerprint(definition, block.params)
+        current = fingerprint(definition, block.params, environ=task_environ(self._task_env()))
         if current is None:
             return False
         changed = st.last_probe_value is not None and current != st.last_probe_value

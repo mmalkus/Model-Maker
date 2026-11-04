@@ -110,6 +110,28 @@ def scrubbed_environ(environ: Mapping[str, str] | None = None) -> dict[str, str]
     return {k: v for k, v in env.items() if not secret(k)}
 
 
+def task_environ(overrides: Mapping[str, str] | None = None, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment one task runs with: `environ` (default: a snapshot
+    of os.environ) scrubbed, then `overrides` -- the variables the user set
+    for their workspace (see execution.base.Task.env) -- on top.
+
+    The denylist applies to the overrides too, and it's the one from
+    `environ`, never from the overrides (so an override of
+    MODELMAKER_WORKER_ENV_DENY can't lift it). Setting, say,
+    ANTHROPIC_API_KEY from the UI therefore never hands it to block code,
+    exactly as when the variable came from the shell; a variable a block
+    is meant to read, such as the one holding a Read SQL connection URI,
+    simply must not be named like a secret. An admin who wants a name kept
+    out of blocks however it's set adds it to MODELMAKER_WORKER_ENV_DENY."""
+    env = snapshot_environ() if environ is None else dict(environ)
+    secret = _secret_test(env)
+    out = {k: v for k, v in env.items() if not secret(k)}
+    for name, value in (overrides or {}).items():
+        if not secret(name):
+            out[name] = value
+    return out
+
+
 # ---- opt-in hardening -----------------------------------------------------
 
 HARDEN_VAR = "MODELMAKER_HARDEN"

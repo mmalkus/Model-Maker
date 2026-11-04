@@ -123,16 +123,15 @@ def _now() -> str:
 
 # Every build's full log (see AgentBuild.save_log) is written here, one
 # JSON file per build: inside the project folder once it has been saved
-# (so it's versioned with the model it built), else next to the cache.
+# (so it's versioned with the model it built), else in the session's own
+# cache directory (one per workspace).
 BUILD_LOG_DIRNAME = "ai_builds"
 
 
 def build_log_dir(session: "ProjectSession") -> Path:
     if session.project_path is not None:
         return session.project_path.parent / BUILD_LOG_DIRNAME
-    from ..session import CACHE_DIR
-
-    return CACHE_DIR / BUILD_LOG_DIRNAME
+    return session.cache_dir / BUILD_LOG_DIRNAME
 
 
 class AgentBuild:
