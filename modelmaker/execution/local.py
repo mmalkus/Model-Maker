@@ -18,6 +18,7 @@ import itertools
 import multiprocessing.connection
 import re
 import threading
+import time
 
 from ..worker_pool import Worker, WorkerPool, pool_size_from_env
 from . import wire
@@ -43,7 +44,12 @@ class LocalExecutor:
     worker_pool.py). Thread-safe: the API server runs several dispatches at
     once, from different threads, through the one shared executor."""
 
-    def __init__(self, pool: WorkerPool | None = None, max_result_bytes: int | None = None) -> None:
+    def __init__(
+        self, pool: WorkerPool | None = None, max_result_bytes: int | None = None, task_timeout: float | None = None
+    ) -> None:
+        """`task_timeout`: wall-clock seconds a task may run once started;
+        one still running then is stopped and fails with a message saying
+        so (None or 0: no limit, the local app's default)."""
         if pool is None:
             import multiprocessing
 
@@ -51,10 +57,19 @@ class LocalExecutor:
         self.pool = pool
         # None: read MODELMAKER_MAX_RESULT_MB at each wait (see wire.py).
         self.max_result_bytes = max_result_bytes
+        self.task_timeout = task_timeout or None
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         if harden_requested():
             harden()
+
+    @property
+    def base_environ(self):
+        """The environment this executor's tasks start from, before their
+        own variables (None: this process's, minus the secrets) -- so that
+        what runs outside a task on a task's behalf, like a source's
+        change probe, sees what the task would."""
+        return self.pool.launch.environ
 
     def prewarm(self) -> None:
         self.pool.prewarm()
@@ -70,7 +85,9 @@ class LocalExecutor:
         max_bytes = self.max_result_bytes if self.max_result_bytes is not None else wire.max_bytes_from_env()
         pending = list(handles)
         running: dict[TaskHandle, Worker] = {}
+        started: dict[TaskHandle, float] = {}
         results: dict[TaskHandle, TaskResult] = {}
+        timeout = self.task_timeout
 
         def _start_next() -> None:
             # Acquire every free slot's worker before sending any task: a
@@ -82,6 +99,7 @@ class LocalExecutor:
                 running[handle] = self.pool.acquire()
                 batch.append(handle)
             for handle in batch:
+                started[handle] = time.monotonic()
                 try:
                     running[handle].send_task(handle.task.entry, handle.task.args, handle.task.env)
                 except (BrokenPipeError, EOFError, OSError):
@@ -109,6 +127,15 @@ class LocalExecutor:
                         running.pop(handle)
                         results[handle] = TaskResult(handle, ok=False, error=worker.crash_message(), crashed=True)
                         worker.stop()
+                if timeout is not None:
+                    now = time.monotonic()
+                    for handle, worker in list(running.items()):
+                        if now - started[handle] > timeout:
+                            running.pop(handle)
+                            worker.stop()
+                            results[handle] = TaskResult(
+                                handle, ok=False, error=f"stopped: the block ran longer than its {timeout:g} s time limit"
+                            )
                 _start_next()
         finally:
             for worker in running.values():

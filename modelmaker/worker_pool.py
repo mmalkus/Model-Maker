@@ -37,6 +37,15 @@ variables (the ones the user set from the UI for their workspace, see
 execution.base.Task.env), and are applied before the task runs. The one thing that can't be carried over is a module that
 reads the environment at import time -- polars' POLARS_MAX_THREADS, say --
 which in a spare sees the environment as of the spare's start.
+
+An application that runs tasks on someone else's behalf -- a server hosting
+several users' workspaces in one process -- can change three things about
+how its workers start, with a `WorkerLaunch` (exec launcher only): a
+command prefix the interpreter is exec'd through (e.g. `setpriv` to run as
+another uid), the base environment used *instead of* this process's
+os.environ (still scrubbed of secrets), and the working directory each task
+runs in instead of this process's cwd. A pool has one launch, so spares
+started for one launch never serve another.
 """
 
 from __future__ import annotations
@@ -50,6 +59,7 @@ import sys
 import threading
 import weakref
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from .execution.env import is_secret, scrubbed_environ, task_environ
@@ -73,6 +83,33 @@ BASE_PRELOAD = (
 MAX_LEARNED_MODULES = 5000
 
 Launcher = Literal["exec", "multiprocessing"]
+
+
+@dataclass(frozen=True)
+class WorkerLaunch:
+    """How a pool's workers are started, when not the default (see the
+    module docstring). Every field is optional:
+
+    - `command_prefix`: argv the interpreter command is appended to, e.g.
+      ("setpriv", "--reuid=20001", ..., "--"). The prefix must exec the
+      command it's given with the inherited file descriptors open.
+    - `environ`: the base environment for the worker process and each of
+      its tasks, used instead of this process's os.environ. Secrets are
+      still dropped from it (env.scrubbed_environ), and a task's own
+      variables still go on top.
+    - `cwd`: the directory each task runs in, instead of this process's
+      cwd at send time. It's entered by the worker itself, after any
+      prefix took effect, so it only needs to be accessible to the worker.
+
+    Needs the exec launcher: multiprocessing's spawn can't do any of it."""
+
+    command_prefix: tuple[str, ...] = ()
+    environ: Mapping[str, str] | None = None
+    cwd: str | None = None
+
+    @property
+    def is_default(self) -> bool:
+        return not self.command_prefix and self.environ is None and self.cwd is None
 
 
 def default_launcher() -> Launcher:
@@ -254,17 +291,34 @@ class Worker:
     """The parent's handle on one (possibly still preloading) worker:
     `conn` (send to it pickled, receive from it bytes only) and `process`."""
 
-    def __init__(self, ctx: Any, preload: list[str], spare: bool = False, launcher: Launcher | None = None) -> None:
+    def __init__(
+        self,
+        ctx: Any,
+        preload: list[str],
+        spare: bool = False,
+        launcher: Launcher | None = None,
+        launch: WorkerLaunch | None = None,
+    ) -> None:
         self._ready = False
+        self.launch = launch or WorkerLaunch()
         self.launcher: Launcher = launcher or default_launcher()
+        if not self.launch.is_default and self.launcher != "exec":
+            raise ValueError("a WorkerLaunch needs the exec launcher (POSIX, not a frozen app)")
         if self.launcher == "exec":
             from multiprocessing.connection import Connection
 
             parent_sock, child_sock = socket.socketpair()
             try:
                 popen = subprocess.Popen(
-                    [sys.executable, *_interpreter_flags(), "-c", _BOOTSTRAP, str(child_sock.fileno())],
-                    env=scrubbed_environ(),
+                    [
+                        *self.launch.command_prefix,
+                        sys.executable,
+                        *_interpreter_flags(),
+                        "-c",
+                        _BOOTSTRAP,
+                        str(child_sock.fileno()),
+                    ],
+                    env=scrubbed_environ(self.launch.environ),
                     pass_fds=(child_sock.fileno(),),
                     stdin=subprocess.DEVNULL,
                 )
@@ -303,8 +357,10 @@ class Worker:
         """Hand this worker its one task, with the environment it runs in:
         this process's current one minus the secrets, plus the task's own
         variables (`env`, see execution.base.Task) -- also minus the
-        secrets."""
-        self.conn.send((entry_name, args, task_environ(env), os.getcwd()))
+        secrets. With a WorkerLaunch, its `environ` and `cwd` stand in for
+        this process's."""
+        cwd = self.launch.cwd if self.launch.cwd is not None else os.getcwd()
+        self.conn.send((entry_name, args, task_environ(env, self.launch.environ), cwd))
 
     def recv_frame(self, max_bytes: int) -> bytes:
         """The task's result frame (raw bytes, for execution/wire.py to
@@ -340,10 +396,15 @@ class WorkerPool:
     """Keeps `size` spares started ahead of use. Thread-safe: the API
     server dispatches from several background threads at once."""
 
-    def __init__(self, ctx: Any, size: int, launcher: Launcher | None = None) -> None:
+    def __init__(self, ctx: Any, size: int, launcher: Launcher | None = None, launch: WorkerLaunch | None = None) -> None:
         self._ctx = ctx
         self.size = size
         self.launcher: Launcher = launcher or default_launcher()
+        # How every worker of this pool starts (see WorkerLaunch); spares
+        # are per pool, so they never cross from one launch to another.
+        self.launch = launch or WorkerLaunch()
+        if not self.launch.is_default and self.launcher != "exec":
+            raise ValueError("a WorkerLaunch needs the exec launcher (POSIX, not a frozen app)")
         self._spares: list[Worker] = []
         self._learned: dict[str, None] = {}  # insertion-ordered set: parents before submodules
         self._lock = threading.Lock()
@@ -367,7 +428,7 @@ class WorkerPool:
             self._top_up_locked()
         # A cold start only preloads the base set: it's about to be told
         # what it runs, and the learned set may well be more than that needs.
-        return worker or Worker(self._ctx, list(BASE_PRELOAD), launcher=self.launcher)
+        return worker or Worker(self._ctx, list(BASE_PRELOAD), launcher=self.launcher, launch=self.launch)
 
     def prewarm(self) -> None:
         """Start the spares now rather than at the first dispatch, so even
@@ -385,7 +446,7 @@ class WorkerPool:
     def _top_up_locked(self) -> None:
         preload = [*BASE_PRELOAD, *self._learned]
         while len(self._spares) < self.size:
-            self._spares.append(Worker(self._ctx, preload, spare=True, launcher=self.launcher))
+            self._spares.append(Worker(self._ctx, preload, spare=True, launcher=self.launcher, launch=self.launch))
 
     def shutdown(self) -> None:
         with self._lock:

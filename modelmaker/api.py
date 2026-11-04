@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import gitops, project
+from . import gitops, library_store, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildError
@@ -135,6 +135,45 @@ def current_workspace() -> Workspace:
             raise TypeError(f"the workspace resolver returned {type(ws).__name__}, not a Workspace")
         holder["workspace"] = ws
     return ws
+
+
+# The block library folder and git's environment follow the workspace too
+# (Workspace.library_dir / git_env; None keeps the process-wide default).
+library_store.set_library_dir_resolver(lambda: current_workspace().library_dir)
+gitops.set_env_resolver(lambda: current_workspace().git_env)
+
+
+def _confined(raw: str | os.PathLike[str] | None) -> Path | None:
+    """`raw` as an absolute, resolved path -- refused with a 403 when the
+    request's workspace has a `root` and the path (symlinks followed) leaves
+    it. Relative paths count from that root (else from the cwd). None stays
+    None."""
+    if raw is None:
+        return None
+    root = current_workspace().root
+    path = Path(raw).expanduser()
+    if root is not None and not path.is_absolute():
+        path = root / path
+    path = path.resolve()
+    if root is not None and not path.is_relative_to(root):
+        raise HTTPException(403, "that path is outside your workspace")
+    return path
+
+
+def _check_project_links(folder: Path) -> None:
+    """With a workspace root: refuse a project folder holding a symlink that
+    leads outside it (one can arrive with a git pull), since loading and
+    saving read and write files inside the folder."""
+    root = current_workspace().root
+    if root is None or not folder.is_dir():
+        return
+    for dirpath, dirnames, filenames in os.walk(folder):
+        if ".git" in dirnames:
+            dirnames.remove(".git")
+        for name in [*dirnames, *filenames]:
+            entry = Path(dirpath) / name
+            if entry.is_symlink() and not entry.resolve().is_relative_to(root):
+                raise HTTPException(403, f"{entry.relative_to(folder)} links outside your workspace")
 
 
 @contextmanager
@@ -636,10 +675,13 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
     which can't hand back an absolute filesystem path from <input type=file>,
     so this stands in for a native file dialog. Local dev tool, run by the
     user against their own machine, so no extra path sandboxing beyond
-    resolving `..`/symlinks."""
-    base = Path(path).expanduser().resolve() if path else Path.cwd()
+    resolving `..`/symlinks -- unless the workspace has a `root`, which
+    browsing then stays inside (and starts at)."""
+    root = current_workspace().root
+    home = root if root is not None else Path.cwd()
+    base = _confined(path) if path else home
     if not base.exists():
-        base = Path.cwd()
+        base = home
     if base.is_file():
         base = base.parent
 
@@ -662,6 +704,8 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
         pass
 
     parent = base.parent
+    if root is not None and base == root:
+        parent = base
     return {
         "path": str(base),
         "parent": str(parent) if parent != base else None,
@@ -688,7 +732,9 @@ def new_project_ep() -> dict[str, Any]:
 
 @app.post("/api/project/load")
 def load_project_ep(req: LoadRequest) -> dict[str, Any]:
-    folder = Path(req.path)
+    folder = _confined(req.path)
+    assert folder is not None
+    _check_project_links(folder)
     if not project.is_project_dir(folder):
         raise HTTPException(404, f"not a project folder (no {project.PROJECT_FILENAME} in it): {req.path}")
     try:
@@ -700,7 +746,12 @@ def load_project_ep(req: LoadRequest) -> dict[str, Any]:
 
 @app.post("/api/project/save")
 def save_project_ep(req: SaveRequest) -> dict[str, Any]:
-    target = Path(req.path) / project.PROJECT_FILENAME if req.path else None
+    folder = _confined(req.path) if req.path else None
+    if folder is None and _session().project_path is not None:
+        folder = _confined(_session().project_path.parent)
+    if folder is not None:
+        _check_project_links(folder)
+    target = folder / project.PROJECT_FILENAME if req.path and folder is not None else None
     try:
         path = _session().save(target)
     except ValueError as e:

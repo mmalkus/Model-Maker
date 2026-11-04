@@ -21,7 +21,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import block_library as bl
 from .blocks.base import BLOCK_REGISTRY, BlockDefinition
@@ -46,9 +46,33 @@ class ConflictError(LibraryError):
     someone else saved it meanwhile."""
 
 
-def library_dir() -> Path:
+# Picks the library folder for the current caller, when an application
+# hosts several users in one process (api.py installs one that asks the
+# request's Workspace). It returns None for "the process default".
+_dir_resolver: Callable[[], Path | None] | None = None
+
+
+def set_library_dir_resolver(resolver: Callable[[], Path | None] | None) -> None:
+    """Install the function library_dir() consults first (None removes it)."""
+    global _dir_resolver
+    _dir_resolver = resolver
+
+
+def default_library_dir() -> Path:
     raw = os.environ.get(LIBRARY_ENV)
     return Path(raw).expanduser() if raw else Path.home() / ".modelmaker" / "blocks"
+
+
+def library_dir() -> Path:
+    """The library folder: the resolver's answer (see
+    set_library_dir_resolver), else MODELMAKER_BLOCK_LIBRARY, else
+    ~/.modelmaker/blocks."""
+    resolver = _dir_resolver
+    if resolver is not None:
+        chosen = resolver()
+        if chosen is not None:
+            return Path(chosen)
+    return default_library_dir()
 
 
 def text_sha(text: str) -> str:
@@ -81,7 +105,9 @@ class LibraryFile:
 
 
 _lock = threading.RLock()
-_cache: dict[str, Any] = {"key": None, "files": [], "checked": 0.0, "root": None}
+# One parsed listing per library folder (several, when workspaces of one
+# process each have their own).
+_caches: dict[Path, dict[str, Any]] = {}
 # How long a listing is trusted before the folder is stat'ed again -- the
 # graph poll asks for update badges of every placed library block.
 RESCAN_SECONDS = 1.0
@@ -111,11 +137,12 @@ def list_files(*, force: bool = False) -> list[LibraryFile]:
     global generation
     root = library_dir()
     with _lock:
+        _cache = _caches.setdefault(root, {"key": None, "files": [], "checked": 0.0})
         now = time.monotonic()
-        if not force and _cache["root"] == root and now - _cache["checked"] < RESCAN_SECONDS:
+        if not force and _cache["key"] is not None and now - _cache["checked"] < RESCAN_SECONDS:
             return _cache["files"]
         key = _scan_key(root)
-        _cache["checked"], _cache["root"] = now, root
+        _cache["checked"] = now
         if not force and key == _cache["key"]:
             return _cache["files"]
         files: list[LibraryFile] = []

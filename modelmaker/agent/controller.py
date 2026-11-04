@@ -7,6 +7,7 @@ polls the build's state."""
 
 from __future__ import annotations
 
+import contextvars
 import re
 import threading
 from contextlib import ExitStack
@@ -194,7 +195,12 @@ class BuildController:
                     b.log("error", message=b.error)
                     self._end(FAILED)
 
-        self._worker = threading.Thread(target=target, daemon=True)
+        # With the caller's context: whatever it resolves per caller -- the
+        # request's workspace (api.current_workspace), and through it the
+        # block library folder the build writes its drafts to -- stays the
+        # same on the build's thread.
+        context = contextvars.copy_context()
+        self._worker = threading.Thread(target=context.run, args=(target,), daemon=True)
         self._worker.start()
 
     def _pause_for_retry(self, message: str) -> None:

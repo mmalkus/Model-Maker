@@ -1566,7 +1566,10 @@ class Runner:
         if definition is None:
             return False
         st = self._st(block_id)
-        current = fingerprint(definition, block.params, environ=task_environ(self._task_env()))
+        # The environment the block itself would get: its executor's base
+        # (when it has its own, e.g. on a server) plus the workspace's variables.
+        base = getattr(self.executor, "base_environ", None)
+        current = fingerprint(definition, block.params, environ=task_environ(self._task_env(), base))
         if current is None:
             return False
         changed = st.last_probe_value is not None and current != st.last_probe_value

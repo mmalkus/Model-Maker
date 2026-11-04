@@ -9,18 +9,38 @@ configured on the machine (SSH keys, credential helper, ...).
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class GitError(RuntimeError):
     """A git operation failed -- message is git's own stderr/stdout."""
 
 
+# The environment git runs with, for the current caller, when an
+# application hosts several users in one process (api.py installs one that
+# asks the request's Workspace: its identity, credentials routing, config).
+# It returns the *whole* environment, or None for "this process's".
+_env_resolver: Callable[[], Mapping[str, str] | None] | None = None
+
+
+def set_env_resolver(resolver: Callable[[], Mapping[str, str] | None] | None) -> None:
+    """Install the function _run() asks for git's environment (None removes it)."""
+    global _env_resolver
+    _env_resolver = resolver
+
+
+def _env() -> dict[str, str] | None:
+    resolver = _env_resolver
+    env = resolver() if resolver is not None else None
+    return dict(env) if env is not None else None
+
+
 def _run(args: list[str], cwd: Path, check: bool = True) -> str:
     try:
         result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=30
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=30, env=_env()
         )
     except FileNotFoundError as e:
         raise GitError("git is not installed, or not on PATH") from e

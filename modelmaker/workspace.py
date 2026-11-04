@@ -20,13 +20,20 @@ What a workspace owns:
   nothing else (never this process's os.environ);
 - `cache_dir` (the result cache, recovery snapshot, unsaved builds'
   logs), `projects_dir` (where Save/Load start) and `executor` (where its
-  runs go; None = the process-wide default, runner.EXECUTOR).
+  runs go; None = the process-wide default, runner.EXECUTOR);
+- optionally, for an application hosting several users in one process:
+  `root`, the folder its file browsing, project load and save are confined
+  to (symlinks resolved; None = anywhere, the local app's behaviour);
+  `library_dir`, its own block library folder (None = the process-wide
+  one); and `git_env`, the whole environment git runs with for its
+  projects (None = this process's).
 
 What it deliberately does *not* own -- shared by every workspace in the
-process, and safe to share: the executor's warm worker pool (generic
-spares; each task carries its own environment), the block registry and
-the content-hash-keyed caches of compiled block code, forms and embedded
-definitions, and the block library folder (MODELMAKER_BLOCK_LIBRARY).
+process, and safe to share: the default executor's warm worker pool
+(generic spares; each task carries its own environment), the block
+registry and the content-hash-keyed caches of compiled block code, forms
+and embedded definitions, and -- unless `library_dir` is given -- the
+block library folder (MODELMAKER_BLOCK_LIBRARY).
 """
 
 from __future__ import annotations
@@ -129,8 +136,15 @@ class Workspace:
         executor: Executor | None = None,
         llm_settings: LLMSettingsStore | None = None,
         recovery: bool = True,
+        root: Path | str | None = None,
+        library_dir: Path | str | None = None,
+        git_env: Mapping[str, str] | None = None,
     ) -> None:
         self.id = id
+        # See the module docstring: confinement, own library, git's env.
+        self.root: Path | None = Path(root).expanduser().resolve() if root is not None else None
+        self.library_dir: Path | None = Path(library_dir) if library_dir is not None else None
+        self.git_env: dict[str, str] | None = dict(git_env) if git_env is not None else None
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
         self.projects_dir = (
             Path(projects_dir).expanduser().resolve()
