@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import inspect
-from typing import Callable
+from typing import Any, Callable, Union
 
 from .packet import ColumnRole
+from .signature import BlockSignature
+
+# What the helpers below inspect: a block's static signature (see
+# BlockDefinition.signature -- what every caller in the app passes, so no
+# block code runs to answer them) or, for a caller that already holds one, a
+# live function.
+SignatureLike = Union[BlockSignature, Callable[..., Any]]
 
 # A block function opts into auto-filled target/predicted resolution purely
 # by naming its parameter one of these -- same convention as
@@ -23,21 +30,23 @@ ROLE_PARAM_NAMES: dict[ColumnRole, tuple[str, ...]] = {
 }
 
 
-def accepts_param(fn: Callable, name: str) -> bool:
+def accepts_param(fn: SignatureLike, name: str) -> bool:
+    if isinstance(fn, BlockSignature):
+        return fn.accepts(name)
     try:
         return name in inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
 
 
-def find_target_param(fn: Callable) -> str | None:
+def find_target_param(fn: SignatureLike) -> str | None:
     """Which of TARGET_PARAM_NAMES this function's signature accepts, if
     any -- the name to auto-fill (see packet.resolve_target_column) when the
     block's own params don't already set it."""
     return find_role_param(fn, ColumnRole.TARGET)
 
 
-def find_role_param(fn: Callable, role: ColumnRole) -> str | None:
+def find_role_param(fn: SignatureLike, role: ColumnRole) -> str | None:
     """Which of ROLE_PARAM_NAMES[role] this function's signature accepts, if
     any -- the name to auto-fill (see packet.resolve_role_column) when the
     block's own params don't already set it."""

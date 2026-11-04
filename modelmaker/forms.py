@@ -11,8 +11,6 @@ is listed in `other_params`, for the UI's JSON box."""
 
 from __future__ import annotations
 
-import functools
-import inspect
 import re
 from dataclasses import asdict
 from typing import Any
@@ -20,6 +18,7 @@ from typing import Any
 from .block_library import INJECTED_PARAMS
 from .blocks.base import BlockDefinition, FieldSpec
 from .packet import ColumnRole
+from .signature import UNKNOWN_DEFAULT, BlockSignature
 from .util import ROLE_PARAM_NAMES, find_role_param
 
 COLUMN_NAMES = frozenset({"target", "col", "column", "feature"})
@@ -28,8 +27,10 @@ _AUTO_ROLES = {ColumnRole.TARGET: "target", ColumnRole.PREDICTED: "predicted"}
 
 
 def _base_type(annotation: Any) -> str:
-    """The annotation as a string, without an `| None` (every annotation is
-    a string here: the block modules use `from __future__ import annotations`)."""
+    """The annotation as a string, without an `| None` (annotations are
+    source text here: they come from the block's static signature)."""
+    if annotation is None:
+        return ""
     text = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", str(annotation))
     parts = [p.strip() for p in text.split("|") if p.strip() != "None"]
     return " | ".join(parts)
@@ -62,7 +63,9 @@ def infer_field(key: str, annotation: Any, auto_role: str | None = None) -> Fiel
 
 
 def _jsonable(value: Any) -> Any:
-    if value is inspect.Parameter.empty:
+    # No default, or one that isn't a literal (its value is only known
+    # where the block runs): the field shows as unset.
+    if value is UNKNOWN_DEFAULT:
         return None
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -73,24 +76,30 @@ def _jsonable(value: Any) -> Any:
 
 def block_form(spec: BlockDefinition) -> dict[str, Any]:
     """{"fields": [...], "other_params": [...]} for a block. Each field
-    carries the param's signature default (null if required), so a
-    checkbox or number box can show what an unset param means."""
-    return _block_form(spec.sha, spec.fn, spec.form, tuple(p.name for p in spec.inputs))
+    carries the param's signature default (null if required, or if the
+    default isn't a literal), so a checkbox or number box can show what an
+    unset param means. Built from the static signature: rendering a form
+    never runs block code."""
+    key = (spec.sha, spec.form, tuple(p.name for p in spec.inputs))
+    form = _FORMS.get(key)
+    if form is None:
+        form = _FORMS[key] = _block_form(spec.signature, spec.form, key[2])
+    return form
 
 
 # Keyed on the definition's sha (a definition's form never changes without
 # its sha changing) -- it's asked for on every /api/graph poll.
-@functools.lru_cache(maxsize=None)
-def _block_form(sha: str, fn, form: tuple[FieldSpec, ...], port_names: tuple[str, ...]) -> dict[str, Any]:
+_FORMS: dict[tuple[str, tuple[FieldSpec, ...], tuple[str, ...]], dict[str, Any]] = {}
+
+
+def _block_form(sig: BlockSignature, form: tuple[FieldSpec, ...], port_names: tuple[str, ...]) -> dict[str, Any]:
     auto_roles = {
-        name: _AUTO_ROLES[role] for role in ROLE_PARAM_NAMES if (name := find_role_param(fn, role)) is not None
+        name: _AUTO_ROLES[role] for role in ROLE_PARAM_NAMES if (name := find_role_param(sig, role)) is not None
     }
     params = {
-        name: p
-        for name, p in inspect.signature(fn).parameters.items()
-        if name not in port_names
-        and name not in INJECTED_PARAMS
-        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        p.name: p
+        for p in sig.params
+        if p.name not in port_names and p.name not in INJECTED_PARAMS and not p.variadic
     }
     fields = list(form)
     declared = {f.key for f in fields}
@@ -105,7 +114,11 @@ def _block_form(sha: str, fn, form: tuple[FieldSpec, ...], port_names: tuple[str
             fields.append(field)
     return {
         "fields": [
-            {**asdict(f), "options": list(f.options), "default": _jsonable(params[f.key].default)} for f in fields
+            {**asdict(f), "options": list(f.options), "default": _jsonable(_default(params.get(f.key)))} for f in fields
         ],
         "other_params": other,
     }
+
+
+def _default(p: Any) -> Any:
+    return p.default if p is not None and p.has_default else None

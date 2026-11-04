@@ -21,6 +21,7 @@ from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_uniq
 from .execution import Executor, Task, TaskCancelled
 from .execution.local import LocalExecutor
 from .worker_pool import WorkerPool, pool_size_from_env
+from .signature import SignatureError
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 Status = Literal["grey", "green", "orange", "red", "running"]
@@ -165,9 +166,12 @@ def _try_resolve(block: BlockInstance) -> BlockDefinition | None:
 
 
 def _accepts(definition: BlockDefinition, name: str) -> bool:
+    """Whether the block's function names a parameter `name` -- from its
+    static signature (see BlockDefinition.signature): this process never
+    defines a library block's function just to look at it."""
     try:
-        return accepts_param(definition.fn, name)
-    except Exception:  # noqa: BLE001 -- a library block whose code doesn't define: it fails when run
+        return accepts_param(definition.signature, name)
+    except SignatureError:  # code without its def: the block fails when run
         return False
 
 
@@ -204,7 +208,11 @@ def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
         return None
     if _accepts(definition, "output_dir") or _accepts(definition, "block_id"):
         return None
-    if any(find_role_param(definition.fn, role) for role in ROLE_PARAM_NAMES):
+    try:
+        sig = definition.signature
+    except SignatureError:
+        return None
+    if any(find_role_param(sig, role) for role in ROLE_PARAM_NAMES):
         return None
     return definition
 
@@ -627,7 +635,7 @@ class Runner:
                 port: (p.data if isinstance(p, DataFramePacket) else p) for port, p in input_packets.items()
             }
             definition = block.resolve()
-            fn = definition.fn
+            sig = definition.signature
             call_kwargs = dict(plain_inputs, **{k: v for k, v in block.params.items() if k not in SOURCE_PARAMS})
             # Dynamic defaults: for every role a block's signature opts into
             # (target via target/target_col, predicted via
@@ -639,12 +647,12 @@ class Runner:
             # always wins (see the `not in` check below).
             input_schema_metas = [p.schema_meta for p in input_packets.values() if isinstance(p, DataFramePacket)]
             for role in ROLE_PARAM_NAMES:
-                role_param = find_role_param(fn, role)
+                role_param = find_role_param(sig, role)
                 if role_param is not None and role_param not in block.params:
                     resolved = resolve_role_column(input_schema_metas, role)
                     if resolved is not None:
                         call_kwargs[role_param] = resolved
-            if block.block_type == "output" and accepts_param(fn, "output_dir"):
+            if block.block_type == "output" and accepts_param(sig, "output_dir"):
                 call_kwargs["output_dir"] = self.output_dir
             # Not restricted to output blocks (unlike output_dir above): a
             # stochastic "standard" block (see blocks/stochastic.py) opts
@@ -654,7 +662,7 @@ class Runner:
             # No existing block names a param literally "block_id" other
             # than the output ones already relying on this, so widening it
             # here changes nothing for them.
-            if accepts_param(fn, "block_id"):
+            if accepts_param(sig, "block_id"):
                 call_kwargs["block_id"] = block_id
             # Sample mode truncates at the source, so every downstream
             # block sees the sample without needing to know it exists. The
@@ -796,6 +804,12 @@ class Runner:
             raise RuntimeError(f"{first_err}{suffix}")
         return results
 
+    @property
+    def executor(self) -> Executor:
+        """Where this runner's tasks run: the one it was given, else the
+        process-wide default (read at each use, so it can be swapped)."""
+        return self._executor or EXECUTOR
+
     def _run_tasks(
         self, active_ids: list[str], tasks: dict[Any, tuple[str, tuple[Any, ...]]], max_workers: int
     ) -> tuple[dict[Any, Any], dict[Any, str]]:
@@ -812,7 +826,7 @@ class Runner:
         -- raising RunCancelled here. A worker that dies without reporting
         (segfault, OS OOM-kill) becomes an error entry, never a hang, and so
         does a result the executor refuses to accept (not data, too big)."""
-        executor = self._executor or EXECUTOR
+        executor = self.executor
         cancel_event = threading.Event()
         results: dict[Any, Any] = {}
         errors: dict[Any, str] = {}
@@ -1008,7 +1022,7 @@ class Runner:
         for rid in region:
             rblock = plan.graph.blocks[rid]
             rdef = rblock.resolve()
-            fn = rdef.fn
+            sig = rdef.signature
             kwargs: dict[str, Any] = dict(rblock.params)
             chain_inputs: dict[str, tuple[str, int]] = {}
             input_schema_metas: list[dict] = []
@@ -1029,14 +1043,14 @@ class Runner:
                     # like _gather_inputs does for an ordinary block.
                     kwargs[port] = value.data if isinstance(value, DataFramePacket) else value
             for role in ROLE_PARAM_NAMES:
-                role_param = find_role_param(fn, role)
+                role_param = find_role_param(sig, role)
                 if role_param is not None and role_param not in kwargs:
                     resolved = resolve_role_column(input_schema_metas, role)
                     if resolved is not None:
                         kwargs[role_param] = resolved
-            if accepts_param(fn, "block_id"):
+            if accepts_param(sig, "block_id"):
                 kwargs["block_id"] = rid
-            if rblock.block_type == "output" and accepts_param(fn, "output_dir"):
+            if rblock.block_type == "output" and accepts_param(sig, "output_dir"):
                 kwargs["output_dir"] = self.output_dir
             steps.append(
                 {
@@ -1046,7 +1060,7 @@ class Runner:
                     "kwargs": kwargs,
                     "chain_inputs": chain_inputs,
                     "n_outputs": len(rblock.outputs),
-                    "wants_iteration_index": accepts_param(fn, "_iteration_index"),
+                    "wants_iteration_index": accepts_param(sig, "_iteration_index"),
                 }
             )
 
@@ -1124,9 +1138,9 @@ class Runner:
                 # Same output_dir/block_id auto-fill run_block does for an
                 # ordinary output block (see accepts_param) -- a sink step
                 # never goes through run_block, so it has to happen here.
-                if accepts_param(definition.fn, "output_dir"):
+                if _accepts(definition, "output_dir"):
                     kwargs["output_dir"] = self.output_dir
-                if accepts_param(definition.fn, "block_id"):
+                if _accepts(definition, "block_id"):
                     kwargs["block_id"] = bid
             chain_inputs: dict[str, str] = {}
             input_metas: dict[str, dict[str, ColumnMeta]] = {}

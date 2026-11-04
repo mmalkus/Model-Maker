@@ -488,7 +488,7 @@ def import_preview(files: list[tuple[str, str]]) -> list[dict[str, Any]]:
     total = 0
     for name, text in files:
         parsed = bl.parse_source(text, name)
-        bl.validate(parsed, set(), define=False)
+        bl.validate(parsed, set(), signature=False)
         blocks = []
         for d in parsed.definitions:
             total += 1

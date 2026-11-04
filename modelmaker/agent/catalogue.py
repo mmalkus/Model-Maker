@@ -5,13 +5,13 @@ there's no second list to keep in sync."""
 
 from __future__ import annotations
 
-import inspect
 import re
 from typing import Any
 
 from ..block_library import INJECTED_PARAMS, load_builtin
 from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
 from ..packet import ColumnRole
+from ..signature import ParamSpec
 from ..util import ROLE_PARAM_NAMES, find_role_param
 
 __all__ = ["INJECTED_PARAMS"]  # re-exported: the runner-injected params, never shown to the model
@@ -162,11 +162,8 @@ def _first_sentence(summary: str, limit: int = 220) -> str:
     return sentence
 
 
-def _annotation(param: inspect.Parameter) -> str | None:
-    ann = param.annotation
-    if ann is inspect.Parameter.empty:
-        return None
-    return ann if isinstance(ann, str) else getattr(ann, "__name__", str(ann))
+def _annotation(param: ParamSpec) -> str | None:
+    return param.annotation
 
 
 def _jsonable(value: Any) -> Any:
@@ -182,24 +179,30 @@ def _jsonable(value: Any) -> Any:
 def block_params(spec: BlockDefinition) -> list[dict[str, Any]]:
     """The block's configurable parameters: everything in its function's
     signature except the dataframe/value arguments its input ports feed
-    and the runner-injected ones."""
+    and the runner-injected ones. Read from the static signature (see
+    BlockDefinition.signature), so listing a library block runs none of
+    its code; a default that isn't a literal is given as its source text."""
     port_names = {p.name for p in spec.inputs}
+    sig = spec.signature
     role_bound = {
         role_param: role.value
         for role in ROLE_PARAM_NAMES
-        if (role_param := find_role_param(spec.fn, role)) is not None
+        if (role_param := find_role_param(sig, role)) is not None
     }
     out = []
-    for name, param in inspect.signature(spec.fn).parameters.items():
+    for param in sig.params:
+        name = param.name
         if name in port_names or name in INJECTED_PARAMS:
             continue
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+        if param.variadic:
             continue
         entry: dict[str, Any] = {"name": name, "type": _annotation(param)}
-        if param.default is inspect.Parameter.empty:
+        if not param.has_default:
             entry["required"] = True
-        else:
+        elif param.literal_default:
             entry["default"] = _jsonable(param.default)
+        else:
+            entry["default_expr"] = param.default_source
         if name in role_bound:
             entry["auto_fills_from_role"] = role_bound[name]
         out.append(entry)

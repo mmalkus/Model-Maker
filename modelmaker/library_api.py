@@ -236,8 +236,9 @@ def _value_preview(value: Any) -> Any:
 @router.post("/api/library/files/{name:path}/try")
 def try_library_file(name: str, req: TryRequest) -> dict[str, Any]:
     """Try it: run the file's examples, or call one block on a canvas
-    block's output. Runs in a separate process with a timeout; the result
-    is shown, never sent anywhere else."""
+    block's output. Runs as a task on the session's executor (a separate
+    process, with a timeout; this process never executes the code), and
+    the result is shown, never sent anywhere else."""
     if req.source is not None:
         source = req.source
     else:
@@ -245,15 +246,15 @@ def try_library_file(name: str, req: TryRequest) -> dict[str, Any]:
             source = store.get_file(name).source
         except store.LibraryError as e:
             raise HTTPException(404, str(e))
+    session = _session()
     if req.block is None:
-        return {"examples": bl.run_examples(source, name, req.blocks)}
+        return {"examples": bl.run_examples(source, name, req.blocks, executor=session.runner.executor)}
     parsed = bl.parse_source(source, name)
     d = next((x for x in parsed.definitions if x.id == req.block), None)
     if d is None:
         raise HTTPException(400, f"{name} has no block {req.block!r}")
     kwargs: dict[str, Any] = dict(req.params)
     if req.input_block is not None:
-        session = _session()
         st = session.runner.state.get(req.input_block)
         entry = session.runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
         if entry is None:
@@ -263,7 +264,7 @@ def try_library_file(name: str, req: TryRequest) -> dict[str, Any]:
         if port is None:
             raise HTTPException(400, f"{d.id} has no input port to feed")
         kwargs[port] = value.data if isinstance(value, DataFramePacket) else value
-    ok, result = bl.try_call(d, kwargs)
+    ok, result = bl.try_call(d, kwargs, executor=session.runner.executor)
     if not ok:
         return {"ok": False, "error": result}
     outputs = result if isinstance(result, tuple) else (result,)

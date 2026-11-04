@@ -77,3 +77,23 @@ def block_library_dir(tmp_path, monkeypatch):
     path = tmp_path / "block-library"
     monkeypatch.setenv("MODELMAKER_BLOCK_LIBRARY", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_block_code_in_this_process(monkeypatch):
+    """The API process never executes library block code: only task
+    processes do (see block_library.exec_block_source, which already refuses
+    here). This also catches a call whose error some caller swallowed --
+    any attempt in a test's own process fails that test."""
+    from modelmaker import block_library
+
+    attempts: list[str] = []
+    real = block_library.exec_block_source
+
+    def spy(source: str, filename: str, module_name: str):
+        attempts.append(filename)
+        return real(source, filename, module_name)
+
+    monkeypatch.setattr(block_library, "exec_block_source", spy)
+    yield attempts
+    assert not attempts, f"block code was executed in the test (API) process: {attempts}"
