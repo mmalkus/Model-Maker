@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
 from . import capabilities as caps
+from . import features as feats
 from .block_library import definition_from_embedded
 from .blocks.base import BLOCK_REGISTRY, BlockDefinition
 from .cache import CacheStore
@@ -85,7 +86,11 @@ class ProjectSession:
     datasets.py and capabilities.py): a block that needs a capability it
     doesn't grant can't be placed, loaded, recovered or run here
     (capabilities.CapabilityError, a ValueError, names what to use
-    instead)."""
+    instead).
+
+    `features` is the workspace's feature set (see features.py): without
+    `custom_blocks`, a library block (one carrying its own code) can't be
+    placed, switched to, loaded or recovered here."""
 
     def __init__(
         self,
@@ -95,7 +100,9 @@ class ProjectSession:
         executor: Executor | None = None,
         task_env: Callable[[], Mapping[str, str]] | None = None,
         data: DataAccess | None = None,
+        features: frozenset[str] | None = None,
     ) -> None:
+        self.features: frozenset[str] = features if features is not None else feats.LOCAL
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
         self.executor = executor
         self.task_env = task_env
@@ -144,6 +151,9 @@ class ProjectSession:
         allow, naming each and what to use instead."""
         problems = []
         for block in graph.blocks.values():
+            if block.definition is not None and feats.CUSTOM_BLOCKS not in self.features:
+                problems.append(f"block '{block.name}' carries its own code, and custom block code isn't available here")
+                continue
             try:
                 definition = block.resolve()
             except KeyError:
@@ -153,6 +163,12 @@ class ProjectSession:
                 problems.append(f"block '{block.name}': {caps.refusal(definition, needs)}")
         if problems:
             raise caps.CapabilityError("this project can't be opened here -- " + "; ".join(problems))
+
+    def _check_custom_code(self) -> None:
+        if feats.CUSTOM_BLOCKS not in self.features:
+            # A CapabilityError (a ValueError), so every caller's existing
+            # handling turns it into the same clear refusal.
+            raise caps.CapabilityError(feats.refusal(feats.CUSTOM_BLOCKS))
 
     def _current_task_env(self) -> Mapping[str, str]:
         # Indirect, so assigning `task_env` later reaches the live runner.
@@ -404,6 +420,7 @@ class ProjectSession:
         its `definition` (a BlockDefinition, or the embedded dict form),
         which the instance keeps its own copy of."""
         if definition is not None:
+            self._check_custom_code()
             embedded = definition.embedded() if isinstance(definition, BlockDefinition) else dict(definition)
             resolved = definition_from_embedded(embedded)
             category = resolved.id
@@ -449,6 +466,7 @@ class ProjectSession:
             resolved = BLOCK_REGISTRY[block.category]
             block.definition, block.library_ref, block.builtin_sha = None, None, resolved.sha
         else:
+            self._check_custom_code()
             embedded = definition.embedded() if isinstance(definition, BlockDefinition) else dict(definition)
             resolved = definition_from_embedded(embedded)
             caps.check(resolved, self.capabilities)

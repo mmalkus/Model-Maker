@@ -35,6 +35,12 @@ What a workspace owns:
   `capabilities` is given explicitly. Blocks needing a capability the
   workspace lacks are hidden from its palette and AI catalogue and refused
   when placed, loaded or run.
+- `features` -- which of the app's own tools its user may use (see
+  features.py: custom block code, the AI builder, AI drafting, LLM
+  settings, env vars, git and git remotes). None, the default, offers
+  all of them, as the local app always has; an embedding application
+  can switch some off (restricted mode), and the API then refuses them
+  and the UI hides them.
 
 What it deliberately does *not* own -- shared by every workspace in the
 process, and safe to share: the default executor's warm worker pool
@@ -55,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 from .agent.build import LLMChoice
 from .agent.controller import BuildController
 from .agent.loop import AgentLoop, make_loop
+from . import features as feature_flags
 from .datasets import DataAccess, DatasetProvider, ExportSink, SourceProvider
 from .llm import LLMProvider, get_provider
 from .llm.settings import LLMSettingsStore
@@ -152,8 +159,10 @@ class Workspace:
         datasets: DatasetProvider | None = None,
         sources: SourceProvider | None = None,
         exports: ExportSink | None = None,
+        features: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.id = id
+        self.features: frozenset[str] = feature_flags.resolve(features)
         self.data = DataAccess.make(capabilities, datasets=datasets, sources=sources, exports=exports)
         # See the module docstring: confinement, own library, git's env.
         self.root: Path | None = Path(root).expanduser().resolve() if root is not None else None
@@ -190,6 +199,7 @@ class Workspace:
             executor=self.executor,
             task_env=self.env_vars.snapshot,
             data=self.data,
+            features=self.features,
         )
 
     @property
@@ -209,6 +219,7 @@ class Workspace:
             session.task_env = self.env_vars.snapshot
         if session.data != self.data:
             session.data = self.data
+        session.features = self.features
         self._session = session
 
     # ---- LLMs ------------------------------------------------------------
