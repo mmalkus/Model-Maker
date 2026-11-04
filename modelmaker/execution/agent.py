@@ -3,6 +3,7 @@
     python -m modelmaker.execution.agent --fd N          # an inherited, connected socket
     python -m modelmaker.execution.agent --listen PATH   # accept one connection on PATH
         [--socket-mode 0660]                             # who may connect (default 0600)
+        [--task-memory-mb N] [--task-threads N] [--total-threads N]   # limits (default: none)
     modelmaker-runner ...                                 # the same, as a console script
 
 A long-lived process on the far side of the execution boundary. It serves
@@ -32,7 +33,10 @@ Lifecycle:
 - `cancel` stops that task's process (LocalExecutor's Stop: terminate,
   then kill) and answers with a cancelled result once it's gone;
 - a task process that dies without reporting is a crashed result; one
-  over its `wall_seconds` is stopped and fails saying so;
+  over its `wall_seconds` is stopped and fails saying so, and one over its
+  `memory_mb` or `threads` (limits.py) is killed and crashes saying so --
+  the stricter of the client's limit and the agent's own (--task-memory-mb,
+  --task-threads), which the client can lower but not raise;
 - `ping` is answered with `pong` (the client's heartbeat);
 - `bye`, the client closing the socket, SIGTERM or SIGINT end the agent:
   every running task process is stopped and the spares discarded first.
@@ -53,6 +57,7 @@ from typing import Any
 
 from . import protocol, wire
 from .base import Task, TaskCancelled
+from .limits import TaskLimits, check_limit
 from .local import LocalExecutor
 from .protocol import ProtocolError
 
@@ -136,14 +141,14 @@ class Agent:
             if task_id in self._tasks:
                 raise ProtocolError(f"task {task_id} is already running")
         try:
-            entry, env, cwd, wall, result_bytes = _task_fields(fields, ENTRY_POINTS)
+            entry, env, cwd, wall, result_bytes, limits = _task_fields(fields, ENTRY_POINTS)
         except ValueError as e:
             self._send_result(task_id, False, f"task rejected: {e}")
             return
         cancel = threading.Event()
         thread = threading.Thread(
             target=self._run,
-            args=(task_id, Task(entry, wire.EncodedArgs(bytes(frame)), env), cancel, cwd, wall, result_bytes),
+            args=(task_id, Task(entry, wire.EncodedArgs(bytes(frame)), env), cancel, cwd, wall, result_bytes, limits),
             name=f"task-{task_id}",
             daemon=True,
         )
@@ -152,13 +157,20 @@ class Agent:
         thread.start()
 
     def _run(
-        self, task_id: int, task: Task, cancel: threading.Event, cwd: str | None, wall: float | None, result_bytes: int | None
+        self,
+        task_id: int,
+        task: Task,
+        cancel: threading.Event,
+        cwd: str | None,
+        wall: float | None,
+        result_bytes: int | None,
+        limits: TaskLimits | None = None,
     ) -> None:
         try:
             handle = self.executor.submit(task)
             try:
                 (result,) = self.executor.wait(
-                    [handle], cancel, 1, max_result_bytes=result_bytes, task_timeout=wall, cwd=cwd
+                    [handle], cancel, 1, max_result_bytes=result_bytes, task_timeout=wall, cwd=cwd, limits=limits
                 )
             except TaskCancelled:
                 self._send_result(task_id, False, "cancelled", cancelled=True)
@@ -203,7 +215,9 @@ class Agent:
             self.sock.close()
 
 
-def _task_fields(fields: dict[str, Any], entry_points: frozenset[str]) -> tuple[str, dict[str, str] | None, str | None, float | None, int | None]:
+def _task_fields(
+    fields: dict[str, Any], entry_points: frozenset[str]
+) -> tuple[str, dict[str, str] | None, str | None, float | None, int | None, TaskLimits]:
     entry = fields.get("entry")
     if entry not in entry_points:
         raise ValueError(f"unknown entry point {entry!r}")
@@ -230,20 +244,24 @@ def _task_fields(fields: dict[str, Any], entry_points: frozenset[str]) -> tuple[
     result_bytes = limits.get("result_bytes")
     if result_bytes is not None and (type(result_bytes) is not int or result_bytes <= 0):
         raise ValueError("bad result_bytes")
-    return entry, env, cwd, (float(wall) if wall is not None else None), result_bytes
+    task_limits = TaskLimits(
+        memory_mb=check_limit(limits.get("memory_mb"), "memory_mb"), threads=check_limit(limits.get("threads"), "threads")
+    )
+    return entry, env, cwd, (float(wall) if wall is not None else None), result_bytes, task_limits
 
 
 # ---- the process ---------------------------------------------------------
 
 
-def make_executor(warm_workers: int | None = None) -> LocalExecutor:
+def make_executor(warm_workers: int | None = None, limits: TaskLimits | None = None) -> LocalExecutor:
     """The agent's own executor: this process's environment and cwd are the
     base of every task (no WorkerLaunch: the agent is already what a
-    deployment started as the right user, in the right place)."""
+    deployment started as the right user, in the right place). `limits`:
+    every task's, whatever its client asks (a client can only lower them)."""
     from ..worker_pool import WorkerPool, pool_size_from_env
 
     size = pool_size_from_env() if warm_workers is None else warm_workers
-    return LocalExecutor(WorkerPool(multiprocessing.get_context("spawn"), size), raw_results=True)
+    return LocalExecutor(WorkerPool(multiprocessing.get_context("spawn"), size), raw_results=True, limits=limits)
 
 
 def _accept_one(path: str, mode: int = 0o600) -> socket.socket:
@@ -283,6 +301,16 @@ def _socket_mode(text: str) -> int:
     return mode
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive: {text!r}")
+    return value
+
+
 def _on_signal(signum: int, frame: Any) -> None:
     raise SystemExit(128 + signum)
 
@@ -300,6 +328,24 @@ def main(argv: list[str] | None = None) -> int:
         default=0o600,
         help="with --listen: the socket's permissions, in octal (default 0600: only this user may connect)",
     )
+    parser.add_argument(
+        "--task-memory-mb",
+        type=_positive_int,
+        default=None,
+        help="each task's memory limit: private resident memory of its processes, in MB (default: none)",
+    )
+    parser.add_argument(
+        "--task-threads",
+        type=_positive_int,
+        default=None,
+        help="each task's limit on threads and processes, together (default: none)",
+    )
+    parser.add_argument(
+        "--total-threads",
+        type=_positive_int,
+        default=None,
+        help="RLIMIT_NPROC for every task process: threads and processes of this user, all together (default: none)",
+    )
     args = parser.parse_args(argv)
     if args.socket_mode != 0o600 and args.listen is None:
         parser.error("--socket-mode needs --listen")
@@ -315,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _on_signal)
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, _on_signal)
-    agent = Agent(sock, make_executor(args.warm_workers))
+    limits = TaskLimits(memory_mb=args.task_memory_mb, threads=args.task_threads, total_threads=args.total_threads)
+    agent = Agent(sock, make_executor(args.warm_workers, limits))
     try:
         agent.serve()
     except SystemExit:

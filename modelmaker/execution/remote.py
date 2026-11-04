@@ -43,6 +43,7 @@ from typing import Any
 from . import protocol, wire
 from .base import Task, TaskCancelled, TaskHandle, TaskResult
 from .env import _secret_test, scrubbed_environ, task_environ
+from .limits import TaskLimits
 from .protocol import ProtocolError
 
 POLL_INTERVAL = 0.05
@@ -121,10 +122,12 @@ def agent_command(
     cwd: str | None = None,
     python: str | None = None,
     socket_mode: int | None = None,
+    limits: TaskLimits | None = None,
 ) -> list[str]:
     """argv that runs a runner agent serving the socket on `fd`, or the
     one connection it accepts on `listen` (created with `socket_mode`,
-    default 0o600)."""
+    default 0o600), enforcing `limits` on every task (see limits.py) --
+    whatever its client asks for."""
     flags = list(getattr(subprocess, "_args_from_interpreter_flags", list)())
     if "-P" not in flags:
         flags.append("-P")
@@ -136,6 +139,14 @@ def agent_command(
         cmd += ["--cwd", cwd]
     if socket_mode is not None:
         cmd += ["--socket-mode", f"{socket_mode:04o}"]
+    if limits is not None:
+        for flag, value in (
+            ("--task-memory-mb", limits.memory_mb),
+            ("--task-threads", limits.threads),
+            ("--total-threads", limits.total_threads),
+        ):
+            if value is not None:
+                cmd += [flag, str(value)]
     return cmd
 
 
@@ -146,6 +157,7 @@ def spawn_agent(
     cwd: str | None = None,
     warm_workers: int | None = None,
     python: str | None = None,
+    limits: TaskLimits | None = None,
 ) -> AgentLink:
     """Start a runner agent as a child process over a socketpair -- no
     socket in the filesystem for anything else to connect to. The agent
@@ -153,11 +165,11 @@ def spawn_agent(
     another uid), with `environ` (default: this process's) scrubbed of
     secrets, in its own session (so killing it kills its task processes
     too), and enters `cwd` itself once started (after the prefix took
-    effect)."""
+    effect). `limits`: the agent's own, on every task (agent_command)."""
     parent, child = socket.socketpair()
     try:
         process = subprocess.Popen(
-            [*command_prefix, *agent_command(child.fileno(), warm_workers=warm_workers, cwd=cwd, python=python)],
+            [*command_prefix, *agent_command(child.fileno(), warm_workers=warm_workers, cwd=cwd, python=python, limits=limits)],
             env=scrubbed_environ(environ),
             pass_fds=(child.fileno(),),
             stdin=subprocess.DEVNULL,
@@ -326,6 +338,10 @@ class RemoteExecutor:
     - `max_result_bytes`, `task_timeout`: as for LocalExecutor; both travel
       with each task (the agent enforces them) and the cap is enforced here
       again on receipt. Read at each use, so they can be changed.
+    - `limits`: each task's memory and thread limits (limits.py), sent
+      with each task as `memory_mb` and `threads`; the agent applies the
+      stricter of these and its own. (`total_threads` is the agent's
+      alone: see agent_command.)
     - `base_environ`: the environment the agent's tasks start from, if
       known (see LocalExecutor.base_environ); also supplies the secret
       denylist applied to each task's variables before they're sent.
@@ -340,6 +356,7 @@ class RemoteExecutor:
         *,
         max_result_bytes: int | None = None,
         task_timeout: float | None = None,
+        limits: TaskLimits | None = None,
         base_environ: Mapping[str, str] | None = None,
         local_context: bool = False,
         connect_timeout: float = CONNECT_TIMEOUT,
@@ -350,6 +367,7 @@ class RemoteExecutor:
         self._connect = connect or spawn_agent
         self.max_result_bytes = max_result_bytes
         self.task_timeout = task_timeout or None
+        self.limits = limits or TaskLimits()
         self.base_environ = dict(base_environ) if base_environ is not None else None
         self.local_context = local_context
         self.connect_timeout = connect_timeout
@@ -482,7 +500,12 @@ class RemoteExecutor:
             "entry": task.entry,
             "env": env,
             "cwd": cwd,
-            "limits": {"wall_seconds": self.task_timeout or None, "result_bytes": max_bytes},
+            "limits": {
+                "wall_seconds": self.task_timeout or None,
+                "result_bytes": max_bytes,
+                **({"memory_mb": self.limits.memory_mb} if self.limits.memory_mb is not None else {}),
+                **({"threads": self.limits.threads} if self.limits.threads is not None else {}),
+            },
         }
         try:
             return tid, wire.encode_frame(fields, tuple(task.args), max_bytes=wire.DEFAULT_MAX_BYTES)

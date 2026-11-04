@@ -181,9 +181,15 @@ def worker_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
         conn.send_bytes(READY)
     modules_before = set(sys.modules)
     try:
-        entry_name, args, env, cwd = conn.recv()  # from the parent: trusted
+        entry_name, args, env, cwd, *rest = conn.recv()  # from the parent: trusted
     except (EOFError, OSError):
         return
+    if rest and rest[0]:
+        # Per-task limits (execution/limits.py): this process's own group,
+        # the rlimit backstops. Before anything of the task's runs.
+        from .execution.limits import apply_in_child
+
+        apply_in_child(rest[0])
     os.environ.clear()
     os.environ.update(env)
     os.chdir(cwd)
@@ -369,17 +375,25 @@ class Worker:
         return self._ready
 
     def send_task(
-        self, entry_name: str, args: Any, env: Mapping[str, str] | None = None, cwd: str | None = None
+        self,
+        entry_name: str,
+        args: Any,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        limits: Mapping[str, int] | None = None,
     ) -> None:
         """Hand this worker its one task, with the environment it runs in:
         this process's current one minus the secrets, plus the task's own
         variables (`env`, see execution.base.Task) -- also minus the
         secrets. With a WorkerLaunch, its `environ` and `cwd` stand in for
         this process's; an explicit `cwd` stands in for both. `args` is the
-        args tuple, or an execution.wire.EncodedArgs the worker decodes."""
+        args tuple, or an execution.wire.EncodedArgs the worker decodes.
+        `limits`: what the task process applies to itself before it runs
+        the task (execution.limits.TaskLimits.child_fields), if any."""
         if cwd is None:
             cwd = self.launch.cwd if self.launch.cwd is not None else os.getcwd()
-        self.conn.send((entry_name, args, task_environ(env, self.launch.environ), cwd))
+        message = (entry_name, args, task_environ(env, self.launch.environ), cwd)
+        self.conn.send((*message, dict(limits)) if limits else message)
 
     def recv_frame(self, max_bytes: int) -> bytes:
         """The task's result frame (raw bytes, for execution/wire.py to
