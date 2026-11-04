@@ -17,8 +17,10 @@ A block file is a plain Python module:
     def _helper(...): ...          # private: shared code, not a block
     def _example_my_block(): ...   # optional self-check, run on request
 
-`BLOCKS` is read with ast.literal_eval and never executed, so listing a
-library or previewing an import runs no code. See docs/block-authoring.md
+`BLOCKS` is read with ast.literal_eval and never executed, and each
+block's signature is read from the AST (see signature.py), so listing,
+validating, placing or compiling a block runs none of its code -- that
+happens only in a task process (see exec_block_source). See docs/block-authoring.md
 for every key; `validate` below checks them all.
 """
 

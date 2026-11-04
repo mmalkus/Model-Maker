@@ -2,8 +2,8 @@
 stochastic-engine-proposal.md S2/S8). A fitted distribution is a plain
 JSON-shaped dict, never a pickled scipy object -- same "model" port
 convention as blocks/modelling.py -- so it's inspectable over the API's
-generic /value endpoint and travels through the normal pickle cache without
-any special handling.
+generic /value endpoint and travels through the normal result cache (Arrow/JSON
+frames, see cache.py) without any special handling.
 
 Two shapes exist:
   {"kind": "distribution", "family": "lognorm", "params": {...}, ...}

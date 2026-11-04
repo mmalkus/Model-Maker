@@ -119,12 +119,15 @@ def test_warm_spares_are_used_and_learn_imports():
         while not pool._spares[0].is_ready() and time.monotonic() < deadline:
             time.sleep(0.05)
         spare = pool._spares[0]
-        code = "def uses_csv():\n    import csv, json\n    return 'ok'\n"
+        # A stdlib module nothing preloads on any supported Python (csv, for
+        # one, is already imported by importlib.metadata on 3.11), so it can
+        # only show up in the learned list because the block imported it.
+        code = "def uses_colorsys():\n    import colorsys\n    return 'ok'\n"
         (result,) = ex.wait([ex.submit(_call(code))], threading.Event())
         assert result.ok and result.value == "ok"
         assert spare not in pool._spares  # it was taken, and replaced
         assert len(pool._spares) == 1
-        assert "csv" in pool._learned
+        assert "colorsys" in pool._learned
     finally:
         ex.close()
 

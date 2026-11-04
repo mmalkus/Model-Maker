@@ -43,8 +43,11 @@ def _check_file(path: Path, taken: set[str], run: bool, out) -> int:
     return failures
 
 
-def check_blocks(directory: Path | None, run_examples: bool = True, out=sys.stdout) -> int:
-    """The number of failing files/blocks (0 means all good)."""
+def check_blocks(directory: Path | None, run_examples: bool = True, out=None) -> int:
+    """The number of failing files/blocks (0 means all good). Examples run
+    as tasks through the executor (see block_library.run_examples), never
+    in this process. `out` defaults to sys.stdout as it is at call time."""
+    out = out if out is not None else sys.stdout
     failures = 0
     taken = set(BLOCK_REGISTRY)
     if directory is None:

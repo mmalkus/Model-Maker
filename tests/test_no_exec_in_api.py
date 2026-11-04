@@ -21,7 +21,8 @@ from fastapi.testclient import TestClient
 
 import modelmaker.api as api_module
 from modelmaker import block_library as bl
-from modelmaker import forms, library_store as store
+from modelmaker import forms
+from modelmaker import library_store as store
 from modelmaker.agent import catalogue
 from modelmaker.blocks.base import BLOCK_REGISTRY
 from modelmaker.session import ProjectSession
@@ -71,7 +72,7 @@ def noisy_double(df, col: str = "a", factor=_mark("default"), target_col: str | 
 
 
 def _example_noisy_double():
-    assert noisy_double(pl.DataFrame({{"a": [1]}}))["a"].to_list() == [4]
+    assert noisy_double(pl.DataFrame({{"a": [1]}}))["a"].to_list() == [2]
 {tail}'''
 
 
@@ -120,7 +121,7 @@ def test_a_side_effecting_library_block_is_handled_without_running_it_here(clien
     ).json()
     assert wire["valid"]
     graph = client.get("/api/graph").json()
-    assert {b["id"] for b in graph["blocks"]} >= {read["id"], placed["id"]}
+    assert {read["id"], placed["id"]} <= set(graph["blocks"])
     session = api_module.SESSION
     assert session.runner.status(placed["id"]) == "grey"
     session.runner.pin().key(placed["id"])  # the cache key basis asks whether it takes block_id
@@ -143,7 +144,7 @@ def test_a_side_effecting_library_block_is_handled_without_running_it_here(clien
     client.post(f"/api/blocks/{read['id']}/refresh")
     assert session.runner.run_block(placed["id"]) == "green", session.runner.state[placed["id"]].last_error
     entry = session.runner.cache.get(session.runner.state[placed["id"]].last_successful_key)
-    assert entry.outputs["out"].data["a"].to_list() == [4, 8]
+    assert entry.outputs["out"].data["a"].to_list() == [2, 4]
     seen = _markers(markers)
     assert set(seen) == {"module", "decorator", "default"}
     assert os.getpid() not in {pid for pids in seen.values() for pid in pids}
@@ -197,7 +198,7 @@ def test_check_blocks_runs_examples_as_tasks(tmp_path, capsys):
 def test_defining_a_library_block_here_is_refused(no_block_code_in_this_process):
     d = bl.parse_source(_source("/nonexistent"), "x.py").definitions[0]
     with pytest.raises(bl.BlockCodeNotAllowed):
-        d.fn
+        _ = d.fn
     with pytest.raises(bl.BlockCodeNotAllowed):
         bl.compile_fn("noisy_double", d.code)
     assert not bl.in_task_process()

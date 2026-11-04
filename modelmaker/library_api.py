@@ -157,8 +157,8 @@ class CheckRequest(BaseModel):
 @router.post("/api/library/check")
 def check_source(req: CheckRequest) -> dict[str, Any]:
     """Parse and validate unsaved source -- the editor's live checklist.
-    Defines the functions (to check forms against signatures) but never
-    calls them."""
+    Checks forms against each function's signature as read from the AST
+    -- nothing in the source is executed."""
     taken = set(BLOCK_REGISTRY) | {d.id for f in store.list_files() if f.name != req.name for d in f.parsed.definitions}
     parsed = bl.validate(bl.parse_source(req.source, req.name), taken)
     return {
