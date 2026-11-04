@@ -154,6 +154,8 @@ parameters the app fills in (`output_dir`, `block_id`, role params such as
 | `display` | Show the block's result right on its canvas node: `"table"`, `"kpi"` or `"value"`. See below. |
 | `renamed` | `{"old_param": "new_param"}`. **Update** carries the old value over. |
 | `renamed_ports` | `{"old_port": "new_port"}`. **Update** keeps the wires connected. |
+| `capabilities` | What the block needs the workspace to allow, beyond pure computation: `"filesystem"`, `"datasets"`, `"sources"`, `"exports"`. See below. Field kinds add their own. |
+| `use_instead` | A block id to suggest when the workspace doesn't allow this one, e.g. `"read_dataset"` for a block that reads a path. |
 
 ### Port flags
 
@@ -178,7 +180,7 @@ parameters the app fills in (`output_dir`, `block_id`, role params such as
 
 `text`, `number` (`step`), `select` (`options`), `column` (`auto_role`:
 `"target"` or `"predicted"` fills it from the tagged column), `columns`,
-`checkbox`, and three kinds the app attaches behavior to:
+`checkbox`, and five kinds the app attaches behavior to:
 
 - `path`: a file the block reads. It gets a **Browse…** button
   (`options` = accepted extensions), and its modified time and size are
@@ -195,6 +197,49 @@ parameters the app fills in (`output_dir`, `block_id`, role params such as
   providers' API keys, git host tokens, anything listed in
   `MODELMAKER_WORKER_ENV_DENY`) never reach block code however they're
   set, so give a connection variable an ordinary name such as `DWH_URI`.
+- `dataset`: the *name* of one of the workspace's datasets, picked from a
+  list (`GET /api/datasets`). Before the block runs, the engine resolves
+  the name to the dataset's current file, read-only, and passes that
+  **path** to the function in its place. The dataset's version is part of
+  the block's cache key, so replacing the dataset makes the block stale.
+  The embedding application provides the datasets (see
+  `modelmaker/datasets.py`); the local app has none, so blocks with this
+  kind aren't offered there.
+- `source`: the name of a data source the application's administrator
+  defined (`GET /api/sources`), used with a `sql` field. The engine runs
+  the query through the application -- never in the block's process, so
+  the credentials never reach block code -- and passes the path of the
+  result (a Parquet file) in place of the name.
+
+`path` and `env` fields need the workspace's `filesystem` capability,
+`dataset` fields `datasets`, `source` fields `sources`.
+
+### Capabilities
+
+A workspace has a capability set (`Workspace(capabilities=...)`, see
+`modelmaker/capabilities.py`); a block needs whatever it lists under
+`capabilities` plus what its field kinds imply. The local app grants
+`filesystem`, so it behaves as it always has. An application hosting
+other people's workspaces typically withholds `filesystem` and grants
+`datasets`, `sources` and `exports` instead, by handing the workspace a
+dataset provider, a source provider and an export sink.
+
+A block the workspace doesn't allow is left out of the palette,
+`/api/registry`, the library panel's built-ins and the AI builder's
+catalogue, and is refused when placed, when a project or recovery
+snapshot holding it is opened, and when it runs. The refusal names the
+block and its `use_instead`, e.g. *'Read CSV' (read_csv) reads or writes
+files on the server by path, which this workspace doesn't allow -- use
+'Read dataset' (read_dataset) instead*.
+
+The built-ins: `read_csv`, `read_parquet`, `read_json`, `read_excel`,
+`read_sql` and `write_csv` need `filesystem`; `read_dataset` needs
+`datasets`, `read_source` `sources`, and `export` `exports`. A block
+needing `exports` is an export block: after it runs successfully, its
+first dataframe output goes to the workspace's export sink with the
+block's `format` and `name` params. A block with a `dataset` or `source`
+field never joins a streaming run's fusion (the engine resolves its file
+first).
 
 ### Column metadata: `meta`
 
@@ -274,7 +319,8 @@ driven by what the block declares:
 | What | How |
 |---|---|
 | Sample mode | The engine caps each input block's output at N rows (`.head(n)`, pushed into lazy scans). |
-| Change detection | From `path` fields (file fingerprint), or `sql` + `env` fields plus a `probe_query`. |
+| Change detection | From `path` fields (file fingerprint), `dataset` fields (the dataset's version), or `sql` + `env` fields plus a `probe_query`. |
+| Capabilities | From `capabilities` and the field kinds: a block the workspace doesn't allow isn't offered or run. |
 | Streaming | From the `lazy` port flags. |
 | Caching | Keyed by the definition's sha plus params and upstream, so an edited block never serves a stale result. Results are cached as data (Arrow and JSON), never pickled. |
 | Column roles | `meta`, as above, plus the user's own role tags. |

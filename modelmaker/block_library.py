@@ -56,7 +56,7 @@ ALLOWED_MODULE_IMPORTS = {"polars", "__future__"}
 
 BLOCK_KEYS = {
     "display_name", "version", "block_type", "group", "tags", "requires", "inputs", "outputs",
-    "form", "meta", "hints", "display", "renamed", "renamed_ports",
+    "form", "meta", "hints", "display", "renamed", "renamed_ports", "capabilities", "use_instead",
 }
 PORT_KEYS = {"name", "type", "required", "lazy", "aggregate"}
 FIELD_KEYS = {"key", "label", "kind", "placeholder", "step", "options", "auto_role"}
@@ -329,6 +329,13 @@ def validate_definition(d: BlockDefinition, *, signature: bool = True) -> list[s
                 errors.append(f"meta.roles: {k} {rule[k]!r} isn't a role")
         if sum(k in rule for k in ("column", "column_param", "column_suffix")) != 1:
             errors.append("meta.roles: each rule needs exactly one of column / column_param / column_suffix")
+    from .capabilities import KNOWN as KNOWN_CAPABILITIES
+
+    caps = m.get("capabilities", [])
+    if not isinstance(caps, list) or any(c not in KNOWN_CAPABILITIES for c in caps):
+        errors.append(f"capabilities must be a list of {sorted(KNOWN_CAPABILITIES)}")
+    if m.get("use_instead") is not None and not isinstance(m["use_instead"], str):
+        errors.append("use_instead must be a block id")
     for req in m.get("requires", ()):
         if not isinstance(req, str) or not re.match(r"^[A-Za-z0-9_.\-]+", req):
             errors.append(f"requires: {req!r} isn't a pip requirement")

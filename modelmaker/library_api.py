@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from . import block_library as bl
+from . import capabilities
 from . import library_store as store
 from . import library_updates
 from .blocks.base import BLOCK_REGISTRY, BlockDefinition
@@ -87,6 +88,8 @@ def block_summary(d: BlockDefinition, errors: list[str] | None = None) -> dict[s
         "architecture": architecture(d),
         "source": d.source,
         "origin": d.origin,
+        # Why this workspace can't place it (see capabilities.py), or None.
+        "unavailable": capabilities.refusal(d) if not capabilities.allowed(d) else None,
     }
     if not errors:
         try:
@@ -123,6 +126,8 @@ def list_library(refresh: bool = False) -> dict[str, Any]:
     files = store.list_files(force=refresh)
     builtin_files: dict[str, list[dict[str, Any]]] = {}
     for d in BLOCK_REGISTRY.values():
+        if not capabilities.allowed(d):
+            continue
         builtin_files.setdefault(d.origin or "built-in", []).append(block_summary(d))
     return {
         "dir": str(store.library_dir()),

@@ -13,7 +13,8 @@ client -> agent
   hello   {"protocol": PROTOCOL, "version": VERSION, "features": [...]}
   task    {"task": <int id>, "entry": <run_worker entry point name>,
            "env": {name: value} | null, "cwd": str | null,
-           "limits": {"wall_seconds": float | null, "result_bytes": int | null}}
+           "limits": {"wall_seconds": float | null, "result_bytes": int | null,
+                      "memory_mb": int, "threads": int}}   -- the last two optional
           value: the entry point's args, as a tuple -- wire-encoded, never
           pickled as a whole (see below)
   cancel  {"task": <id>}
@@ -43,6 +44,14 @@ frame to the task process, which does), so it never unpickles anything.
 Results come back through the client's own validating decoder, the same
 one LocalExecutor uses: nothing the agent or a task sends is unpickled
 except through safe_pickle's allowlist.
+
+Limits. `memory_mb` and `threads` (per-task memory and thread limits, see
+limits.py) were added to `limits` without a version bump: both are
+optional, a version-1 agent that predates them reads only the keys it
+knows (so it runs the task without them), and an agent that knows them
+treats a missing one as "no limit from the client" -- its own limits, set
+when it was started, apply either way. A task the agent stops for a limit
+comes back as a crashed result whose `error` names the limit.
 
 Extension points. `features` in the hellos is how optional capabilities
 are negotiated without a version bump: a feature is used only when both

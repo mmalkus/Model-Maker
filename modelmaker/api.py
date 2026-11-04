@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import gitops, library_store, project
+from . import capabilities, gitops, library_store, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildError
@@ -141,6 +141,9 @@ def current_workspace() -> Workspace:
 # (Workspace.library_dir / git_env; None keeps the process-wide default).
 library_store.set_library_dir_resolver(lambda: current_workspace().library_dir)
 gitops.set_env_resolver(lambda: current_workspace().git_env)
+# So does what its blocks may reach (filesystem, datasets, sources, exports):
+# the palette, the AI catalogue and placement all ask capabilities.granted().
+capabilities.set_resolver(lambda: current_workspace().capabilities)
 
 
 def _confined(raw: str | os.PathLike[str] | None) -> Path | None:
@@ -654,7 +657,37 @@ def registry() -> list[dict[str, Any]]:
             "form": block_form(spec),
         }
         for spec in BLOCK_REGISTRY.values()
+        # Blocks the workspace's capabilities don't allow (e.g. the
+        # path-based readers without `filesystem`) aren't offered.
+        if capabilities.allowed(spec)
     ]
+
+
+@app.get("/api/capabilities")
+def capabilities_ep() -> dict[str, list[str]]:
+    """What this workspace's blocks may reach (see capabilities.py), so the
+    UI can show what it offers."""
+    return {"capabilities": sorted(current_workspace().capabilities)}
+
+
+@app.get("/api/datasets")
+def list_datasets_ep() -> list[dict[str, Any]]:
+    """The workspace's datasets, for a `dataset` field's picker -- empty
+    when the embedding application gives it none (the local app). Never
+    their files' locations."""
+    provider = current_workspace().data.datasets
+    if provider is None:
+        return []
+    return [d.public() for d in provider.list_datasets()]
+
+
+@app.get("/api/sources")
+def list_sources_ep() -> list[dict[str, str]]:
+    """The data sources a `source` field can pick from (names only)."""
+    provider = current_workspace().data.sources
+    if provider is None:
+        return []
+    return [{"name": s.name, "description": s.description} for s in provider.list_sources()]
 
 
 @app.get("/api/registry/tags")
@@ -741,6 +774,8 @@ def load_project_ep(req: LoadRequest) -> dict[str, Any]:
         _session().load(folder / project.PROJECT_FILENAME)
     except FileNotFoundError:
         raise HTTPException(404, f"project file not found: {req.path}")
+    except capabilities.CapabilityError as e:
+        raise HTTPException(400, str(e))
     return _graph_out()
 
 
@@ -837,6 +872,8 @@ def recovery_info_ep() -> dict[str, Any]:
 def recover_ep() -> dict[str, Any]:
     try:
         _session().recover()
+    except capabilities.CapabilityError as e:
+        raise HTTPException(400, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     return _graph_out()

@@ -10,6 +10,9 @@ the local app safe against its own block code too:
   unpickling anything the block made (F4);
 - the task processes are started without this process's secrets in their
   environment (env.py, worker_pool.Worker) (F3).
+
+Per-task memory and thread limits (limits.py) are opt-in: with none set,
+nothing is measured and the task processes are started exactly as before.
 """
 
 from __future__ import annotations
@@ -24,11 +27,16 @@ from ..worker_pool import Worker, WorkerPool, pool_size_from_env
 from . import wire
 from .base import Task, TaskCancelled, TaskHandle, TaskResult
 from .env import harden, harden_requested
+from .limits import TaskLimits, Watchdog, annotate_error
 
 # How often the wait loop wakes up to check for a cancellation request or
 # a worker that died without reporting a result -- small enough that Stop
 # and crash detection both feel immediate, large enough not to busy-loop.
 POLL_INTERVAL = 0.05
+# The same while a task has memory or thread limits to watch (limits.py):
+# shorter, because a task allocating fast can cover a lot of memory between
+# two looks. One look is a small /proc read per task process.
+LIMITS_POLL_INTERVAL = 0.02
 
 # What the result envelope may carry besides the value (see
 # worker_pool._ConnResult): an error message is shown on the block, so cap
@@ -50,6 +58,7 @@ class LocalExecutor:
         max_result_bytes: int | None = None,
         task_timeout: float | None = None,
         raw_results: bool = False,
+        limits: TaskLimits | None = None,
     ) -> None:
         """`task_timeout`: wall-clock seconds a task may run once started;
         one still running then is stopped and fails with a message saying
@@ -58,7 +67,11 @@ class LocalExecutor:
         `raw_results`: a successful result's `value` is the task's result
         frame itself (bytes, its structure validated by wire.read_header but
         its value not decoded) -- for a relay that passes results on to the
-        process that decodes them (the runner agent, agent.py)."""
+        process that decodes them (the runner agent, agent.py).
+
+        `limits`: each task's memory and thread limits (limits.py; None or
+        empty: none, the local app's default). A task over one is killed
+        and fails -- crashed -- with an error naming the limit."""
         if pool is None:
             import multiprocessing
 
@@ -68,6 +81,7 @@ class LocalExecutor:
         self.max_result_bytes = max_result_bytes
         self.task_timeout = task_timeout or None
         self.raw_results = raw_results
+        self.limits = limits or TaskLimits()
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         if harden_requested():
@@ -97,11 +111,13 @@ class LocalExecutor:
         max_result_bytes: int | None = None,
         task_timeout: float | None = None,
         cwd: str | None = None,
+        limits: TaskLimits | None = None,
     ) -> list[TaskResult]:
         """See Executor.wait. The keyword-only arguments override, for this
-        batch only, the executor's result cap and time limit (the stricter
-        of the two applies) and the directory its tasks run in -- what a
-        relay running each of its client's tasks as its own batch needs."""
+        batch only, the executor's result cap, time limit and task limits
+        (the stricter of each applies) and the directory its tasks run in
+        -- what a relay running each of its client's tasks as its own batch
+        needs."""
         limit = len(handles) if max_concurrent is None else max(1, max_concurrent)
         max_bytes = self.max_result_bytes if self.max_result_bytes is not None else wire.max_bytes_from_env()
         if max_result_bytes is not None:
@@ -113,6 +129,15 @@ class LocalExecutor:
         timeout = self.task_timeout
         if task_timeout:
             timeout = task_timeout if timeout is None else min(timeout, task_timeout)
+        task_limits = self.limits.stricter(limits)
+        child_limits = task_limits.child_fields() if task_limits else None
+        watchdogs: dict[TaskHandle, Watchdog] = {}
+
+        def _stop(handle: TaskHandle, worker: Worker) -> None:
+            watchdog = watchdogs.pop(handle, None)
+            if watchdog is not None:
+                watchdog.kill()  # its whole process group
+            worker.stop()
 
         def _start_next() -> None:
             # Acquire every free slot's worker before sending any task: a
@@ -125,8 +150,11 @@ class LocalExecutor:
                 batch.append(handle)
             for handle in batch:
                 started[handle] = time.monotonic()
+                worker = running[handle]
+                if task_limits:
+                    watchdogs[handle] = Watchdog(worker.process.pid, task_limits)
                 try:
-                    running[handle].send_task(handle.task.entry, handle.task.args, handle.task.env, cwd)
+                    worker.send_task(handle.task.entry, handle.task.args, handle.task.env, cwd, child_limits)
                 except (BrokenPipeError, EOFError, OSError):
                     pass  # died before taking the task -- reported as a crash by the loop below
 
@@ -138,40 +166,50 @@ class LocalExecutor:
                 by_conn = {w.conn: h for h, w in running.items()}
                 # A worker that dies closes its end of the connection, which
                 # also makes it ready -- reading then raises EOFError.
-                ready = multiprocessing.connection.wait(list(by_conn), timeout=POLL_INTERVAL)
+                ready = multiprocessing.connection.wait(
+                    list(by_conn), timeout=LIMITS_POLL_INTERVAL if watchdogs else POLL_INTERVAL
+                )
                 for conn in ready:
                     handle = by_conn[conn]
                     worker = running.pop(handle)
-                    results[handle] = self._receive(handle, worker, max_bytes)
-                    worker.stop()
+                    results[handle] = self._receive(handle, worker, max_bytes, task_limits)
+                    _stop(handle, worker)
                 # Belt and braces: a process that has exited with nothing
                 # left to read is a crash even if something it started
                 # still holds its end of the connection open.
                 for handle, worker in list(running.items()):
                     if not worker.process.is_alive() and not worker.conn.poll():
                         running.pop(handle)
-                        results[handle] = TaskResult(handle, ok=False, error=worker.crash_message(), crashed=True)
-                        worker.stop()
+                        results[handle] = TaskResult(handle, ok=False, error=_crash_message(worker, task_limits), crashed=True)
+                        _stop(handle, worker)
+                # Over a memory or thread limit: killed, and crashed saying which.
+                for handle, worker in list(running.items()):
+                    watchdog = watchdogs.get(handle)
+                    reason = watchdog.check() if watchdog is not None else None
+                    if reason is not None:
+                        running.pop(handle)
+                        _stop(handle, worker)
+                        results[handle] = TaskResult(handle, ok=False, error=reason, crashed=True)
                 if timeout is not None:
                     now = time.monotonic()
                     for handle, worker in list(running.items()):
                         if now - started[handle] > timeout:
                             running.pop(handle)
-                            worker.stop()
+                            _stop(handle, worker)
                             results[handle] = TaskResult(
                                 handle, ok=False, error=f"stopped: the block ran longer than its {timeout:g} s time limit"
                             )
                 _start_next()
         finally:
-            for worker in running.values():
-                worker.stop()
+            for handle, worker in running.items():
+                _stop(handle, worker)
         return [results[h] for h in handles]
 
-    def _receive(self, handle: TaskHandle, worker: Worker, max_bytes: int) -> TaskResult:
+    def _receive(self, handle: TaskHandle, worker: Worker, max_bytes: int, limits: TaskLimits) -> TaskResult:
         try:
             frame = worker.recv_frame(max_bytes)
         except EOFError:
-            return TaskResult(handle, ok=False, error=worker.crash_message(), crashed=True)
+            return TaskResult(handle, ok=False, error=_crash_message(worker, limits), crashed=True)
         except wire.WireError as e:
             return TaskResult(handle, ok=False, error=f"result rejected: {e}")
         try:
@@ -194,7 +232,20 @@ class LocalExecutor:
         error = error if isinstance(error, str) and error else "the block failed without an error message"
         if len(error) > MAX_ERROR_CHARS:
             error = error[:MAX_ERROR_CHARS] + "…"
+        if limits:
+            error = annotate_error(error, limits)
         return TaskResult(handle, ok=False, error=error)
 
     def close(self) -> None:
         self.pool.shutdown()
+
+
+def _crash_message(worker: Worker, limits: TaskLimits) -> str:
+    """Why a task process died without reporting. With a memory limit set,
+    one SIGKILLed before the watchdog's next look was most likely killed by
+    the kernel for memory (a container's OOM killer): say so, and what the
+    limit was."""
+    message = worker.crash_message()
+    if limits.memory_mb is not None and worker.process.exitcode == -9:
+        message += f" (killed, most likely by the system for lack of memory; the block's memory limit is {limits.memory_mb:,} MB)"
+    return message

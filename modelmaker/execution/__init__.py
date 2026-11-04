@@ -12,6 +12,8 @@
 - safe_pickle.py: the interim allowlisting unpickler for the few non-data
   results wire.py still admits (to be replaced by sandbox handles).
 - env.py: which environment variables a task process never sees.
+- limits.py: `TaskLimits`, opt-in per-task memory and thread limits, and
+  the watchdog that enforces them on each task process.
 
 The point of the agent: whatever runs it -- another uid, a container with
 no network -- the process holding the secrets only ever exchanges data
@@ -23,12 +25,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .base import Executor, Task, TaskCancelled, TaskHandle, TaskResult
+from .limits import TaskLimits
 
 if TYPE_CHECKING:
     from .local import LocalExecutor
     from .remote import RemoteExecutor
 
-__all__ = ["Executor", "LocalExecutor", "RemoteExecutor", "Task", "TaskCancelled", "TaskHandle", "TaskResult"]
+__all__ = ["Executor", "LocalExecutor", "RemoteExecutor", "Task", "TaskCancelled", "TaskHandle", "TaskLimits", "TaskResult"]
 
 
 def __getattr__(name: str) -> Any:

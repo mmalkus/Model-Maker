@@ -13,7 +13,9 @@ from typing import Any, Literal
 
 import polars as pl
 
+from . import capabilities as caps
 from .blocks.base import BlockDefinition
+from .datasets import DataAccess, DatasetError, ExportRequest
 from .cache import CacheStore
 from .graph import BlockInstance, Graph
 from .metadata_transforms import schema_diff
@@ -73,6 +75,17 @@ class RunPlan:
     graph: Graph
     read_counters: dict[str, int]
     sample_rows: int | None
+    # The version of every dataset an input block reads (see datasets.py),
+    # by name: part of that block's key, so replacing a dataset makes it
+    # stale. A pinned plan resolves them all up front; a live one looks
+    # each up on first use (`dataset_lookup`) and remembers it here.
+    dataset_versions: dict[str, str | None] = field(default_factory=dict)
+    dataset_lookup: Callable[[str], str | None] | None = None
+
+    def dataset_version(self, name: str) -> str | None:
+        if name not in self.dataset_versions and self.dataset_lookup is not None:
+            self.dataset_versions[name] = self.dataset_lookup(name)
+        return self.dataset_versions.get(name)
 
     def basis(self, block_id: str, _stack: frozenset[str] = frozenset()) -> dict[str, Any]:
         """The key basis as a plain dict -- hashed into the key by `key`, and
@@ -108,6 +121,16 @@ class RunPlan:
             # turning sample mode on and back off returns to those same keys.
             if self.sample_rows is not None:
                 basis["sample_rows"] = self.sample_rows
+            # Only for a block that reads datasets, so every other key stays
+            # exactly what it was.
+            if definition is not None:
+                datasets = {
+                    f.key: self.dataset_version(str(block.params[f.key]))
+                    for f in definition.form
+                    if f.kind == "dataset" and block.params.get(f.key)
+                }
+                if datasets:
+                    basis["datasets"] = datasets
             return basis
         next_stack = _stack | {block_id}
         upstream = {
@@ -179,6 +202,27 @@ def _accepts(definition: BlockDefinition, name: str) -> bool:
         return False
 
 
+def _dataset_names(graph: Graph) -> set[str]:
+    """Every dataset an input block of `graph` reads (by name)."""
+    names: set[str] = set()
+    for block in graph.blocks.values():
+        if block.block_type != "input":
+            continue
+        definition = _try_resolve(block)
+        if definition is None:
+            continue
+        for f in definition.form:
+            if f.kind == "dataset" and block.params.get(f.key):
+                names.add(str(block.params[f.key]))
+    return names
+
+
+def _reads_app_data(definition: BlockDefinition) -> bool:
+    """Whether the engine resolves one of the block's params to a file
+    before it runs (a `dataset` or `source` field; see Runner._resolve_data)."""
+    return any(f.kind in ("dataset", "source") for f in definition.form)
+
+
 def _task_code(definition: BlockDefinition) -> str | None:
     """What a worker needs to rebuild the function: nothing for a built-in
     (it imports the package), the code for a library block."""
@@ -211,6 +255,10 @@ def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
     elif not df_inputs or not all(p.lazy for p in df_inputs) or len(df_inputs) != len(definition.inputs):
         return None
     if _accepts(definition, "output_dir") or _accepts(definition, "block_id"):
+        return None
+    # Its dataset or source is resolved by run_block, which a fused group
+    # bypasses.
+    if _reads_app_data(definition):
         return None
     try:
         sig = definition.signature
@@ -327,8 +375,13 @@ class Runner:
         sample_rows: int | None = None,
         executor: Executor | None = None,
         task_env: Callable[[], Mapping[str, str]] | None = None,
+        data: DataAccess | None = None,
     ):
         self.graph = graph
+        # The workspace's capability set and its dataset, source and export
+        # providers (see datasets.py): what a block may reach beyond the
+        # graph. The default is the local app's.
+        self.data = data if data is not None else DataAccess()
         # Read at each dispatch (not bound here) so the default can be
         # swapped process-wide; None means the module's EXECUTOR.
         self._executor = executor
@@ -411,6 +464,7 @@ class Runner:
             graph=self.graph,
             read_counters={bid: st.read_counter for bid, st in self.state.items()},
             sample_rows=self.sample_rows,
+            dataset_lookup=self._dataset_version,
         )
 
     def pin(self) -> RunPlan:
@@ -426,10 +480,81 @@ class Runner:
         stale_reason naming the edit -- which is the truth, and costs no
         extra bookkeeping because the cache is keyed by configuration
         rather than by when it ran."""
+        graph = copy.deepcopy(self.graph)
         return RunPlan(
-            graph=copy.deepcopy(self.graph),
+            graph=graph,
             read_counters={bid: st.read_counter for bid, st in self.state.items()},
             sample_rows=self.sample_rows,
+            dataset_versions={name: self._dataset_version(name) for name in sorted(_dataset_names(graph))},
+        )
+
+    def _dataset_version(self, name: str) -> str | None:
+        """The current version of the workspace's dataset `name`, or None
+        (no such dataset, no provider, or the provider failed: the block
+        then fails when run, with the reason)."""
+        provider = self.data.datasets
+        if provider is None:
+            return None
+        try:
+            info = provider.get_dataset(name)
+        except Exception:  # noqa: BLE001 -- a status read must not fail on it
+            return None
+        return info.version if info is not None else None
+
+    def _resolve_data(self, block: BlockInstance, definition: BlockDefinition, plan: RunPlan, call_kwargs: dict[str, Any]) -> None:
+        """Replace each `dataset` and `source` param in `call_kwargs` by the
+        file the block function reads (see datasets.py). A source's query
+        runs here, through the workspace's SourceProvider -- in this
+        process, never in the block's -- and comes back as a dataset."""
+        for f in definition.form:
+            if f.kind == "dataset":
+                name = block.params.get(f.key)
+                if not name:
+                    raise DatasetError(f"choose a dataset for '{f.label}'")
+                provider = self.data.datasets
+                if provider is None:
+                    raise DatasetError("this workspace has no datasets")
+                info = provider.get_dataset(str(name))
+                if info is None:
+                    raise DatasetError(f"there is no dataset named {name!r}")
+                if info.version != plan.dataset_version(str(name)):
+                    raise DatasetError(f"dataset {name!r} changed as this run started; run it again")
+                call_kwargs[f.key] = info.path
+            elif f.kind == "source":
+                name = block.params.get(f.key)
+                if not name:
+                    raise DatasetError(f"choose a source for '{f.label}'")
+                provider = self.data.sources
+                if provider is None:
+                    raise DatasetError("this workspace has no data sources")
+                query_field = next((q for q in definition.form if q.kind == "sql"), None)
+                query = block.params.get(query_field.key) if query_field is not None else None
+                if not query or not str(query).strip():
+                    raise DatasetError("write the query to run")
+                info = provider.query_source(str(name), str(query))
+                call_kwargs[f.key] = info.path
+
+    def _export(self, block_id: str, block: BlockInstance, definition: BlockDefinition, packets: dict[str, Any], plan: RunPlan) -> None:
+        """An export block's result goes to the workspace's ExportSink (see
+        datasets.py): its first dataframe output, already decoded and
+        validated here like every other result."""
+        sink = self.data.exports
+        if sink is None:
+            raise DatasetError("this workspace has no exports")
+        df = next((p.data for p in packets.values() if isinstance(p, DataFramePacket)), None)
+        if df is None:
+            raise ValueError("nothing to export: the block produced no table")
+        defaults = definition.param_defaults()
+        fmt = block.params.get("format") or defaults.get("format") or "csv"
+        sink.export(
+            ExportRequest(
+                block_id=block_id,
+                block_name=block.name,
+                name=str(block.params.get("name") or block.name),
+                format=str(fmt),
+                data=df,
+                sampled=plan.sample_rows is not None,
+            )
         )
 
     def _basis(self, block_id: str) -> dict[str, Any]:
@@ -549,6 +674,8 @@ class Runner:
             reasons.append("its source was re-read")
         if old.get("sample_rows") != new.get("sample_rows"):
             reasons.append("sample mode changed")
+        if old.get("datasets") != new.get("datasets"):
+            reasons.append("its dataset was replaced")
         return reasons
 
     # How far up a chain of stale blocks to look for the edit that started
@@ -646,8 +773,11 @@ class Runner:
                 port: (p.data if isinstance(p, DataFramePacket) else p) for port, p in input_packets.items()
             }
             definition = block.resolve()
+            caps.check(definition, self.data.capabilities)
             sig = definition.signature
             call_kwargs = dict(plain_inputs, **{k: v for k, v in block.params.items() if k not in SOURCE_PARAMS})
+            if _reads_app_data(definition):
+                self._resolve_data(block, definition, plan, call_kwargs)
             # Dynamic defaults: for every role a block's signature opts into
             # (target via target/target_col, predicted via
             # score_col/predicted_col, ...), resolve it fresh on every run
@@ -750,6 +880,8 @@ class Runner:
                 else:
                     packets[name] = value
 
+            if caps.EXPORTS in caps.required(definition):
+                self._export(block_id, block, definition, packets, plan)
             self.cache.set(key, packets)
             st.last_successful_key = key
             st.last_successful_basis = basis
@@ -1194,6 +1326,14 @@ class Runner:
                 if bid not in group.exits:
                     report[bid] = "fused (group failed)"
 
+        refused = [
+            caps.refusal(d, needs)
+            for d in (plan.graph.blocks[bid].resolve() for bid in group.members)
+            if (needs := caps.missing(d, self.data.capabilities))
+        ]
+        if refused:
+            _fail_group(f"CapabilityError: {'; '.join(refused)}")
+            return
         try:
             schemas, results = self._dispatch_fused_group(sorted(group.exits), steps)
         except Exception as e:  # noqa: BLE001 -- captured as block state, same contract as run_block
@@ -1563,13 +1703,17 @@ class Runner:
         cascade anything."""
         block = self.graph.blocks[block_id]
         definition = _try_resolve(block)
-        if definition is None:
+        # A block the workspace doesn't allow is never probed: the probe
+        # itself would touch a path or a connection here.
+        if definition is None or caps.missing(definition, self.data.capabilities):
             return False
         st = self._st(block_id)
         # The environment the block itself would get: its executor's base
         # (when it has its own, e.g. on a server) plus the workspace's variables.
         base = getattr(self.executor, "base_environ", None)
-        current = fingerprint(definition, block.params, environ=task_environ(self._task_env(), base))
+        current = fingerprint(
+            definition, block.params, environ=task_environ(self._task_env(), base), dataset_version=self._dataset_version
+        )
         if current is None:
             return False
         changed = st.last_probe_value is not None and current != st.last_probe_value

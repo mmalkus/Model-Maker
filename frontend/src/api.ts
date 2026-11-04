@@ -9,6 +9,7 @@ import type {
   BuildOut,
   BuildStateOut,
   ContinuableBuild,
+  DatasetEntry,
   DraftOut,
   EnvVarStatus,
   GitStatusOut,
@@ -22,6 +23,7 @@ import type {
   PreviewOut,
   RecoveryInfo,
   RegistryEntry,
+  SourceEntry,
   SuggestNamesOut,
   TryOut,
   UpdatePreview,
@@ -43,6 +45,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   registry: () => request<RegistryEntry[]>('/registry'),
   registryTags: () => request<BlockTag[]>('/registry/tags'),
+  datasets: () => request<DatasetEntry[]>('/datasets'),
+  sources: () => request<SourceEntry[]>('/sources'),
   graph: () => request<GraphOut>('/graph'),
 
   createBlock: (body: {

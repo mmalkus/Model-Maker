@@ -11,9 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
+from . import capabilities as caps
 from .block_library import definition_from_embedded
 from .blocks.base import BLOCK_REGISTRY, BlockDefinition
 from .cache import CacheStore
+from .datasets import DataAccess
 from .graph import Artifact, BlockInstance, Graph, Lane, Position, Wire
 from .packet import ColumnRole, DataFramePacket, find_duplicate_unique_role
 from .project import graph_from_dict, graph_to_dict, load_project, save_project
@@ -77,7 +79,13 @@ class ProjectSession:
     workspace's user-set ones, see Runner.task_env). All three carry over
     to the fresh runner a load or a new project makes. Assignable after
     construction too -- a workspace adopting a session it was handed sets
-    `task_env`."""
+    `task_env`.
+
+    `data` is the workspace's capability set and data providers (see
+    datasets.py and capabilities.py): a block that needs a capability it
+    doesn't grant can't be placed, loaded, recovered or run here
+    (capabilities.CapabilityError, a ValueError, names what to use
+    instead)."""
 
     def __init__(
         self,
@@ -86,10 +94,12 @@ class ProjectSession:
         cache_dir: Path | None = None,
         executor: Executor | None = None,
         task_env: Callable[[], Mapping[str, str]] | None = None,
+        data: DataAccess | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
         self.executor = executor
         self.task_env = task_env
+        self._data = data if data is not None else DataAccess()
         self.graph = Graph()
         self.runner = self._new_runner()
         self.project_path: Path | None = None
@@ -113,7 +123,36 @@ class ProjectSession:
             sample_rows=sample_rows,
             executor=self.executor,
             task_env=self._current_task_env,
+            data=self._data,
         )
+
+    @property
+    def data(self) -> DataAccess:
+        return self._data
+
+    @data.setter
+    def data(self, data: DataAccess) -> None:
+        self._data = data
+        self.runner.data = data
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return self._data.capabilities
+
+    def check_graph(self, graph: Graph) -> None:
+        """Refuse a graph holding blocks this session's capabilities don't
+        allow, naming each and what to use instead."""
+        problems = []
+        for block in graph.blocks.values():
+            try:
+                definition = block.resolve()
+            except KeyError:
+                continue  # unknown blocks are shown red, as before
+            needs = caps.missing(definition, self.capabilities)
+            if needs:
+                problems.append(f"block '{block.name}': {caps.refusal(definition, needs)}")
+        if problems:
+            raise caps.CapabilityError("this project can't be opened here -- " + "; ".join(problems))
 
     def _current_task_env(self) -> Mapping[str, str]:
         # Indirect, so assigning `task_env` later reaches the live runner.
@@ -286,8 +325,10 @@ class ProjectSession:
         if self.recovery_path is None or not self.recovery_path.exists():
             raise ValueError("no recovery snapshot available")
         payload = json.loads(self.recovery_path.read_text(encoding="utf-8"))
+        graph = graph_from_dict(payload["graph"])
+        self.check_graph(graph)
         with self.edit():
-            self.graph = graph_from_dict(payload["graph"])
+            self.graph = graph
             self.runner.graph = self.graph
             self.runner.state = {}
             self.project_name = payload.get("project_name") or "untitled"
@@ -310,7 +351,9 @@ class ProjectSession:
         self.clear_recovery()
 
     def load(self, path: Path) -> None:
-        self.graph = load_project(path)
+        graph = load_project(path)
+        self.check_graph(graph)
+        self.graph = graph
         self.runner = self._new_runner(sample_rows=self.runner.sample_rows)
         self.project_path = path
         # `path` is always <project folder>/PROJECT_FILENAME -- the folder is
@@ -369,6 +412,7 @@ class ProjectSession:
             resolved = BLOCK_REGISTRY.get(category)
             if resolved is None:
                 raise ValueError(f"unknown block '{category}'")
+        caps.check(resolved, self.capabilities)
         bid = new_id()
         block = BlockInstance(
             id=bid,
@@ -407,6 +451,7 @@ class ProjectSession:
         else:
             embedded = definition.embedded() if isinstance(definition, BlockDefinition) else dict(definition)
             resolved = definition_from_embedded(embedded)
+            caps.check(resolved, self.capabilities)
             block.definition, block.library_ref, block.builtin_sha = embedded, library_ref, None
         block.block_type = resolved.block_type
         block.inputs = [replace(p) for p in resolved.inputs]

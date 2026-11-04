@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .. import capabilities
 from ..block_library import INJECTED_PARAMS, load_builtin
 from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
 from ..packet import ColumnRole
@@ -28,7 +29,10 @@ AGENT_DISALLOWED: dict[str, str] = {
     "read_excel": "input blocks are prepared by the user, not the AI build",
     "read_sql": "input blocks are prepared by the user, not the AI build",
     "demo_credit_data": "input blocks are prepared by the user, not the AI build",
+    "read_dataset": "input blocks are prepared by the user, not the AI build",
+    "read_source": "input blocks are prepared by the user, not the AI build",
     "write_csv": "writing files is left to the user",
+    "export": "exporting results is left to the user",
     "iterate": "fan-out (iterate/collect) isn't supported in AI builds yet",
     "collect": "fan-out (iterate/collect) isn't supported in AI builds yet",
 }
@@ -84,23 +88,33 @@ def library_blocks() -> dict[str, BlockDefinition]:
         for d in f.parsed.definitions:
             if f.parsed.errors.get(d.id) or d.block_type == "input" or d.id in BLOCK_REGISTRY or d.id in out:
                 continue
-            if block_library.check_requirements(d):
+            if block_library.check_requirements(d) or not capabilities.allowed(d):
                 continue
             out[d.id] = d
     return out
 
 
+def _builtins() -> dict[str, BlockDefinition]:
+    """The built-ins the workspace's capabilities allow (see
+    capabilities.py): without `filesystem`, the path-based blocks don't
+    exist as far as an AI build is concerned."""
+    granted = capabilities.granted()
+    return {k: d for k, d in BLOCK_REGISTRY.items() if capabilities.allowed(d, granted)}
+
+
 def available(include_library: bool = True) -> dict[str, BlockDefinition]:
     """Every block an AI build can know about: the built-ins, plus (unless
-    the build turned it off) the user's library blocks."""
+    the build turned it off) the user's library blocks -- each only if the
+    workspace's capabilities allow it."""
     ensure_blocks_registered()
-    return {**BLOCK_REGISTRY, **(library_blocks() if include_library else {})}
+    return {**_builtins(), **(library_blocks() if include_library else {})}
 
 
 def lookup(category: str, include_library: bool = True) -> BlockDefinition | None:
     ensure_blocks_registered()
     if category in BLOCK_REGISTRY:
-        return BLOCK_REGISTRY[category]
+        d = BLOCK_REGISTRY[category]
+        return d if capabilities.allowed(d) else None
     return library_blocks().get(category) if include_library else None
 
 

@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { DataPicker } from './DataPicker'
 import { EnvVarField } from './EnvVarField'
 import type { FormField, SchemaColumn } from './types'
 
@@ -68,6 +69,15 @@ export function ParamsForm({
                   </button>
                 )}
               </div>
+            )}
+            {(f.kind === 'dataset' || f.kind === 'source') && (
+              <DataPicker
+                kind={f.kind}
+                value={typeof value === 'string' ? value : ''}
+                disabled={disabled}
+                onChange={(name) => update(f.key, name)}
+                style={fieldStyle}
+              />
             )}
             {f.kind === 'sql' && (
               <textarea

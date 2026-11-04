@@ -26,7 +26,15 @@ What a workspace owns:
   to (symlinks resolved; None = anywhere, the local app's behaviour);
   `library_dir`, its own block library folder (None = the process-wide
   one); and `git_env`, the whole environment git runs with for its
-  projects (None = this process's).
+  projects (None = this process's);
+- `capabilities` -- what its blocks may reach beyond the graph (see
+  capabilities.py): the local app's default is `filesystem` (blocks read
+  and write files by path). An embedding application can withhold it and
+  instead hand the workspace `datasets`, `sources` and `exports` providers
+  (see datasets.py), which add the matching capabilities unless
+  `capabilities` is given explicitly. Blocks needing a capability the
+  workspace lacks are hidden from its palette and AI catalogue and refused
+  when placed, loaded or run.
 
 What it deliberately does *not* own -- shared by every workspace in the
 process, and safe to share: the default executor's warm worker pool
@@ -47,6 +55,7 @@ from typing import TYPE_CHECKING, Any
 from .agent.build import LLMChoice
 from .agent.controller import BuildController
 from .agent.loop import AgentLoop, make_loop
+from .datasets import DataAccess, DatasetProvider, ExportSink, SourceProvider
 from .llm import LLMProvider, get_provider
 from .llm.settings import LLMSettingsStore
 from .runslot import RunSlot
@@ -139,8 +148,13 @@ class Workspace:
         root: Path | str | None = None,
         library_dir: Path | str | None = None,
         git_env: Mapping[str, str] | None = None,
+        capabilities: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
+        datasets: DatasetProvider | None = None,
+        sources: SourceProvider | None = None,
+        exports: ExportSink | None = None,
     ) -> None:
         self.id = id
+        self.data = DataAccess.make(capabilities, datasets=datasets, sources=sources, exports=exports)
         # See the module docstring: confinement, own library, git's env.
         self.root: Path | None = Path(root).expanduser().resolve() if root is not None else None
         self.library_dir: Path | None = Path(library_dir) if library_dir is not None else None
@@ -175,7 +189,12 @@ class Workspace:
             cache_dir=self.cache_dir,
             executor=self.executor,
             task_env=self.env_vars.snapshot,
+            data=self.data,
         )
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return self.data.capabilities
 
     @property
     def session(self) -> ProjectSession:
@@ -188,6 +207,8 @@ class Workspace:
         get this workspace's env vars, as a session made here would."""
         if session.task_env is None:
             session.task_env = self.env_vars.snapshot
+        if session.data != self.data:
+            session.data = self.data
         self._session = session
 
     # ---- LLMs ------------------------------------------------------------

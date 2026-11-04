@@ -2,6 +2,9 @@
 block's params form rather than written per block:
 
   - every field of kind `path` contributes the file's (mtime, size);
+  - every field of kind `dataset` contributes the dataset's version (see
+    datasets.py; a replaced dataset also changes the block's cache key, so
+    it shows as stale without a probe);
   - a block with a field of kind `sql` and one of kind `env` (the
     connection variable) contributes the first row of the block's optional
     `probe_query` -- a cheap query such as SELECT MAX(updated_at) FROM t --
@@ -14,7 +17,7 @@ A block with neither gets no fingerprint and never reports a change.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .blocks.base import BlockDefinition
@@ -47,7 +50,12 @@ def _sql_fingerprint(definition: BlockDefinition, params: dict[str, Any], enviro
     return str(result.row(0)) if result.height else ""
 
 
-def fingerprint(definition: BlockDefinition, params: dict[str, Any], environ: Mapping[str, str] | None = None) -> Any:
+def fingerprint(
+    definition: BlockDefinition,
+    params: dict[str, Any],
+    environ: Mapping[str, str] | None = None,
+    dataset_version: Callable[[str], Any] | None = None,
+) -> Any:
     """A cheap, read-only value that changes when the block's source does,
     or None when the block's form gives nothing to watch.
 
@@ -56,11 +64,15 @@ def fingerprint(definition: BlockDefinition, params: dict[str, Any], environ: Ma
     minus the secrets -- see execution.env.task_environ). The runner passes
     its workspace's, so a variable the user set from the UI is found
     without ever being written into this process's os.environ, and a
-    probe can't reach a variable the block couldn't."""
+    probe can't reach a variable the block couldn't. `dataset_version`
+    looks up a dataset's current version by name (the runner's, through
+    its workspace's DatasetProvider)."""
     parts: dict[str, Any] = {}
     for f in definition.form:
         if f.kind == "path" and params.get(f.key):
             parts[f.key] = _file_fingerprint(params[f.key])
+        elif f.kind == "dataset" and params.get(f.key) and dataset_version is not None:
+            parts[f.key] = dataset_version(str(params[f.key]))
     if any(f.kind == "sql" for f in definition.form):
         sql = _sql_fingerprint(definition, params, task_environ() if environ is None else environ)
         if sql is not None:

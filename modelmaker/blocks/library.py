@@ -12,6 +12,8 @@ import polars as pl
 
 BLOCKS = {
     "read_csv": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_dataset",
         "display_name": "Read CSV",
         "version": 1,
         "block_type": "input",
@@ -29,6 +31,8 @@ BLOCKS = {
         "meta": {"inherit": "none"},
     },
     "read_parquet": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_dataset",
         "display_name": "Read Parquet",
         "version": 1,
         "block_type": "input",
@@ -38,6 +42,8 @@ BLOCKS = {
         "meta": {"inherit": "none"},
     },
     "read_json": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_dataset",
         "display_name": "Read JSON",
         "version": 1,
         "block_type": "input",
@@ -47,6 +53,8 @@ BLOCKS = {
         "meta": {"inherit": "none"},
     },
     "read_excel": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_dataset",
         "display_name": "Read Excel",
         "version": 1,
         "block_type": "input",
@@ -63,6 +71,8 @@ BLOCKS = {
         "meta": {"inherit": "none"},
     },
     "read_sql": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_source",
         "display_name": "Read SQL",
         "version": 1,
         "block_type": "input",
@@ -81,6 +91,32 @@ BLOCKS = {
                 "kind": "sql",
                 "placeholder": "SELECT * FROM loans",
             },
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "read_dataset": {
+        "display_name": "Read dataset",
+        "version": 1,
+        "block_type": "input",
+        "capabilities": ["datasets"],
+        "inputs": [],
+        "outputs": [{"name": "out", "lazy": True}],
+        "form": [
+            {"key": "dataset", "label": "Dataset", "kind": "dataset"},
+            {"key": "sheet", "label": "Sheet name (Excel only; optional)", "kind": "text"},
+        ],
+        "meta": {"inherit": "none"},
+    },
+    "read_source": {
+        "display_name": "Read from source",
+        "version": 1,
+        "block_type": "input",
+        "capabilities": ["sources"],
+        "inputs": [],
+        "outputs": [{"name": "out", "lazy": True}],
+        "form": [
+            {"key": "source", "label": "Source", "kind": "source"},
+            {"key": "query", "label": "SQL query", "kind": "sql", "placeholder": "SELECT * FROM loans"},
         ],
         "meta": {"inherit": "none"},
     },
@@ -196,6 +232,8 @@ BLOCKS = {
         "meta": {"new_role": "feature"},
     },
     "write_csv": {
+        "capabilities": ["filesystem"],
+        "use_instead": "export",
         "display_name": "Write CSV",
         "version": 1,
         "block_type": "output",
@@ -210,6 +248,20 @@ BLOCKS = {
             },
         ],
         "meta": {"inherit": "none"},
+    },
+    "export": {
+        "display_name": "Export",
+        "version": 1,
+        "block_type": "output",
+        "tags": ["output"],
+        "capabilities": ["exports"],
+        "inputs": [{"name": "df"}],
+        "outputs": [{"name": "out"}],
+        "form": [
+            {"key": "format", "label": "Format", "kind": "select", "options": ["csv", "parquet"]},
+            {"key": "name", "label": "Export name", "kind": "text", "placeholder": "<block name>"},
+        ],
+        "meta": {"inherit": "all"},
     },
     "display_table": {
         "display_name": "Display table",
@@ -360,6 +412,45 @@ def read_sql(connection_env: str, query: str) -> pl.DataFrame:
     # the environment at run time, live or compiled.
     uri = os.environ[connection_env]
     return pl.read_database_uri(query, uri)
+
+
+def read_dataset(dataset: str, sheet: str | None = None) -> pl.LazyFrame:
+    """Reads one of the workspace's datasets into a dataframe on the `out`
+    port; no inputs. `dataset` is the dataset's name, picked from the
+    workspace's datasets; before the block runs, the engine resolves it to
+    the dataset's current file (read-only) and passes that path in its
+    place -- so replacing the dataset re-runs the block. The file's format
+    follows its extension: CSV (dtypes inferred), Parquet, Arrow IPC, JSON
+    (a plain array of records), NDJSON or Excel (`sheet` names the
+    worksheet; unset reads the first)."""
+    lower = dataset.lower()
+    if lower.endswith(".csv"):
+        return pl.scan_csv(dataset)
+    if lower.endswith(".parquet"):
+        return pl.scan_parquet(dataset)
+    if lower.endswith((".arrow", ".ipc", ".feather")):
+        return pl.scan_ipc(dataset)
+    if lower.endswith((".ndjson", ".jsonl")):
+        return pl.scan_ndjson(dataset)
+    if lower.endswith(".json"):
+        return pl.read_json(dataset).lazy()
+    if lower.endswith(".xlsx"):
+        return (pl.read_excel(dataset, sheet_name=sheet) if sheet else pl.read_excel(dataset)).lazy()
+    raise ValueError(f"can't read {dataset!r}: unknown dataset format")
+
+
+def read_source(source: str, query: str) -> pl.LazyFrame:
+    """Runs a SQL query against one of the data sources the administrator
+    set up and returns the result set as a dataframe on the `out` port; no
+    inputs. `source` is the source's name; `query` is the SQL text, in that
+    database's own dialect. The query runs in the application, with the
+    administrator's credentials, never in the block's own process: the
+    engine stores its result as a dataset and passes that file in place of
+    `source`. Refresh the block to run the query again."""
+    # `query` has already run (see Runner._resolve_data); it's a parameter
+    # so that it's part of the cache key and shown in the form.
+    del query
+    return pl.scan_parquet(source)
 
 
 def filter(df: pl.DataFrame, expr: str) -> pl.DataFrame:
@@ -529,6 +620,20 @@ def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
     # .lazy() is a no-op on a LazyFrame: in a streaming run this block is
     # handed its upstream's uncollected plan and writes it straight to disk.
     df.lazy().sink_csv(os.path.join(output_dir, filename))
+
+
+EXPORT_FORMATS = ("csv", "parquet")
+
+
+def export(df: pl.DataFrame, format: str = "csv", name: str = "") -> pl.DataFrame:
+    """Exports the `df` input as a file the user downloads -- `format` is
+    "csv" or "parquet", `name` the export's name (default: the block's
+    name) -- and passes `df` on unchanged on `out`. The export is made by
+    the application from the block's result after each successful run (see
+    datasets.ExportSink); in sample mode it holds only the sampled rows."""
+    if format not in EXPORT_FORMATS:
+        raise ValueError(f"format must be one of {', '.join(EXPORT_FORMATS)}, got {format!r}")
+    return df
 
 
 def display_table(
