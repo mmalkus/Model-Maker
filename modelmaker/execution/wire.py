@@ -1,4 +1,6 @@
-"""The wire format for values coming *back* from a task process.
+"""The wire format for values coming *back* from a task process (and, for
+a runner agent, going to one: a task's args travel the same way, see
+protocol.py).
 
 A block's result used to come back pickled, and was unpickled here -- so a
 block could return an object whose `__reduce__` ran whatever it liked in

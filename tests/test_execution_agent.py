@@ -204,6 +204,7 @@ def test_the_client_never_sends_a_denylisted_variable(monkeypatch):
     result = _wait1(ex, Task("run_worker_entry", ("f", None, {}, None), env))
     ex.close()
     assert result.ok and result.value is None, result.error
+    assert not errors
     assert seen["env"] == {"MM_TEST_OK": "1"}
     assert seen["entry"] == "run_worker_entry" and seen["cwd"] is None
 

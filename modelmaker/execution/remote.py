@@ -48,8 +48,8 @@ from .protocol import ProtocolError
 POLL_INTERVAL = 0.05
 # A task the agent hasn't confirmed stopped this long after a cancel (its
 # own Stop takes up to ~10 s for a process that ignores SIGTERM) gets the
-# whole agent killed instead (S6.5 of the design: a sandbox that won't stop
-# a task is destroyed).
+# whole agent killed instead: a runner that won't stop a task is destroyed,
+# its task processes with it.
 CANCEL_GRACE = 15.0
 # Heartbeat: while a wait is in progress, an agent silent this long is
 # pinged; one silent for HEARTBEAT_TIMEOUT more is taken for dead.

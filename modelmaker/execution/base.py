@@ -4,9 +4,9 @@
 group_by fan-out, a fused streaming group, a stochastic region's
 iterations) into `Task`s, hands them to an `Executor`, and gets plain
 values back. Everything about *where* a task runs -- a local single-use
-process today (`LocalExecutor`), a session sandbox later (a
-`RemoteExecutor`) -- lives behind
-this interface, so the run plan, staleness, fusion and fan-out logic above
+process (`LocalExecutor`), or a runner agent at the other end of a
+socket (`RemoteExecutor`, which may run anywhere: another uid, a sandbox)
+-- lives behind this interface, so the run plan, staleness, fusion and fan-out logic above
 it never has to know.
 
 The shapes follow S6.1 of the architecture doc, adapted to what the Runner
@@ -40,8 +40,9 @@ class Task:
 
     The args travel *to* the task process, which is the trusted direction:
     they come from this process (the graph, params, upstream outputs), so a
-    local executor may pickle them. Only what comes back is untrusted -- see
-    wire.py.
+    local executor may pickle them. A RemoteExecutor wire-encodes them
+    instead (wire.py), so they must be data: what a block result may be.
+    Only what comes back is untrusted -- see wire.py.
 
     `env` is the environment variables this task adds on top of the task
     process's base environment (this process's, minus the secrets -- see
