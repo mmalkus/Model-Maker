@@ -66,6 +66,7 @@ modelmaker-api = "modelmaker.api:main"
 modelmaker-tui = "modelmaker.tui.app:main"
 modelmaker-demo = "modelmaker.demo_data:workspace_main"
 modelmaker = "modelmaker.cli:main"
+modelmaker-runner = "modelmaker.execution.agent:main"
 
 [tool.setuptools.packages.find]
 include = ["modelmaker*"]

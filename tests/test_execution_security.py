@@ -19,7 +19,7 @@ from modelmaker.graph import Graph, Wire
 from modelmaker.runner import MP_CONTEXT, Runner
 from modelmaker.worker_pool import WorkerPool
 
-from .helpers import make_block
+from .helpers import EXECUTOR_KINDS, make_block, make_executor
 
 ON_LINUX = sys.platform.startswith("linux")
 
@@ -66,9 +66,17 @@ def evil_result(df, marker: str = ""):
 '''
 
 
-def test_a_result_whose_unpickling_would_run_code_is_an_ordinary_block_error(tmp_path):
+@pytest.fixture(params=EXECUTOR_KINDS)
+def any_executor(request):
+    """Each executor in turn: the guarantees below hold for both."""
+    ex = make_executor(request.param)
+    yield ex
+    ex.close()
+
+
+def test_a_result_whose_unpickling_would_run_code_is_an_ordinary_block_error(tmp_path, any_executor):
     marker = tmp_path / "marker"
-    status, error, _ = _run(_graph_with(tmp_path, "evil_result", EVIL_RESULT, {"marker": str(marker)}))
+    status, error, _ = _run(_graph_with(tmp_path, "evil_result", EVIL_RESULT, {"marker": str(marker)}), any_executor)
     assert status == "red"
     assert "can't return" in error
     assert not marker.exists()
@@ -99,21 +107,24 @@ def forged_frame(df, marker: str = "", raw: bool = False):
 
 
 @pytest.mark.parametrize("raw", [False, True], ids=["forged-wire-frame", "bare-pickle"])
-def test_a_block_writing_a_malicious_pickle_to_the_parent_cannot_run_code_there(tmp_path, raw):
+def test_a_block_writing_a_malicious_pickle_to_the_parent_cannot_run_code_there(tmp_path, raw, any_executor):
+    # Through a runner agent, the forged bytes reach the agent first: a bare
+    # pickle is refused there (the agent never unpickles), and a forged
+    # frame is relayed undecoded and refused here, by the same decoder.
     marker = tmp_path / "marker"
     graph = _graph_with(tmp_path, "forged_frame", FORGED_FRAME, {"marker": str(marker), "raw": raw})
-    status, error, _ = _run(graph)
+    status, error, _ = _run(graph, any_executor)
     assert status == "red"
     assert "rejected" in error
     assert not marker.exists()
 
 
-def test_a_dataframe_and_json_result_still_comes_back(tmp_path):
+def test_a_dataframe_and_json_result_still_comes_back(tmp_path, any_executor):
     code = '''
 def plain_result(df):
     return {"rows": df.height, "frame": df, "ratio": float("nan"), "pair": (1, 2)}
 '''
-    status, error, out = _run(_graph_with(tmp_path, "plain_result", code))
+    status, error, out = _run(_graph_with(tmp_path, "plain_result", code), any_executor)
     assert status == "green", error
     assert out["rows"] == 2 and out["pair"] == (1, 2) and out["frame"].columns == ["a", "b"]
 
@@ -157,12 +168,15 @@ def secret_env(monkeypatch):
     monkeypatch.setenv("MM_TEST_DB_URL", "sqlite:///tmp/x.db")
 
 
+@pytest.mark.parametrize("kind", EXECUTOR_KINDS)
 @pytest.mark.parametrize("warm", [False, True], ids=["cold-start", "warm-spare"])
-def test_a_task_process_sees_no_secrets_but_does_see_ordinary_variables(tmp_path, secret_env, warm):
+def test_a_task_process_sees_no_secrets_but_does_see_ordinary_variables(tmp_path, secret_env, warm, kind):
     # The exec launcher explicitly (the default on POSIX, unless
-    # MODELMAKER_WORKER_LAUNCHER forces the fallback for a test run).
+    # MODELMAKER_WORKER_LAUNCHER forces the fallback for a test run). A
+    # runner agent's own pool always uses it, and the agent is started
+    # with the scrubbed environment too, so its task processes are as well.
     launcher = "exec" if os.name == "posix" else None
-    executor = LocalExecutor(WorkerPool(MP_CONTEXT, 1 if warm else 0, launcher=launcher))
+    executor = make_executor(kind, 1 if warm else 0, launcher=launcher)
     if warm:
         executor.prewarm()
     try:
@@ -181,10 +195,11 @@ def test_a_task_process_sees_no_secrets_but_does_see_ordinary_variables(tmp_path
         assert "MM_TEST_DB_URL" in out["proc"] and "PATH" in out["proc"]
 
 
-def test_a_variable_set_after_the_server_started_still_reaches_a_warm_spare(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", EXECUTOR_KINDS)
+def test_a_variable_set_after_the_server_started_still_reaches_a_warm_spare(tmp_path, monkeypatch, kind):
     # api.set_env_var writes os.environ at run time; a spare started before
     # that must still see it (each task carries the current, scrubbed env).
-    executor = LocalExecutor(WorkerPool(MP_CONTEXT, 1))
+    executor = make_executor(kind, 1)
     executor.prewarm()
     monkeypatch.setenv("MM_TEST_LATE_VAR", "late")
     monkeypatch.setenv("MODELMAKER_AUTH_TOKEN", "late-token")
@@ -211,8 +226,9 @@ def test_the_multiprocessing_fallback_scrubs_os_environ_too(tmp_path, secret_env
     assert out["wanted"] == "sqlite:///tmp/x.db"
 
 
-def test_the_parent_environment_is_left_alone(tmp_path, secret_env):
-    executor = _fresh_executor()
+@pytest.mark.parametrize("kind", EXECUTOR_KINDS)
+def test_the_parent_environment_is_left_alone(tmp_path, secret_env, kind):
+    executor = make_executor(kind)
     try:
         _run(_graph_with(tmp_path, "env_probe", ENV_PROBE), executor)
     finally:

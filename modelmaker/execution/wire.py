@@ -423,10 +423,12 @@ def _read_ndarray(data: memoryview, n: dict[str, Any]) -> Any:
     return arr[()] if n.get("scalar") else arr
 
 
-def decode_frame(data: bytes | bytearray | memoryview, *, max_bytes: int | None = None) -> tuple[dict[str, Any], Any]:
-    """(fields, value) from a frame made by `encode_frame`. Raises WireError
-    for anything malformed, oversized or not allowed; never calls a global
-    named by the payload except through safe_pickle's allowlist."""
+def read_header(data: bytes | bytearray | memoryview, *, max_bytes: int | None = None) -> tuple[dict[str, Any], int]:
+    """Validate a frame's structure -- magic, header length, the JSON
+    header, the blob table against the frame size -- without decoding its
+    value: (the header dict, the offset its blobs start at). What a relay
+    that only routes frames (the runner agent, see agent.py) needs: it can
+    read `fields` and pass the value on without interpreting a byte of it."""
     limit = max_bytes if max_bytes is not None else max_bytes_from_env()
     view = memoryview(data)
     if len(view) > limit:
@@ -449,12 +451,52 @@ def decode_frame(data: bytes | bytearray | memoryview, *, max_bytes: int | None 
     offset = head + header_len
     if offset + sum(lengths) != len(view):
         raise WireError("blob table doesn't match the frame size")
+    return header, offset
+
+
+def reframe(data: bytes | bytearray | memoryview, fields: dict[str, Any], *, max_bytes: int | None = None) -> bytes:
+    """The same frame -- same value node, same blobs, byte for byte -- with
+    its `fields` replaced. The value is never decoded (see read_header)."""
+    header, offset = read_header(data, max_bytes=max_bytes)
+    try:
+        new_header = json.dumps(
+            {"fields": fields, "value": header.get("value"), "blobs": header["blobs"]},
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode()
+    except (TypeError, ValueError) as e:
+        raise WireError(f"envelope isn't plain JSON: {e}") from None
+    if len(new_header) > DEFAULT_MAX_HEADER_BYTES:
+        raise ValueTooLarge("frame header over the limit")
+    return b"".join([MAGIC, _HEADER_LEN.pack(len(new_header)), new_header, memoryview(data)[offset:]])
+
+
+def decode_frame(data: bytes | bytearray | memoryview, *, max_bytes: int | None = None) -> tuple[dict[str, Any], Any]:
+    """(fields, value) from a frame made by `encode_frame`. Raises WireError
+    for anything malformed, oversized or not allowed; never calls a global
+    named by the payload except through safe_pickle's allowlist."""
+    header, offset = read_header(data, max_bytes=max_bytes)
+    view = memoryview(data)
     blobs = []
-    for length in lengths:
+    for length in header["blobs"]:
         blobs.append(view[offset : offset + length])
         offset += length
     value = _Decoder(blobs).node(header.get("value"))
     return header["fields"], value
+
+
+class EncodedArgs:
+    """A task's args as a wire frame (see agent.py), handed to a task
+    process as is and decoded there, so the process relaying it never
+    interprets them. Its `fields` are ignored; its value is the args tuple."""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def __reduce__(self):  # plain bytes on the way to the task process
+        return (EncodedArgs, (bytes(self.data),))
 
 
 def decode(data: bytes | bytearray | memoryview, *, max_bytes: int | None = None) -> Any:

@@ -38,6 +38,18 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 
 import modelmaker  # noqa: E402,F401 -- loads every built-in block into BLOCK_REGISTRY
 
+# MODELMAKER_TEST_EXECUTOR=remote: the whole suite with the default executor
+# swapped for a RemoteExecutor over a local runner agent (see
+# modelmaker/execution/agent.py), so every block run, streaming group,
+# stochastic iteration and "Try it" goes through the runner protocol. Opt-in:
+# the default run uses LocalExecutor, and the executor tests run against both.
+if os.environ.get("MODELMAKER_TEST_EXECUTOR") == "remote":
+    from modelmaker import runner as _runner  # noqa: E402
+    from modelmaker.execution.remote import RemoteExecutor  # noqa: E402
+
+    _runner.EXECUTOR = RemoteExecutor(local_context=True)
+    atexit.register(_runner.EXECUTOR.close)
+
 # The demo dataset isn't committed -- it's generated (fixed seed) by
 # modelmaker/demo_data.py. The agent tests read it as a file through Read
 # CSV, so write it to sample_data/ before collection, and rewrite it if the

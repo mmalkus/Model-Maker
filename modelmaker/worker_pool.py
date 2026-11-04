@@ -193,8 +193,23 @@ def worker_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
     # (see block_library.exec_block_source).
     block_library.enter_task_process()
 
+    result_queue = _ConnResult(conn, modules_before)
     try:
-        getattr(run_worker, entry_name)(*args, result_queue=_ConnResult(conn, modules_before), task_key=None)
+        from .execution import wire
+
+        if isinstance(args, wire.EncodedArgs):
+            # From a relay (the runner agent, execution/agent.py) that
+            # never decodes them itself: decoded here, by the same
+            # validating decoder results go through.
+            try:
+                args = wire.decode(args.data)
+            except (wire.WireError, RecursionError) as e:
+                result_queue.put((None, False, f"task rejected: {e}"))
+                return
+            if not isinstance(args, tuple):
+                result_queue.put((None, False, "task rejected: its args aren't a tuple"))
+                return
+        getattr(run_worker, entry_name)(*args, result_queue=result_queue, task_key=None)
     except (BrokenPipeError, EOFError, OSError):
         pass  # the parent stopped waiting (cancelled, or gone)
 
@@ -353,13 +368,17 @@ class Worker:
                 return False
         return self._ready
 
-    def send_task(self, entry_name: str, args: tuple[Any, ...], env: Mapping[str, str] | None = None) -> None:
+    def send_task(
+        self, entry_name: str, args: Any, env: Mapping[str, str] | None = None, cwd: str | None = None
+    ) -> None:
         """Hand this worker its one task, with the environment it runs in:
         this process's current one minus the secrets, plus the task's own
         variables (`env`, see execution.base.Task) -- also minus the
         secrets. With a WorkerLaunch, its `environ` and `cwd` stand in for
-        this process's."""
-        cwd = self.launch.cwd if self.launch.cwd is not None else os.getcwd()
+        this process's; an explicit `cwd` stands in for both. `args` is the
+        args tuple, or an execution.wire.EncodedArgs the worker decodes."""
+        if cwd is None:
+            cwd = self.launch.cwd if self.launch.cwd is not None else os.getcwd()
         self.conn.send((entry_name, args, task_environ(env, self.launch.environ), cwd))
 
     def recv_frame(self, max_bytes: int) -> bytes:
