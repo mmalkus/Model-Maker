@@ -438,6 +438,9 @@ def update_block_definition(block_id: str) -> dict[str, Any]:
     try:
         with session.edit():
             summary = library_updates.apply(session, block_id)
+    except capabilities.CapabilityError as e:
+        # Restricted mode: a library version is custom code (features.py).
+        raise HTTPException(403, str(e))
     except (store.LibraryError, KeyError) as e:
         raise HTTPException(400, str(e))
     return {"applied": summary, "block": api._block_out(block_id)}

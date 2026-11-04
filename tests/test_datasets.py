@@ -167,7 +167,7 @@ def test_local_app_is_unchanged(hosted):
     names = {e["category"] for e in c.get("/api/registry").json()}
     assert PATH_BLOCKS <= names
     assert not names & DATA_BLOCKS
-    assert c.get("/api/capabilities").json() == {"capabilities": ["filesystem"]}
+    assert c.get("/api/capabilities").json()["capabilities"] == ["filesystem"]
     assert c.get("/api/datasets").json() == [] and c.get("/api/sources").json() == []
     r = c.post("/api/blocks", json={"category": "read_csv", "params": {"path": "x.csv"}})
     assert r.status_code == 200
@@ -191,7 +191,7 @@ def test_palette_and_catalogues_hide_path_blocks(hosted):
     assert DATA_BLOCKS <= names
     builtin = {b["id"] for f in c.get("/api/library").json()["builtin_files"] for b in f["blocks"]}
     assert not builtin & PATH_BLOCKS and "read_dataset" in builtin
-    assert c.get("/api/capabilities").json() == {"capabilities": ["datasets", "exports", "sources"]}
+    assert c.get("/api/capabilities").json()["capabilities"] == ["datasets", "exports", "sources"]
     # The AI builder's catalogue, as seen from this workspace.
     with capabilities.granting(server.capabilities):
         known = catalogue.available()

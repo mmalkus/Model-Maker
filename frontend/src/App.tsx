@@ -27,6 +27,7 @@ import { PortInspector } from './PortInspector'
 import { Toolbar } from './Toolbar'
 import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, RecoveryInfo } from './types'
 import { host } from './host'
+import { has } from './features'
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -122,6 +123,7 @@ function AppInner() {
   // Pick up an AI build that's still going on the server (e.g. after a page
   // reload) -- a live one keeps BuildPanel mounted, which polls it.
   useEffect(() => {
+    if (!has('ai_builder')) return
     api
       .agentCurrent()
       .then((s) => setBuild(s.build))
@@ -764,13 +766,15 @@ function AppInner() {
                   AI is editing -- canvas read-only
                 </span>
               )}
-              <button
-                className={buildOpen ? undefined : 'brand-primary'}
-                onClick={() => setBuildOpen((o) => !o)}
-                title="Have an AI plan and build a model from the selected blocks"
-              >
-                {buildLive && !buildOpen ? 'AI build in progress…' : 'Build with AI'}
-              </button>
+              {has('ai_builder') && (
+                <button
+                  className={buildOpen ? undefined : 'brand-primary'}
+                  onClick={() => setBuildOpen((o) => !o)}
+                  title="Have an AI plan and build a model from the selected blocks"
+                >
+                  {buildLive && !buildOpen ? 'AI build in progress…' : 'Build with AI'}
+                </button>
+              )}
             </Panel>
             <Panel
               position="bottom-right"
@@ -796,7 +800,7 @@ function AppInner() {
             </Panel>
           </ReactFlow>
         </div>
-        {graph && (buildOpen || buildLive) && (
+        {graph && has('ai_builder') && (buildOpen || buildLive) && (
           // Kept mounted (just hidden) while a build is live, so it keeps
           // polling the build -- and the canvas -- with the panel closed.
           <div style={{ display: buildOpen ? 'flex' : 'none' }}>
@@ -831,7 +835,7 @@ function AppInner() {
           />
         )}
       </div>
-      {libraryView && (
+      {libraryView && has('custom_blocks') && (
         <LibraryPanel
           initialView={libraryView}
           graph={graph}

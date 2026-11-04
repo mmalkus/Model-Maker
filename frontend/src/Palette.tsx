@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import type { BlockTag, LibraryFile, RegistryEntry } from './types'
+import { has } from './features'
 
 function InlineAdd({ placeholder, onSubmit }: { placeholder: string; onSubmit: (value: string) => void }) {
   const [open, setOpen] = useState(false)
@@ -102,6 +103,7 @@ export function Palette({
   }, [])
 
   useEffect(() => {
+    if (!has('custom_blocks')) return
     api
       .library()
       .then((lib) => setLibraryFiles(lib.files))
@@ -155,6 +157,8 @@ export function Palette({
         </select>
       )}
 
+      {/* Restricted mode without custom block code: built-ins only. */}
+      {has('custom_blocks') && (
       <div style={{ marginBottom: 14, paddingBottom: 10, borderBottom: '1px solid var(--mm-bg-hover)' }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
           <button
@@ -165,6 +169,7 @@ export function Palette({
             Library ↗
           </button>
         </div>
+        {has('ai_drafting') && (
         <button
           onClick={onCreateWithAI}
           title="Describe a block; AI writes it into your library, you review and save it, then it's placed on the canvas"
@@ -179,6 +184,7 @@ export function Palette({
         >
           ✦ Create with AI
         </button>
+        )}
         {libraryFiles.length === 0 && (
           <div style={{ fontSize: 11, color: 'var(--mm-faint)' }}>No library blocks yet -- create one with AI, or open the library.</div>
         )}
@@ -233,6 +239,7 @@ export function Palette({
           )
         })}
       </div>
+      )}
 
       {orderedGroupNames.map((group) => {
         // a tag filter shows its matches even in groups the user collapsed

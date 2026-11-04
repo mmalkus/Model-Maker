@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react'
 import { DataPicker } from './DataPicker'
 import { EnvVarField } from './EnvVarField'
 import type { FormField, SchemaColumn } from './types'
+import { has } from './features'
 
 // A block's fields come from the API with the block (block.form, built from
 // its BLOCKS "form" and its signature -- see modelmaker/forms.py), so
@@ -98,7 +99,7 @@ export function ParamsForm({
                   onChange={(e) => update(f.key, e.target.value)}
                   style={{ ...fieldStyle, fontFamily: 'monospace' }}
                 />
-                {typeof value === 'string' && value && <EnvVarField name={value} />}
+                {typeof value === 'string' && value && has('env_vars') && <EnvVarField name={value} />}
               </>
             )}
             {f.kind === 'text' && (

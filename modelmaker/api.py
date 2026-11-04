@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import capabilities, gitops, library_store, project
+from . import capabilities, features, gitops, library_store, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildError
@@ -665,9 +665,11 @@ def registry() -> list[dict[str, Any]]:
 
 @app.get("/api/capabilities")
 def capabilities_ep() -> dict[str, list[str]]:
-    """What this workspace's blocks may reach (see capabilities.py), so the
-    UI can show what it offers."""
-    return {"capabilities": sorted(current_workspace().capabilities)}
+    """What this workspace's blocks may reach (see capabilities.py) and
+    which of the app's tools it offers (see features.py), so the UI shows
+    only what works here."""
+    ws = current_workspace()
+    return {"capabilities": sorted(ws.capabilities), "features": sorted(ws.features)}
 
 
 @app.get("/api/datasets")
@@ -922,6 +924,9 @@ def create_block(req: BlockCreate) -> dict[str, Any]:
             definition = library_ref = None
             if req.library is not None:
                 from . import library_store
+
+                if features.CUSTOM_BLOCKS not in current_workspace().features:
+                    raise HTTPException(403, features.refusal(features.CUSTOM_BLOCKS))
 
                 definition, library_ref = library_store.placeable(req.library["file"], req.library["id"])
             block = _session().add_block(
@@ -1753,6 +1758,23 @@ _AGENT_LOCK_ALLOWED = ("/api/agent/", "/api/llm/", "/api/env_vars/", "/api/proje
 
 
 @app.middleware("http")
+async def _feature_gate(request: Request, call_next):
+    """Restricted mode (features.py): a request for a feature the
+    workspace has switched off gets a 403, whatever the UI shows."""
+    path = request.url.path
+    if path.startswith("/api/") and request.method != "OPTIONS" and features.needed(request.method, path):
+        try:
+            have = current_workspace().features
+        except HTTPException:
+            # The resolver refused the request: let the route raise it again.
+            have = None
+        problem = None if have is None else features.denied(request.method, path, have)
+        if problem is not None:
+            return JSONResponse({"detail": problem}, status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def _agent_canvas_lock(request: Request, call_next):
     """§7: while an AI build is building, the graph is the build's -- user
     edits (and user-started runs, undo, loading another project) get a
@@ -1840,12 +1862,14 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001 -- each SDK raises its own type for a missing key
             raise HTTPException(400, f"{label} LLM ({choice.provider}): {e}")
     _set_agent_callback(ws, request)
+    custom_ok = features.CUSTOM_BLOCKS in ws.features
     options = BuildOptions(
         final_full_run=req.final_full_run,
         sample_rows=req.sample_rows,
         auto_build=req.auto_build,
-        allow_new_blocks=req.allow_new_blocks,
-        use_library_blocks=req.use_library_blocks,
+        # Without custom block code the build sticks to the built-ins.
+        allow_new_blocks=req.allow_new_blocks and custom_ok,
+        use_library_blocks=req.use_library_blocks and custom_ok,
         small_context=ws.llm_settings.agent_small_context if req.small_context is None else req.small_context,
         decision_hints=ws.llm_settings.agent_decision_hints if req.decision_hints is None else req.decision_hints,
     )

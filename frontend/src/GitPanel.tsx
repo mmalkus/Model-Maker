@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
 import type { GitStatusOut } from './types'
+import { has } from './features'
 
 export function GitPanel({
   projectPath,
@@ -94,6 +95,8 @@ export function GitPanel({
             )}
           </div>
 
+          {/* Restricted mode can keep git local: no remote, push or pull. */}
+          {has('git_remote') && (
           <label style={{ display: 'block', marginBottom: 8 }}>
             <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>Remote (GitHub) URL</div>
             <div style={{ display: 'flex', gap: 6 }}>
@@ -110,6 +113,7 @@ export function GitPanel({
               </button>
             </div>
           </label>
+          )}
 
           <div style={{ marginBottom: 8 }}>
             <div style={{ color: 'var(--mm-muted)', marginBottom: 2 }}>
@@ -144,6 +148,7 @@ export function GitPanel({
             </div>
           </label>
 
+          {has('git_remote') && (
           <div style={{ display: 'flex', gap: 6 }}>
             <button disabled={busy || !status.remote} onClick={doPush} style={{ flex: 1 }}>
               Push
@@ -152,6 +157,7 @@ export function GitPanel({
               Pull
             </button>
           </div>
+          )}
         </>
       )}
 

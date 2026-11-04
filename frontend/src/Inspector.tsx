@@ -6,6 +6,7 @@ import { FileBrowser } from './FileBrowser'
 import { ParamsForm } from './ParamsForm'
 import type { BlockOut, DraftOut, PreviewOut, SchemaColumn } from './types'
 import { host } from './host'
+import { has } from './features'
 
 export function Inspector({
   block,
@@ -497,6 +498,7 @@ export function Inspector({
         </div>
       )}
 
+      {has('ai_drafting') && (
       <div style={{ marginBottom: 12, background: 'var(--brand-light)', border: '1px solid var(--brand-border)', borderRadius: 6, padding: 8 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>
           Draft with AI
@@ -548,6 +550,7 @@ export function Inspector({
           </div>
         )}
       </div>
+      )}
 
       {block.source && (
         <div style={{ marginBottom: 12 }}>
@@ -610,7 +613,7 @@ function DefinitionBanner({
         <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--brand)' }}>LIB</span>
         <span>
           From library:{' '}
-          {info.in_library && info.file ? (
+          {info.in_library && info.file && has('custom_blocks') ? (
             <button
               style={{ fontSize: 11, padding: '0 4px', fontFamily: 'monospace' }}
               onClick={() => onOpenInLibrary(info.file, block.category)}
@@ -622,12 +625,12 @@ function DefinitionBanner({
           )}{' '}
           v{info.version}
         </span>
-        {info.update_available && (
+        {info.update_available && has('custom_blocks') && (
           <button className="brand-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={onOpenUpdate}>
             Update to v{info.latest_version}
           </button>
         )}
-        {block.status === 'red' && (
+        {block.status === 'red' && has('custom_blocks') && has('ai_drafting') && (
           <button style={{ fontSize: 11 }} onClick={onFixWithAI}>
             ✦ Fix with AI
           </button>

@@ -4,6 +4,7 @@ import { DataModal } from './DataModal'
 import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { Artifact, PortType, PreviewOut } from './types'
 import { host } from './host'
+import { has } from './features'
 
 // The actual look at a port's data (dataframe preview, image, or plain
 // value) -- rendered by PortInspector for whichever output port badge the
@@ -164,6 +165,8 @@ export function PortDataView({
               {preview.row_count} rows &middot; lineage: {preview.lineage.join(' -> ') || '(none)'}
             </div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+              {has('ai_drafting') && (
+                <>
               <button
                 disabled={analyzing}
                 onClick={analyzeData}
@@ -178,6 +181,8 @@ export function PortDataView({
                 <input type="checkbox" checked={assignRoles} onChange={(e) => setAssignRoles(e.target.checked)} />
                 set roles
               </label>
+                </>
+              )}
               <button onClick={() => setShowTable(true)}>View full table</button>
             </div>
 
