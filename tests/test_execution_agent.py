@@ -11,6 +11,7 @@ import os
 import pickle
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -439,6 +440,34 @@ def test_nothing_outlives_the_client(tmp_path, how):
     t.join(30)
     assert out and out[0].crashed
     ex.close()
+
+
+def test_a_listening_socket_with_a_group_mode(tmp_path):
+    # E.g. a sandbox's socket in a setgid directory the client's group owns.
+    path = str(tmp_path / "agent.sock")
+    proc = subprocess.Popen(agent_command(listen=path, warm_workers=0, socket_mode=0o660), start_new_session=True)
+    try:
+        assert _until(lambda: os.path.exists(path))
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o660
+        ex = RemoteExecutor(lambda: connect_unix(path))
+        try:
+            assert _wait1(ex, _call("def f():\n    return 'group'\n")).value == "group"
+        finally:
+            ex.close()
+        assert proc.wait(20) == 0
+    finally:
+        proc.kill()
+
+
+@pytest.mark.parametrize("mode", ["0777", "0466", "abc", "4660"])
+def test_bad_socket_modes_are_refused(mode, tmp_path):
+    from modelmaker.execution import agent
+
+    with pytest.raises(SystemExit):
+        agent.main(["--listen", str(tmp_path / "s"), "--socket-mode", mode])
+    with pytest.raises(SystemExit):
+        agent.main(["--fd", "99", "--socket-mode", "0660"])  # only with --listen
+    assert not (tmp_path / "s").exists()
 
 
 def test_an_agent_listening_on_a_path(tmp_path):
