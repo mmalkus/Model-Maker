@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import modelmaker.api as api
 from modelmaker import features
-from modelmaker.project import save_project
+from modelmaker.project import PROJECT_FILENAME, save_project
 from modelmaker.workspace import Workspace
 
 from .helpers import write_library_file
@@ -61,8 +61,6 @@ REFUSED = [
     ("POST", "/api/library/import", {"filename": "x.py", "content_base64": "", "actions": {}}, features.CUSTOM_BLOCKS),
     ("POST", "/api/library/duplicate", {"id": "filter", "new_id": "f2", "to": "x.py"}, features.CUSTOM_BLOCKS),
     ("POST", "/api/library/ai/draft", {"instruction": "x"}, features.CUSTOM_BLOCKS),
-    ("POST", "/api/blocks/b1/update", None, features.CUSTOM_BLOCKS),
-    ("GET", "/api/blocks/b1/update_preview", None, features.CUSTOM_BLOCKS),
     ("POST", "/api/agent/builds", {"goal": "x", "anchors": []}, features.AI_BUILDER),
     ("GET", "/api/agent/builds/current", None, features.AI_BUILDER),
     ("POST", "/api/blocks/b1/draft", {"instruction": "x"}, features.AI_DRAFTING),
@@ -154,7 +152,7 @@ def test_a_project_with_embedded_code_is_refused_without_custom_blocks(pair, tmp
     assert _client(full).post("/api/blocks", json={"library": {"file": "mine.py", "id": "double"}}).status_code == 200
     target = tmp_path / "proj"
     target.mkdir()
-    save_project(full.session.graph, target / "project.json")
+    save_project(full.session.graph, target / PROJECT_FILENAME)
     resp = _client(locked).post("/api/project/load", json={"path": str(target)})
     assert resp.status_code == 400
     assert "carries its own code" in resp.json()["detail"]

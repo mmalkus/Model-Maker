@@ -3,6 +3,7 @@ import { api } from './api'
 import { ASSIGNABLE_ROLES, ROLE_LABELS, useAssignRolesPref } from './roles'
 import type { PreviewOut } from './types'
 import { host } from './host'
+import { has } from './features'
 
 export function DataModal({
   blockName,
@@ -102,7 +103,7 @@ export function DataModal({
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {blockId && (
+          {blockId && has('ai_drafting') && (
             <>
               <button
                 disabled={analyzing}

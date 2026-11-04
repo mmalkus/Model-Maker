@@ -9,8 +9,9 @@ some off per workspace (``Workspace(features=...)``):
 - ``custom_blocks`` -- block code a user writes or brings: the block
   library (create, edit, check, try, import, export, duplicate, drafts,
   AI drafting of blocks), placing library blocks, updating a placed block
-  to a newer library version, and opening a project or recovery snapshot
-  that holds a library block's embedded code. Without it a workspace runs
+  to a newer library version (accepting a built-in's update stays
+  allowed), and opening a project or recovery snapshot that holds a
+  library block's embedded code. Without it a workspace runs
   built-in blocks only. The AI builder then can't create blocks or use
   library ones either.
 - ``ai_builder`` -- the AI builder (``/api/agent/...``).
@@ -60,7 +61,6 @@ _ANY = None
 # matching row applies, so a route can need two (library AI drafting).
 ROUTES: list[tuple[frozenset[str] | None, re.Pattern[str], str]] = [
     (_ANY, re.compile(r"^/api/library(/.*)?$"), CUSTOM_BLOCKS),
-    (_ANY, re.compile(r"^/api/blocks/[^/]+/update(_preview)?$"), CUSTOM_BLOCKS),
     (_ANY, re.compile(r"^/api/library/ai(/.*)?$"), AI_DRAFTING),
     (_ANY, re.compile(r"^/api/blocks/[^/]+/(draft|suggest_fix|analyze_data|suggest_names)$"), AI_DRAFTING),
     (_ANY, re.compile(r"^/api/agent(/.*)?$"), AI_BUILDER),

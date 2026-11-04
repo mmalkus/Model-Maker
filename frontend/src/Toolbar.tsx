@@ -7,6 +7,7 @@ import { GitPanel } from './GitPanel'
 import { SettingsPanel } from './SettingsPanel'
 import type { LLMSettingsOut } from './types'
 import { host } from './host'
+import { has } from './features'
 
 // Splits a server-side path into (directory, filename), tolerating both
 // '/' (POSIX) and '\' (Windows) separators, whichever the path was given
@@ -298,7 +299,7 @@ export function Toolbar({
       </span>
 
       {/* VS Code's own Source Control covers git there. */}
-      {host.kind !== 'vscode' && (
+      {host.kind !== 'vscode' && has('git') && (
       <div style={{ position: 'relative' }}>
         <button
           onClick={() => setShowGit((s) => !s)}
@@ -311,12 +312,15 @@ export function Toolbar({
       </div>
       )}
 
-      <div style={{ position: 'relative' }}>
-        <button onClick={() => setShowSettings((s) => !s)}>Settings</button>
-        {showSettings && (
-          <SettingsPanel settings={llmSettings} onChange={onLlmSettingsChange} onClose={() => setShowSettings(false)} />
-        )}
-      </div>
+      {/* Restricted mode: LLM settings belong to whoever runs this workspace. */}
+      {has('llm_settings') && (
+        <div style={{ position: 'relative' }}>
+          <button onClick={() => setShowSettings((s) => !s)}>Settings</button>
+          {showSettings && (
+            <SettingsPanel settings={llmSettings} onChange={onLlmSettingsChange} onClose={() => setShowSettings(false)} />
+          )}
+        </div>
+      )}
 
       {compiled !== null && (
         <div

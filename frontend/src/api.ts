@@ -46,6 +46,7 @@ export const api = {
   registry: () => request<RegistryEntry[]>('/registry'),
   registryTags: () => request<BlockTag[]>('/registry/tags'),
   datasets: () => request<DatasetEntry[]>('/datasets'),
+  capabilities: () => request<{ capabilities: string[]; features?: string[] }>('/capabilities'),
   sources: () => request<SourceEntry[]>('/sources'),
   graph: () => request<GraphOut>('/graph'),
 

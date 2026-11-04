@@ -3,6 +3,7 @@ import { api } from './api'
 import { BuildReportList } from './BuildReport'
 import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut, PlanQuestion } from './types'
 import { host } from './host'
+import { has } from './features'
 
 // The AI model builder's side panel (see agent-builder-proposal.md §2):
 // start a build from the selected blocks, review preflight, review and
@@ -241,6 +242,9 @@ function StartForm({
           <input type="checkbox" checked={fullRun} onChange={(e) => setFullRun(e.target.checked)} />
           Finish with a run on the full data
         </label>
+        {/* Without custom block code the build uses built-ins only (the API enforces it). */}
+        {has('custom_blocks') && (
+        <>
         <label
           style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}
           title="Let the AI create new blocks when no registry block does the job -- they're saved to your block library as AI drafts for you to keep or discard. Off: registry blocks only -- it asks you if the goal needs something they can't do."
@@ -255,6 +259,8 @@ function StartForm({
           <input type="checkbox" checked={useLibrary} onChange={(e) => setUseLibrary(e.target.checked)} />
           Use my library blocks
         </label>
+        </>
+        )}
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           Build on a sample:
           <select value={sample} onChange={(e) => setSample(e.target.value as typeof sample)}>
