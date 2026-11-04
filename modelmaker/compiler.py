@@ -11,6 +11,7 @@ from .blocks.base import BlockDefinition
 from .graph import Graph
 from .packet import ColumnRole, DataFramePacket, resolve_role_column
 from .runner import FusionGroup, _fusable_block
+from .signature import SignatureError
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
 
@@ -328,11 +329,15 @@ def compile_graph(
     for bid in order:
         block = graph.blocks[bid]
         definition = block.resolve()
-        fn = definition.fn
-        wants_output_dir[bid] = accepts_param(fn, "output_dir")
-        wants_block_id[bid] = accepts_param(fn, "block_id")
+        # The static signature: compiling a graph never runs block code.
+        try:
+            sig = definition.signature
+        except SignatureError as e:
+            raise CompileError(f"block {bid!r}: {e}") from None
+        wants_output_dir[bid] = accepts_param(sig, "output_dir")
+        wants_block_id[bid] = accepts_param(sig, "block_id")
         wants_role_params[bid] = {
-            role: role_param for role in ROLE_PARAM_NAMES if (role_param := find_role_param(fn, role)) is not None
+            role: role_param for role in ROLE_PARAM_NAMES if (role_param := find_role_param(sig, role)) is not None
         }
         lazy_outputs[bid] = [p.name for p in definition.outputs if p.lazy]
         requirements.update(dict.fromkeys(definition.requires))

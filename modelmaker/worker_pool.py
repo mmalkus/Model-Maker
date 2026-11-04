@@ -149,7 +149,11 @@ def worker_main(conn: Any, preload: list[str], announce_ready: bool) -> None:
     os.environ.clear()
     os.environ.update(env)
     os.chdir(cwd)
-    from . import run_worker
+    from . import block_library, run_worker
+
+    # This process exists to run block code; the API process never does
+    # (see block_library.exec_block_source).
+    block_library.enter_task_process()
 
     try:
         getattr(run_worker, entry_name)(*args, result_queue=_ConnResult(conn, modules_before), task_key=None)

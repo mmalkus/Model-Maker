@@ -25,7 +25,9 @@ from typing import Any
 def resolve_fn(category: str, code: str | None):
     """A block's function inside a worker: a built-in's from the package
     (`import modelmaker` loads every built-in), a library block's defined
-    from the code the task carries."""
+    from the code the task carries -- the only place a library block's
+    module-level code runs (block_library.compile_fn refuses outside a
+    task process)."""
     if code is not None:
         from .block_library import compile_fn
 
@@ -216,3 +218,45 @@ def run_iteration_entry(
         step = steps[idx] if 0 <= idx < len(steps) else None
         where = f"step {idx} ({step['category']}, block {step['id']!r})" if step else "step ?"
         result_queue.put((task_key, False, f"iteration {iteration_index}, {where}: {type(e).__name__}: {e}"))
+
+
+def run_examples_entry(
+    source: str,
+    origin: str,
+    ids: list[str] | None,
+    result_queue: Any,
+    task_key: Any,
+) -> None:
+    """Run a block file's `_example_<id>` self-checks ("Try it" with no
+    canvas input, `modelmaker check-blocks`; see block_library.run_examples).
+    Executes the whole file -- examples call its blocks and helpers by name
+    -- then each requested example, and reports `{block id: {"ok": True |
+    False | None (no example), "error", "line"}}`, `line` being the file's
+    own line the failure surfaced at (the editor jumps to it). A file that
+    fails to run at all reports under "__file__". Never raises into the
+    parent, same contract as the entry points above."""
+    import traceback
+
+    from .block_library import exec_block_source, parse_source
+
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        ns = exec_block_source(source, origin, "modelmaker_block_examples")
+        parsed = parse_source(source, origin)
+        for d in parsed.definitions:
+            if ids is not None and d.id not in ids:
+                continue
+            name = parsed.examples.get(d.id)
+            if name is None:
+                out[d.id] = {"ok": None, "error": "no _example_ for this block"}
+                continue
+            try:
+                ns[name]()
+                out[d.id] = {"ok": True, "error": None}
+            except BaseException as e:  # noqa: BLE001 -- reported per example
+                tb = traceback.extract_tb(e.__traceback__)
+                line = next((f.lineno for f in reversed(tb) if f.filename == origin), None)
+                out[d.id] = {"ok": False, "error": f"{type(e).__name__}: {e}", "line": line}
+    except BaseException as e:  # noqa: BLE001 -- the file itself failed to run
+        out["__file__"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    result_queue.put((task_key, True, out))

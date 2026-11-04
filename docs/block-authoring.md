@@ -89,6 +89,53 @@ The rules, all checked by the validator:
    returns one value per output port, as a tuple when there are several.
 6. **No key takes a function.** If a block seems to need one, that's a
    missing piece of the app, not of the block.
+7. **Defaults the app uses must be literals.** See below.
+
+## When your code runs
+
+The app reads everything it needs to know about a block from the file's
+text, without running it: the `BLOCKS` literal, and each function's
+signature (parameter names, which have defaults, their annotations as
+written, and the default values). Listing the library, rendering a
+block's form, placing and wiring it, working out whether it's stale,
+validating it, compiling a model to a script and the AI catalogue all run
+none of your code.
+
+Your code runs only when a block actually runs: a run on the canvas, a
+**Try it**, an `_example_` self-check, or `modelmaker check-blocks`. Each
+of those happens in a separate, single-use task process. That includes
+everything at module level that the block uses (helpers, constants), its
+decorators and its default expressions, so a side effect there (writing a
+file, reading the environment) happens in that task process, each time the
+block runs, and never in the app itself. Task processes get the app's
+environment minus its secrets (API tokens, LLM provider keys), and what
+they hand back to the app is data only: dataframes, JSON-shaped values,
+bytes, numpy arrays, or scikit-learn / scipy.sparse objects.
+
+### Default values
+
+The app reads a parameter's default with `ast.literal_eval`, so it knows
+the value when the default is a **literal**: a number, string, bool or
+`None`, or a list, tuple, dict or set of those (`-1`, `1e-6`, `(0.1, 0.9)`
+and `["a", "b"]` all count).
+
+Any other default -- `x=SOME_CONST`, `x=float("inf")`, `x=_helper()` -- is
+still allowed. The block runs with it as usual, and calls may leave the
+param out, but the app doesn't know its value: the form shows the field as
+unset, the AI catalogue lists the expression's source text instead of a
+value, and a block an AI build places doesn't copy it into its params. Two
+things make a non-literal default an error:
+
+- a `meta` rule reads the param (`column_param`, `columns_param`, or a
+  `{param}` in a `fallback` template), because the rule needs the value;
+- the expression (or a decorator) uses a name your code doesn't define,
+  which the validator reports the way a `NameError` would have been.
+
+The signature the app sees is the `def` line as written. A decorator that
+changes the function's parameters (one that wraps it in a `*args,
+**kwargs` function, say) isn't seen, so don't rely on one for the
+parameters the app fills in (`output_dir`, `block_id`, role params such as
+`target_col`) or for the form.
 
 ## Keys
 
@@ -223,7 +270,7 @@ driven by what the block declares:
 | Sample mode | The engine caps each input block's output at N rows (`.head(n)`, pushed into lazy scans). |
 | Change detection | From `path` fields (file fingerprint), or `sql` + `env` fields plus a `probe_query`. |
 | Streaming | From the `lazy` port flags. |
-| Caching | Keyed by the definition's sha plus params and upstream, so an edited block never serves a stale result. |
+| Caching | Keyed by the definition's sha plus params and upstream, so an edited block never serves a stale result. Results are cached as data (Arrow and JSON), never pickled. |
 | Column roles | `meta`, as above, plus the user's own role tags. |
 | AI decision hints | `hints`. |
 | Group by | Any block with a dataframe input can run once per group. |
@@ -232,7 +279,8 @@ driven by what the block declares:
 
 `_example_<id>()` builds a tiny input by hand, calls the block and
 asserts something about the result. **Try it** in the library runs it,
-in a separate process with a 30-second timeout. So does
+in a task process like a block run (see *When your code runs*) with a
+30-second timeout. So does
 
 ```bash
 modelmaker check-blocks [DIR]   # default: the built-ins and your library

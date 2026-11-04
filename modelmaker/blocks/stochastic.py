@@ -30,7 +30,7 @@ Non-dataframe outputs (distribution/dependency/proxy_function/
 simulation_result) are plain JSON-shaped dicts, exactly like the existing
 "model" port (see blocks/modelling.py) -- inspectable over the API's
 generic /value endpoint, no special deserializer, and they travel through
-the normal pickle cache like any other Python value.
+the normal result cache (cache.py) like any other JSON-shaped value.
 
 Deferred (see stochastic-engine-proposal.md S10-S11, out of scope for this
 build): the sub-graph fan-out engine primitive (phase 4 -- bootstrap CIs

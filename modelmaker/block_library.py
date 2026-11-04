@@ -17,8 +17,10 @@ A block file is a plain Python module:
     def _helper(...): ...          # private: shared code, not a block
     def _example_my_block(): ...   # optional self-check, run on request
 
-`BLOCKS` is read with ast.literal_eval and never executed, so listing a
-library or previewing an import runs no code. See docs/block-authoring.md
+`BLOCKS` is read with ast.literal_eval and never executed, and each
+block's signature is read from the AST (see signature.py), so listing,
+validating, placing or compiling a block runs none of its code -- that
+happens only in a task process (see exec_block_source). See docs/block-authoring.md
 for every key; `validate` below checks them all.
 """
 
@@ -28,7 +30,6 @@ import __future__
 import ast
 import hashlib
 import importlib
-import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -188,19 +189,62 @@ def parse_source(source: str, origin: str, kind: str = "library") -> ParsedFile:
     return parsed
 
 
+# ---- where block code may run ---------------------------------------------
+#
+# Defining a library block's function executes its module-level code: the
+# helpers and constants it uses, its decorators, its default expressions.
+# That only ever happens in a task process (see run_worker.py), which
+# worker_pool.worker_main marks with `enter_task_process()` before it runs
+# anything; everywhere else -- the API process, the CLI -- the block's
+# signature comes from the AST (BlockDefinition.signature) and running it
+# means submitting a task to an executor (see try_call / run_examples).
+# This flag is what turns a slip back into executing code here into a loud
+# error instead of a silent one.
+
+_IN_TASK_PROCESS = False
+
+
+class BlockCodeNotAllowed(RuntimeError):
+    """Library block code was about to be executed outside a task process."""
+
+
+def enter_task_process() -> None:
+    """Mark this process as a task process: one that exists to run block
+    code (called by worker_pool.worker_main, never by the API process)."""
+    global _IN_TASK_PROCESS
+    _IN_TASK_PROCESS = True
+
+
+def in_task_process() -> bool:
+    return _IN_TASK_PROCESS
+
+
+def exec_block_source(source: str, filename: str, module_name: str) -> dict[str, Any]:
+    """Execute block code (a definition's code, or a whole block file) in a
+    fresh namespace that has `pl`, and return the namespace. The one place
+    block code is executed; refused outside a task process."""
+    if not _IN_TASK_PROCESS:
+        raise BlockCodeNotAllowed(
+            f"refusing to execute block code ({filename}) outside a task process -- "
+            "read its signature from the AST (BlockDefinition.signature) or run it through an executor"
+        )
+    import polars as pl
+
+    ns: dict[str, Any] = {"pl": pl, "__name__": module_name}
+    flags = __future__.annotations.compiler_flag
+    exec(compile(source, filename, "exec", flags=flags, dont_inherit=True), ns)  # block code, in a task process
+    return ns
+
+
 _COMPILED: dict[tuple[str, str], Any] = {}
 
 
 def compile_fn(block_id: str, code: str):
-    """Define (never call) a definition's function from its code. Cached by
-    (id, code) so a status poll never re-executes anything."""
+    """Define (never call) a definition's function from its code -- in a
+    task process only (see exec_block_source). Cached by (id, code)."""
     key = (block_id, code)
     if key not in _COMPILED:
-        import polars as pl
-
-        ns: dict[str, Any] = {"pl": pl, "__name__": f"modelmaker_block_{block_id}"}
-        flags = __future__.annotations.compiler_flag
-        exec(compile(code, f"<block {block_id}>", "exec", flags=flags, dont_inherit=True), ns)  # trusted block code
+        ns = exec_block_source(code, f"<block {block_id}>", f"modelmaker_block_{block_id}")
         fn = ns.get(block_id)
         if not callable(fn):
             raise ValueError(f"block code doesn't define {block_id}()")
@@ -220,10 +264,11 @@ def _known_hint_rules() -> set[str]:
     return set(RULES)
 
 
-def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]:
-    """Every problem with one definition, as short messages. `define`
-    executes the function *definition* (not a call) to check the form
-    against its real signature; off, only the literal is checked."""
+def validate_definition(d: BlockDefinition, *, signature: bool = True) -> list[str]:
+    """Every problem with one definition, as short messages. `signature`
+    also checks the form, ports and renames against the function's
+    signature -- read from the AST, so validating never runs the block's
+    code (see signature.py); off, only the literal is checked."""
     from .packet import ColumnRole
 
     errors: list[str] = []
@@ -287,13 +332,16 @@ def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]
     for req in m.get("requires", ()):
         if not isinstance(req, str) or not re.match(r"^[A-Za-z0-9_.\-]+", req):
             errors.append(f"requires: {req!r} isn't a pip requirement")
-    if not define:
+    if not signature:
         return errors
+    from .signature import SignatureError, undefined_definition_names
+
     try:
-        fn = d.fn
-    except Exception as e:  # noqa: BLE001 -- reported as a validation error
-        return errors + [f"code doesn't define: {type(e).__name__}: {e}"]
-    params = inspect.signature(fn).parameters
+        sig = d.signature
+    except SignatureError as e:
+        return errors + [str(e)]
+    errors += undefined_definition_names(d.code, d.id)
+    params = sig.names
     port_names = {p.name for p in d.inputs}
     for f in d.form:
         if f.key not in params:
@@ -306,10 +354,33 @@ def validate_definition(d: BlockDefinition, *, define: bool = True) -> list[str]
     for old, new in d.renamed.items():
         if new not in params:
             errors.append(f"renamed: {old!r} -> {new!r}, but {new!r} isn't a parameter")
+    unknown_defaults = {p.name for p in sig.params if p.has_default and not p.literal_default}
+    for name in sorted(unknown_defaults & _meta_param_refs(d.metadata)):
+        errors.append(
+            f"param {name!r} is used by a meta rule, so its default must be a literal "
+            f"(a number, string, bool, None, or a list/tuple/dict of those), not {sig.get(name).default_source}"
+        )
     return errors
 
 
-def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset(), *, define: bool = True) -> ParsedFile:
+def _meta_param_refs(meta: dict[str, Any]) -> set[str]:
+    """The params a block's declarative metadata rules read (see
+    metadata_transforms.schema_diff), which therefore need a known default."""
+    refs: set[str] = set()
+    inherit = meta.get("inherit")
+    if isinstance(inherit, dict) and isinstance(inherit.get("columns_param"), str):
+        refs.add(inherit["columns_param"])
+    for rule in meta.get("roles", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        if isinstance(rule.get("column_param"), str):
+            refs.add(rule["column_param"])
+        if isinstance(rule.get("fallback"), str):  # a str.format_map template over the params
+            refs |= set(re.findall(r"{([A-Za-z_][A-Za-z0-9_]*)", rule["fallback"]))
+    return refs
+
+
+def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset(), *, signature: bool = True) -> ParsedFile:
     """Fill in `parsed.errors` for every definition (in place; returns it).
     `taken_ids` are ids already claimed elsewhere (built-ins, other files)."""
     seen: set[str] = set()
@@ -318,7 +389,7 @@ def validate(parsed: ParsedFile, taken_ids: set[str] = frozenset(), *, define: b
         if d.id in taken_ids or d.id in seen:
             errs.append(f"block id {d.id!r} is already taken")
         seen.add(d.id)
-        errs.extend(validate_definition(d, define=define))
+        errs.extend(validate_definition(d, signature=signature))
     return parsed
 
 
@@ -414,90 +485,87 @@ def definition_for(block) -> BlockDefinition:
 # ---- running block code on request -----------------------------------------
 #
 # Examples ("Try it", `modelmaker check-blocks`) and trial runs on a canvas
-# block's output execute block code. They run in a fresh process with a
-# timeout -- sandboxed by process, not by permission: a hanging or crashing
-# example can't take the server down, but it is still trusted code.
+# block's output execute block code, so they are tasks like any block run:
+# submitted to an executor (by default the one the Runner uses, see
+# runner.EXECUTOR), which runs them in a single-use task process started
+# without this process's secrets, and hands back only data (execution/
+# wire.py). A timeout stops a hanging one; a crashing one can't take this
+# process down.
 
 EXAMPLE_TIMEOUT = 30.0
+CRASHED = "the process running the block crashed"
 
 
-def _child_examples(source: str, origin: str, ids: list[str] | None, conn) -> None:
-    import traceback
+def _default_executor():
+    from . import runner
 
-    out: dict[str, dict[str, Any]] = {}
+    return runner.EXECUTOR
+
+
+def _run_task(entry: str, args: tuple[Any, ...], timeout: float, executor=None) -> tuple[bool, Any]:
+    """Run one run_worker entry point through `executor` with a timeout:
+    (True, its value) or (False, a one-line error)."""
+    import threading
+
+    from .execution import Task, TaskCancelled
+
+    executor = executor or _default_executor()
+    stop = threading.Event()
+    timer = threading.Timer(timeout, stop.set)
+    timer.daemon = True
+    timer.start()
     try:
-        import polars as pl
-
-        ns: dict[str, Any] = {"pl": pl, "__name__": "modelmaker_block_examples"}
-        flags = __future__.annotations.compiler_flag
-        exec(compile(source, origin, "exec", flags=flags, dont_inherit=True), ns)  # trusted block code, on request
-        parsed = parse_source(source, origin)
-        for d in parsed.definitions:
-            if ids is not None and d.id not in ids:
-                continue
-            name = parsed.examples.get(d.id)
-            if name is None:
-                out[d.id] = {"ok": None, "error": "no _example_ for this block"}
-                continue
-            try:
-                ns[name]()
-                out[d.id] = {"ok": True, "error": None}
-            except BaseException as e:  # noqa: BLE001 -- reported per example
-                tb = traceback.extract_tb(e.__traceback__)
-                line = next((f.lineno for f in reversed(tb) if f.filename == origin), None)
-                out[d.id] = {"ok": False, "error": f"{type(e).__name__}: {e}", "line": line}
-    except BaseException as e:  # noqa: BLE001 -- the file itself failed to run
-        out["__file__"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    conn.send(out)
-    conn.close()
-
-
-def _child_call(block_id: str, code: str, kwargs: dict[str, Any], conn) -> None:
-    try:
-        from .run_worker import _collect
-
-        fn = compile_fn(block_id, code)
-        result = fn(**kwargs)
-        result = tuple(_collect(v, None) for v in result) if isinstance(result, tuple) else _collect(result, None)
-        conn.send((True, result))
-    except BaseException as e:  # noqa: BLE001 -- reported to the caller
-        conn.send((False, f"{type(e).__name__}: {e}"))
-    conn.close()
-
-
-def _in_child(target, args: tuple, timeout: float):
-    import multiprocessing
-
-    ctx = multiprocessing.get_context("spawn")
-    recv, send = ctx.Pipe(duplex=False)
-    proc = ctx.Process(target=target, args=(*args, send), daemon=True)
-    proc.start()
-    send.close()
-    try:
-        if recv.poll(timeout):
-            return True, recv.recv()
+        (result,) = executor.wait([executor.submit(Task(entry, args))], stop, max_concurrent=1)
+    except TaskCancelled:
         return False, f"timed out after {timeout:.0f}s"
-    except EOFError:
-        return False, "the process running the block crashed"
     finally:
-        if proc.is_alive():
-            proc.kill()
-        proc.join(5)
+        timer.cancel()
+    if result.ok:
+        return True, result.value
+    if result.crashed:
+        return False, f"{CRASHED} ({result.error})" if result.error else CRASHED
+    return False, result.error or "the block failed without an error message"
 
 
-def run_examples(source: str, origin: str, ids: list[str] | None = None, timeout: float = EXAMPLE_TIMEOUT) -> dict[str, dict[str, Any]]:
-    """Run a file's `_example_<id>` self-checks in a fresh process: {block
-    id: {"ok": True|False|None (no example), "error", "line"}}; a file that
-    fails to run at all reports under "__file__"."""
-    ok, result = _in_child(_child_examples, (source, origin, ids), timeout)
-    return result if ok else {"__file__": {"ok": False, "error": result}}
+def _example_report(raw: Any) -> dict[str, dict[str, Any]]:
+    """The examples task's report, reshaped to exactly what callers read --
+    it comes from a process that ran the file's code, so its shape isn't
+    taken on trust (the wire format already guarantees it's only data)."""
+    if not isinstance(raw, dict):
+        return {"__file__": {"ok": False, "error": "the examples run returned no report"}}
+    out: dict[str, dict[str, Any]] = {}
+    for key, item in raw.items():
+        if not isinstance(key, str) or not isinstance(item, dict):
+            continue
+        ok = item.get("ok")
+        entry: dict[str, Any] = {
+            "ok": ok if ok in (True, False, None) else False,
+            "error": item["error"][:20_000] if isinstance(item.get("error"), str) else None,
+        }
+        if "line" in item:
+            line = item["line"]
+            entry["line"] = line if type(line) is int else None
+        out[key] = entry
+    return out
 
 
-def try_call(definition: BlockDefinition, kwargs: dict[str, Any], timeout: float = EXAMPLE_TIMEOUT) -> tuple[bool, Any]:
+def run_examples(
+    source: str, origin: str, ids: list[str] | None = None, timeout: float = EXAMPLE_TIMEOUT, executor=None
+) -> dict[str, dict[str, Any]]:
+    """Run a file's `_example_<id>` self-checks as a task: {block id: {"ok":
+    True|False|None (no example), "error", "line"}}; a file that fails to
+    run at all reports under "__file__" (see run_worker.run_examples_entry)."""
+    ok, result = _run_task("run_examples_entry", (source, origin, ids), timeout, executor)
+    return _example_report(result) if ok else {"__file__": {"ok": False, "error": result}}
+
+
+def try_call(
+    definition: BlockDefinition, kwargs: dict[str, Any], timeout: float = EXAMPLE_TIMEOUT, executor=None
+) -> tuple[bool, Any]:
     """Call a definition's function once on real inputs (a canvas block's
-    output) in a fresh process: (ok, result or error message)."""
-    ok, result = _in_child(_child_call, (definition.id, definition.code, kwargs), timeout)
-    return result if ok else (False, result)
+    output) as a task: (ok, result or error message)."""
+    code = definition.code if definition.source == "library" else None
+    return _run_task("run_worker_entry", (definition.id, code, kwargs, None), timeout, executor)
 
 
 # ---- writing literals ----------------------------------------------------

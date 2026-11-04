@@ -6,7 +6,6 @@ or provider is driving. See /agent-builder-proposal.md §5-§6."""
 
 from __future__ import annotations
 
-import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -1102,11 +1101,14 @@ def _draft_definition(
     errors = block_library.validate_definition(definition)
     if errors:
         raise ToolError("; ".join(errors))
-    sig = inspect.signature(definition.fn)
-    names = list(sig.parameters)
+    # The static signature: checking an AI-drafted block never runs it. A
+    # default that isn't a literal stays out of `defaults` (and so out of
+    # the placed block's params): the function's own default applies.
+    sig = definition.signature
+    names = list(sig.names)
     if names[: len(inputs)] != inputs:
         raise ToolError(f"the function's first parameters must be the input ports {inputs} in order; got {names}")
-    defaults = {n: p.default for n, p in sig.parameters.items() if n not in inputs and p.default is not inspect.Parameter.empty}
+    defaults = {n: v for n, v in sig.literal_defaults().items() if n not in inputs}
     check_code_excluded(b, code)
     return definition, entry, defaults
 

@@ -85,7 +85,9 @@ def test_parse_reads_the_literal_and_finds_each_blocks_code_and_helpers():
     assert "_FACTOR = 2" in d.code and "def _scaled(" in d.code and "def double_it(" in d.code
     assert "_example_" not in d.code and "def halve_it(" not in d.code
     assert parsed.examples == {"double_it": "_example_double_it"}
-    assert d.fn(pl.DataFrame({"a": [3]}))["a"].to_list() == [6]
+    # Runs in a task process: this process never defines a library block.
+    ok, out = bl.try_call(d, {"df": pl.DataFrame({"a": [3]})})
+    assert ok and out["a"].to_list() == [6]
 
 
 def test_parsing_and_listing_never_run_the_file(block_library_dir):
@@ -340,7 +342,8 @@ def test_import_preview_flags_clashes_and_commit_applies_choices(block_library_d
     written = store.import_commit(upload, {"pd.py:double_it": "overwrite", "pd.py:halve_it": "rename"})
     assert written == ["double_it", "halve_it_2"]
     assert store.find("pd.py", "double_it").version == 3
-    assert store.find("pd.py", "halve_it_2").fn(pl.DataFrame({"a": [4]}))["a"].to_list() == [2.0]
+    ok, out = bl.try_call(store.find("pd.py", "halve_it_2"), {"df": pl.DataFrame({"a": [4]})})
+    assert ok and out["a"].to_list() == [2.0]
 
 
 @pytest.mark.parametrize("name", ["../evil.py", "dir/evil.py", "/abs.py"])
@@ -375,7 +378,8 @@ def test_a_placed_block_embeds_its_definition_and_survives_without_the_library(b
     (block_library_dir / "pd.py").unlink()
     store.reload()
     graph = load_project(path)
-    assert graph.blocks[bid].resolve().fn(pl.DataFrame({"a": [1]}))["a"].to_list() == [2]
+    ok, out = bl.try_call(graph.blocks[bid].resolve(), {"df": pl.DataFrame({"a": [1]})})
+    assert ok and out["a"].to_list() == [2]
     assert (tmp_path / "proj" / "blocks" / f"{bid}.py").read_text().startswith("_FACTOR = 2")
     assert library_updates.status_for(graph.blocks[bid])["in_library"] is False
 

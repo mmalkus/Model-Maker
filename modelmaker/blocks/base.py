@@ -12,9 +12,11 @@ metadata_transforms.py and agent/hint_rules.py.
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
+
+if TYPE_CHECKING:
+    from ..signature import BlockSignature
 
 PortType = Literal[
     "dataframe",
@@ -143,8 +145,11 @@ class BlockDefinition:
     origin: str | None
     sha: str
     description: str = ""
-    # Resolved lazily for a library definition (see block_library.compile_fn).
+    # The real function: set at load for a built-in (trusted package code);
+    # for a library definition, defined from `code` only inside a task
+    # process (see the `fn` property).
     _fn: BlockFn | None = field(default=None, repr=False)
+    _signature: BlockSignature | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         m = self.meta
@@ -177,21 +182,35 @@ class BlockDefinition:
 
     @property
     def fn(self) -> BlockFn:
+        """The block's function. A built-in's is its module attribute; a
+        library block's is defined from `code`, which executes the block's
+        module-level code -- so this is only allowed in a task process
+        (block_library.compile_fn raises anywhere else). Everything that
+        only needs to know the parameters uses `signature` instead."""
         if self._fn is None:
             from ..block_library import compile_fn
 
             self._fn = compile_fn(self.id, self.code)
         return self._fn
 
+    @property
+    def signature(self) -> BlockSignature:
+        """The function's parameters, read from `code` with the AST -- the
+        same for a built-in and a library block, and never executing either
+        (see signature.py). Raises signature.SignatureError when the code
+        has no `def <id>(...)`."""
+        if self._signature is None:
+            from ..signature import BlockSignature
+
+            self._signature = BlockSignature.from_code(self.code, self.id)
+        return self._signature
+
     def param_defaults(self) -> dict[str, Any]:
-        """Every parameter's signature default (ports and required params
-        left out) -- what the declarative metadata rules see for a param the
-        user hasn't set."""
-        return {
-            name: p.default
-            for name, p in inspect.signature(self.fn).parameters.items()
-            if p.default is not inspect.Parameter.empty
-        }
+        """Every parameter's signature default whose value is a literal
+        (ports and required params left out) -- what the declarative
+        metadata rules see for a param the user hasn't set. A non-literal
+        default isn't known outside the task process, so it's left out."""
+        return self.signature.literal_defaults()
 
     def embedded(self) -> dict[str, Any]:
         """The copy a placed library block keeps in the project file, so it

@@ -8,7 +8,6 @@ confirms `apply`.
 from __future__ import annotations
 
 import difflib
-import inspect
 from typing import Any
 
 from . import block_library as bl
@@ -67,18 +66,11 @@ def target_for(block: BlockInstance) -> tuple[BlockDefinition, dict[str, Any] | 
 
 def _required_params(d: BlockDefinition) -> set[str]:
     ports = {p.name for p in d.inputs}
-    return {
-        n
-        for n, p in inspect.signature(d.fn).parameters.items()
-        if p.default is inspect.Parameter.empty
-        and n not in ports
-        and n not in bl.INJECTED_PARAMS
-        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    }
+    return {p.name for p in d.signature.params if p.required and p.name not in ports and p.name not in bl.INJECTED_PARAMS}
 
 
 def _param_names(d: BlockDefinition) -> set[str]:
-    return set(inspect.signature(d.fn).parameters) - {p.name for p in d.inputs}
+    return set(d.signature.names) - {p.name for p in d.inputs}
 
 
 def migrate_params(params: dict[str, Any], new: BlockDefinition) -> tuple[dict[str, Any], dict[str, str], list[str]]:
