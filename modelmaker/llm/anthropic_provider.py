@@ -31,9 +31,12 @@ class AnthropicProvider(LLMProvider):
     Requires an API key -- from the Settings panel, ANTHROPIC_API_KEY, or an
     `ant auth login` profile, in that order."""
 
-    def __init__(self, model: str | None = None, api_key: str | None = None):
+    def __init__(self, model: str | None = None, api_key: str | None = None, base_url: str | None = None):
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL", DEFAULT_MODEL)
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        # base_url: an endpoint override from Settings (a proxy, a gateway);
+        # unset, the SDK's own default (ANTHROPIC_BASE_URL, else the API).
+        kwargs = {k: v for k, v in (("api_key", api_key), ("base_url", base_url)) if v}
+        self.client = anthropic.Anthropic(**kwargs)
 
     def draft(self, ctx: DraftContext) -> DraftResult:
         if ctx.mode == "params_only":

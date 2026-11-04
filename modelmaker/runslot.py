@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Any, Callable
 
@@ -64,7 +65,9 @@ class RunSlot:
                 except Exception as e:  # noqa: BLE001 -- has no caller to raise to once the wait below gives up
                     self._last_error = f"{type(e).__name__}: {e}"
 
-            thread = threading.Thread(target=_target, daemon=True)
+            # In the caller's context, so per-request lookups (the
+            # request's workspace) give the same answer on the run thread.
+            thread = threading.Thread(target=contextvars.copy_context().run, args=(_target,), daemon=True)
             self._thread = thread
             thread.start()
         thread.join(timeout=wait_seconds)

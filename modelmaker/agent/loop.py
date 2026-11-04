@@ -105,11 +105,12 @@ class AnthropicLoop(AgentLoop):
     """Manual tool-use loop over the Messages API -- not the SDK's tool
     runner, so stop/limits/logging stay in AgentBuild.call_tool."""
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None, base_url: str | None = None) -> None:
         import anthropic
 
         self.model = model or os.environ.get("MODELMAKER_LLM_MODEL", ANTHROPIC_DEFAULT_MODEL)
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        kwargs = {k: v for k, v in (("api_key", api_key), ("base_url", base_url)) if v}
+        self.client = anthropic.Anthropic(**kwargs)
         self.system = ""
         self.messages: list[dict[str, Any]] = []
 
@@ -685,11 +686,11 @@ def make_loop(
 ) -> AgentLoop:
     """`api_base_url`/`token` are this server's own address and the build's
     MCP token (claude_cli only); `base_url` is the provider endpoint
-    override from Settings (openai/gemini)."""
+    override from Settings (anthropic/openai/gemini/lmstudio)."""
     if provider == "claude_cli":
         return ClaudeCliLoop(model, api_base_url, token)
     if provider == "anthropic":
-        return AnthropicLoop(model, api_key=api_key)
+        return AnthropicLoop(model, api_key=api_key, base_url=base_url)
     if provider == "openai":
         return OpenAILoop(model, api_key=api_key, base_url=base_url)
     if provider == "gemini":
