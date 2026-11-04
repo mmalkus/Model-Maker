@@ -33,7 +33,18 @@ export interface PortSpec {
 export interface FormField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'column' | 'columns' | 'checkbox' | 'path' | 'sql' | 'env'
+  kind:
+    | 'text'
+    | 'number'
+    | 'select'
+    | 'column'
+    | 'columns'
+    | 'checkbox'
+    | 'path'
+    | 'sql'
+    | 'env'
+    | 'dataset'
+    | 'source'
   placeholder: string
   step: number | null
   options: string[]
@@ -616,4 +627,23 @@ export interface GitStatusOut {
   changes: GitChange[]
   ahead: number
   behind: number
+}
+
+// One of the workspace's datasets, as GET /api/datasets lists them for a
+// 'dataset' field's picker (see modelmaker/datasets.py). The embedding
+// application supplies them; the local app has none.
+export interface DatasetEntry {
+  name: string
+  version: string
+  format: string
+  size: number
+  updated_at: string
+  origin: string
+  description: string
+}
+
+// A data source the administrator defined, for a 'source' field's picker.
+export interface SourceEntry {
+  name: string
+  description: string
 }

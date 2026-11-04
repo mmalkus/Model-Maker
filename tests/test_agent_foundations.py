@@ -240,13 +240,17 @@ def test_analyze_data_prompt_never_contains_text_values(tmp_path, monkeypatch):
 
 
 def test_every_block_has_a_complete_catalogue_entry():
-    listed = {e["category"] for e in list_block_types(include_disallowed=True)}
-    assert listed == set(BLOCK_REGISTRY)
-    for category in BLOCK_REGISTRY:
-        entry = describe_block_type(category)
-        assert entry["summary"], f"{category} has no docstring summary"
-        for p in entry["params"]:
-            assert p["name"] not in {"output_dir", "block_id", "sample_rows"}
+    from modelmaker import capabilities
+
+    # Every capability granted: the catalogue knows every built-in.
+    with capabilities.granting(capabilities.KNOWN):
+        listed = {e["category"] for e in list_block_types(include_disallowed=True)}
+        assert listed == set(BLOCK_REGISTRY)
+        for category in BLOCK_REGISTRY:
+            entry = describe_block_type(category)
+            assert entry["summary"], f"{category} has no docstring summary"
+            for p in entry["params"]:
+                assert p["name"] not in {"output_dir", "block_id", "sample_rows"}
 
 
 def test_disallowed_blocks_are_hidden_by_default():

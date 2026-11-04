@@ -62,7 +62,15 @@ BlockFn = Callable[..., Any]
 # `path` (a file the block reads -- its mtime/size is the block's change
 # fingerprint, see sources.py), `sql` (a query text) and `env` (the *name* of
 # an environment variable) render like `text` with extra help in the UIs.
-FieldKind = Literal["text", "number", "select", "column", "columns", "checkbox", "path", "sql", "env"]
+# `dataset` (the name of one of the workspace's datasets) and `source` (the
+# name of an administrator-defined data source) render as pickers over what
+# the workspace offers (GET /api/datasets, /api/sources); the engine resolves
+# them to a read-only file before the block runs (see datasets.py). `path`
+# and `env` need the workspace's `filesystem` capability, `dataset` its
+# `datasets` and `source` its `sources` (see capabilities.py).
+FieldKind = Literal[
+    "text", "number", "select", "column", "columns", "checkbox", "path", "sql", "env", "dataset", "source"
+]
 FIELD_KINDS: frozenset[str] = frozenset(FieldKind.__args__)  # type: ignore[attr-defined]
 
 
@@ -162,6 +170,9 @@ class BlockDefinition:
         self.outputs: list[PortSpec] = [_port(p) for p in m.get("outputs", [])]
         self.form: tuple[FieldSpec, ...] = tuple(_field(f) for f in m.get("form", []))
         self.requires: tuple[str, ...] = tuple(m.get("requires", ()))
+        # What the block needs the workspace to allow (see capabilities.py),
+        # beyond what its form's field kinds already imply.
+        self.capabilities: tuple[str, ...] = tuple(m.get("capabilities", ()))
         self.hints: str | None = m.get("hints")
         self.display: DisplayKind | None = m.get("display")
         self.metadata: dict[str, Any] = dict(m.get("meta") or {})

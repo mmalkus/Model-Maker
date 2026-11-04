@@ -252,6 +252,13 @@ def _resolve_role_value(graph: Graph, runner, block_id: str, role: ColumnRole) -
     return resolve_role_column(schema_metas, role)
 
 
+def _try_resolve_definition(block):
+    try:
+        return block.resolve()
+    except KeyError:
+        return None
+
+
 def compile_graph(
     graph: Graph,
     runner=None,
@@ -293,6 +300,22 @@ def compile_graph(
     if fan_out:
         raise CompileError(
             f"compiling a graph containing a fan-out region isn't supported yet (iterate/collect block(s): {fan_out})"
+        )
+
+    # Datasets, sources and exports only exist inside the application that
+    # provides them (see datasets.py): a standalone script has nothing to
+    # resolve a dataset's name against, or to send an export to.
+    from .capabilities import DATASETS, EXPORTS, SOURCES, required
+
+    app_data = sorted(
+        b
+        for b in reachable
+        if (d := _try_resolve_definition(graph.blocks[b])) is not None and required(d) & {DATASETS, SOURCES, EXPORTS}
+    )
+    if app_data:
+        raise CompileError(
+            "compiling a graph that reads datasets or sources, or makes exports, isn't supported "
+            f"(they live in the application, not in a script): {app_data}"
         )
 
     order = [b for b in graph.topo_order() if b in reachable]
