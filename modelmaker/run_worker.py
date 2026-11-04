@@ -1,9 +1,13 @@
 """Subprocess entry points for executing block calls in isolation (see
-Runner._run_tasks in runner.py). Kept in its own module, importing as
-little as possible at module level, because these are what every worker
-process runs: a single-use worker (worker_pool.spare_main) looks its task's
-entry point up here by name and calls it with the task's args, plus a
-`result_queue` to report to and the `task_key` to report under.
+Runner._run_tasks in runner.py and execution/local.py). Kept in its own
+module, importing as little as possible at module level, because these are
+what every worker process runs: a single-use worker
+(worker_pool.worker_main) looks its task's entry point up here by name and
+calls it with the task's args, plus a `result_queue` to report to and the
+`task_key` to report under. What an entry point puts on `result_queue` is
+encoded into the data-only wire format (execution/wire.py) before it
+leaves this process, so a payload here must be a dataframe, JSON-shaped,
+bytes or a numpy array -- see wire.py for the full list.
 
 Running every block call -- grouped or not -- in its own process is what
 makes a runaway or misconfigured block (e.g. group_by on a near-unique

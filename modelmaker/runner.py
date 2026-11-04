@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 import multiprocessing
-import multiprocessing.connection
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -19,6 +18,8 @@ from .graph import BlockInstance, Graph
 from .metadata_transforms import schema_diff
 from .sources import SOURCE_PARAMS, fingerprint
 from .packet import ColumnMeta, ColumnRole, DataFramePacket, find_duplicate_unique_role, resolve_role_column
+from .execution import Executor, Task, TaskCancelled
+from .execution.local import LocalExecutor
 from .worker_pool import WorkerPool, pool_size_from_env
 from .util import ROLE_PARAM_NAMES, accepts_param, find_role_param
 
@@ -38,18 +39,20 @@ Status = Literal["grey", "green", "orange", "red", "running"]
 # starts a genuinely fresh interpreter instead, at the cost of a slower
 # process start (re-importing polars/sklearn/etc.), which is why
 # run_worker_entry rebuilds a block's function from (category, code)
-# rather than relying on inherited memory.
+# rather than relying on inherited memory. (On POSIX the worker pool now
+# execs that fresh interpreter itself, so it can start it without this
+# process's secrets in its environment -- see worker_pool.py; this context
+# is the fallback elsewhere, e.g. on Windows.)
 MP_CONTEXT = multiprocessing.get_context("spawn")
 
 # Spares started ahead of use so a block run doesn't pay that slower start
 # in line -- still one fresh process per task, see worker_pool.py. Shared
-# by every Runner in this process.
+# by every Runner in this process, through the default executor below.
 WORKER_POOL = WorkerPool(MP_CONTEXT, pool_size_from_env())
 
-# How often the dispatch loop wakes up to check for a cancellation request
-# or a worker that died without reporting a result -- small enough that
-# Stop and crash-detection both feel immediate, large enough not to busy-loop.
-POLL_INTERVAL = 0.05
+# Where every Runner's block calls run unless it's given another executor
+# (see execution/: the seam a sandboxed RemoteExecutor plugs into).
+EXECUTOR: Executor = LocalExecutor(WORKER_POOL)
 
 
 @dataclass(frozen=True)
@@ -310,8 +313,12 @@ class Runner:
         cache: CacheStore | None = None,
         output_dir: str = "./output",
         sample_rows: int | None = None,
+        executor: Executor | None = None,
     ):
         self.graph = graph
+        # Read at each dispatch (not bound here) so the default can be
+        # swapped process-wide; None means the module's EXECUTOR.
+        self._executor = executor
         self.cache = cache or CacheStore()
         self.output_dir = output_dir
         # Sample mode: when set, every input block's dataframe outputs are
@@ -794,18 +801,19 @@ class Runner:
     ) -> tuple[dict[Any, Any], dict[Any, str]]:
         """The shared engine under _dispatch, _dispatch_fused_group and
         _dispatch_iterations: runs each task -- key -> (run_worker entry
-        point name, its args) -- in a single-use worker process of its own
-        (see worker_pool.py), up to `max_workers` at a time, and returns
-        ({key: result}, {key: error message}).
+        point name, its args) -- through the executor (by default a
+        single-use local worker process per task, see execution/local.py),
+        up to `max_workers` at a time, and returns ({key: result}, {key:
+        error message}).
 
         Every id in `active_ids` is registered in self._active for the
         duration, sharing one cancel_event, so status()/is_running() report
         "running" for each and cancel() against any of them stops them all
         -- raising RunCancelled here. A worker that dies without reporting
-        (segfault, OS OOM-kill) becomes an error entry, never a hang."""
+        (segfault, OS OOM-kill) becomes an error entry, never a hang, and so
+        does a result the executor refuses to accept (not data, too big)."""
+        executor = self._executor or EXECUTOR
         cancel_event = threading.Event()
-        pending = list(tasks.items())
-        running: dict[Any, Any] = {}  # task key -> worker_pool.Worker
         results: dict[Any, Any] = {}
         errors: dict[Any, str] = {}
         started_at = time.monotonic()
@@ -813,45 +821,19 @@ class Runner:
         with self._active_lock:
             for aid in active_ids:
                 self._active[aid] = {"cancel_event": cancel_event, "started_at": started_at}
-
-        def _start_next() -> None:
-            # Acquire every free slot's worker before sending any task: a
-            # send can block until its worker has finished importing, and
-            # sending one at a time would serialize the cold starts.
-            batch = []
-            while pending and len(running) < max(1, max_workers):
-                key, (entry_name, args) = pending.pop(0)
-                running[key] = WORKER_POOL.acquire()
-                batch.append((key, entry_name, args))
-            for key, entry_name, args in batch:
-                try:
-                    running[key].send_task(entry_name, args, key)
-                except (BrokenPipeError, EOFError, OSError):
-                    pass  # died before taking the task -- reported as a crash by the loop below
-
         try:
-            _start_next()
-            while running:
-                if cancel_event.is_set():
-                    raise RunCancelled("cancelled by user")
-                by_conn = {w.conn: key for key, w in running.items()}
-                # A worker that dies closes its end of the pipe, which
-                # also makes its conn ready -- recv() then raises EOFError.
-                for conn in multiprocessing.connection.wait(list(by_conn), timeout=POLL_INTERVAL):
-                    key = by_conn[conn]
-                    worker = running.pop(key)
-                    try:
-                        _key, ok, payload, learned = conn.recv()
-                    except (EOFError, OSError):
-                        errors[key] = worker.crash_message()
-                    else:
-                        WORKER_POOL.learn(learned)
-                        (results if ok else errors)[key] = payload
-                    worker.stop()
-                _start_next()
+            keys = list(tasks)
+            handles = [executor.submit(Task(entry, args)) for entry, args in tasks.values()]
+            try:
+                outcomes = executor.wait(handles, cancel_event, max_concurrent=max(1, max_workers))
+            except TaskCancelled:
+                raise RunCancelled("cancelled by user") from None
+            for key, outcome in zip(keys, outcomes):
+                if outcome.ok:
+                    results[key] = outcome.value
+                else:
+                    errors[key] = outcome.error or "task failed"
         finally:
-            for worker in running.values():
-                worker.stop()
             with self._active_lock:
                 for aid in active_ids:
                     self._active.pop(aid, None)

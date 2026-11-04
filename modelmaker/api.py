@@ -1161,9 +1161,11 @@ def set_env_var(name: str, req: EnvVarUpdate) -> dict[str, Any]:
     """Sets an env var for the rest of this server process's lifetime --
     e.g. a Read SQL block's connection string. Deliberately writes straight
     into os.environ (unlike LLM_SETTINGS' own separate override dict):
-    block functions run in a spawned subprocess (see runner.MP_CONTEXT),
-    which inherits the parent's *current* os.environ at spawn time, so this
-    is what actually makes the value visible there. Never written to disk,
+    block functions run in a worker subprocess (see worker_pool.py), which
+    is handed the parent's *current* os.environ with each task -- minus
+    the secrets in execution/env.py, so a variable on that denylist set
+    here never reaches a block -- which is what actually makes the value
+    visible there. Never written to disk,
     never persisted in a project file, and never echoed back by any
     endpoint -- gone on restart, exactly like an LLM API key override."""
     if not _ENV_VAR_NAME_RE.match(name):
