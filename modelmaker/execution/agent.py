@@ -2,6 +2,7 @@
 
     python -m modelmaker.execution.agent --fd N          # an inherited, connected socket
     python -m modelmaker.execution.agent --listen PATH   # accept one connection on PATH
+        [--socket-mode 0660]                             # who may connect (default 0600)
     modelmaker-runner ...                                 # the same, as a console script
 
 A long-lived process on the far side of the execution boundary. It serves
@@ -245,14 +246,21 @@ def make_executor(warm_workers: int | None = None) -> LocalExecutor:
     return LocalExecutor(WorkerPool(multiprocessing.get_context("spawn"), size), raw_results=True)
 
 
-def _accept_one(path: str) -> socket.socket:
+def _accept_one(path: str, mode: int = 0o600) -> socket.socket:
+    """Accept exactly one connection on a new socket at `path`, created with
+    `mode` (connecting needs write permission on it: the default lets only
+    its owner in; e.g. 0o660 lets its group in too, for a socket in a
+    setgid directory shared with the client)."""
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        old = os.umask(0o177)
+        # Created with no permissions beyond `mode` from the start (umask),
+        # then set to exactly `mode` before anyone can connect.
+        old = os.umask(0o777 & ~mode)
         try:
             listener.bind(path)
         finally:
             os.umask(old)
+        os.chmod(path, mode)
         listener.listen(1)
         conn, _ = listener.accept()
     finally:
@@ -260,6 +268,19 @@ def _accept_one(path: str) -> socket.socket:
         with contextlib.suppress(OSError):
             os.unlink(path)
     return conn
+
+
+def _socket_mode(text: str) -> int:
+    try:
+        mode = int(text, 8)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an octal mode: {text!r}") from None
+    if mode & ~0o666:
+        # Execute and the special bits mean nothing on a socket.
+        raise argparse.ArgumentTypeError(f"a socket mode has only read and write bits: {text!r}")
+    if not mode & 0o200:
+        raise argparse.ArgumentTypeError(f"the owner must be able to connect: {text!r}")
+    return mode
 
 
 def _on_signal(signum: int, frame: Any) -> None:
@@ -273,7 +294,15 @@ def main(argv: list[str] | None = None) -> int:
     where.add_argument("--listen", metavar="PATH", help="a Unix socket path to accept exactly one connection on")
     parser.add_argument("--warm-workers", type=int, default=None, help="spare task processes (default: MODELMAKER_WARM_WORKERS or 2)")
     parser.add_argument("--cwd", default=None, help="the directory to run in (entered once started)")
+    parser.add_argument(
+        "--socket-mode",
+        type=_socket_mode,
+        default=0o600,
+        help="with --listen: the socket's permissions, in octal (default 0600: only this user may connect)",
+    )
     args = parser.parse_args(argv)
+    if args.socket_mode != 0o600 and args.listen is None:
+        parser.error("--socket-mode needs --listen")
     if args.cwd is not None:
         os.chdir(args.cwd)
 
@@ -281,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         os.set_inheritable(args.fd, False)  # task processes never hold the client's socket
         sock = socket.socket(fileno=args.fd)
     else:
-        sock = _accept_one(args.listen)
+        sock = _accept_one(args.listen, args.socket_mode)
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     if hasattr(signal, "SIGHUP"):

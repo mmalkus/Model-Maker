@@ -120,9 +120,11 @@ def agent_command(
     warm_workers: int | None = None,
     cwd: str | None = None,
     python: str | None = None,
+    socket_mode: int | None = None,
 ) -> list[str]:
     """argv that runs a runner agent serving the socket on `fd`, or the
-    one connection it accepts on `listen`."""
+    one connection it accepts on `listen` (created with `socket_mode`,
+    default 0o600)."""
     flags = list(getattr(subprocess, "_args_from_interpreter_flags", list)())
     if "-P" not in flags:
         flags.append("-P")
@@ -132,6 +134,8 @@ def agent_command(
         cmd += ["--warm-workers", str(warm_workers)]
     if cwd is not None:
         cmd += ["--cwd", cwd]
+    if socket_mode is not None:
+        cmd += ["--socket-mode", f"{socket_mode:04o}"]
     return cmd
 
 
