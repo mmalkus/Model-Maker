@@ -110,3 +110,26 @@ def write_library_file(name: str, blocks: dict[str, dict[str, Any]], code: str, 
     path.write_text(source, encoding="utf-8")
     library_store.reload()
     return name
+
+
+# The executors the conformance tests run against (see
+# tests/test_execution_executor.py): the local one, and a runner agent
+# over a socket standing in for it.
+EXECUTOR_KINDS = ("local", "remote")
+
+
+def make_executor(kind: str, warm: int = 0, launcher: str | None = None, **kwargs: Any):
+    """A fresh executor of `kind` with `warm` spares. "remote" is a
+    RemoteExecutor over a local runner agent, with this process's
+    environment and cwd forwarded per task, as a LocalExecutor's tasks get
+    them."""
+    from modelmaker.execution.local import LocalExecutor
+    from modelmaker.runner import MP_CONTEXT
+    from modelmaker.worker_pool import WorkerPool
+
+    if kind == "local":
+        return LocalExecutor(WorkerPool(MP_CONTEXT, warm, launcher=launcher), **kwargs)
+    from modelmaker.execution.remote import RemoteExecutor, spawn_agent
+
+    assert launcher in (None, "exec"), "the agent's own pool uses the exec launcher"
+    return RemoteExecutor(lambda: spawn_agent(warm_workers=warm), local_context=True, **kwargs)

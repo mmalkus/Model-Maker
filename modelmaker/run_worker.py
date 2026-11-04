@@ -21,6 +21,11 @@ from __future__ import annotations
 
 from typing import Any
 
+# The entry points a task may name. A local executor looks a task's entry
+# up by name in this module; a runner agent (execution/agent.py), whose
+# tasks come over a socket, refuses any other name.
+ENTRY_POINTS = frozenset({"run_worker_entry", "run_fused_group_entry", "run_iteration_entry", "run_examples_entry"})
+
 
 def resolve_fn(category: str, code: str | None):
     """A block's function inside a worker: a built-in's from the package

@@ -1,7 +1,8 @@
 """The Executor seam (modelmaker/execution): LocalExecutor keeps the
 Runner's old dispatch behaviour -- concurrency cap, Stop, crash detection,
 the warm spare pool -- and the Runner goes through whatever executor it's
-given."""
+given. The tests of the contract run against both executors: LocalExecutor
+and a RemoteExecutor over a runner agent (see helpers.make_executor)."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from modelmaker.graph import Graph, Wire
 from modelmaker.runner import MP_CONTEXT, Runner
 from modelmaker.worker_pool import WorkerPool
 
-from .helpers import make_block
+from .helpers import EXECUTOR_KINDS, make_block, make_executor
 
 
 def _call(code: str, **kwargs) -> Task:
@@ -28,9 +29,9 @@ def _call(code: str, **kwargs) -> Task:
     return Task("run_worker_entry", (name, code, kwargs, None))
 
 
-@pytest.fixture
-def executor():
-    ex = LocalExecutor(WorkerPool(MP_CONTEXT, 0))
+@pytest.fixture(params=EXECUTOR_KINDS)
+def executor(request):
+    ex = make_executor(request.param)
     yield ex
     ex.close()
 
@@ -91,8 +92,9 @@ def test_cancel_stops_every_task_promptly(executor, tmp_path):
     assert not any((tmp_path / f"t{i}").exists() for i in range(3))
 
 
-def test_a_result_over_the_cap_is_rejected_by_the_parent(tmp_path):
-    ex = LocalExecutor(WorkerPool(MP_CONTEXT, 0), max_result_bytes=1024**2)
+@pytest.mark.parametrize("kind", EXECUTOR_KINDS)
+def test_a_result_over_the_cap_is_rejected_by_the_parent(tmp_path, kind):
+    ex = make_executor(kind, max_result_bytes=1024**2)
     try:
         code = "def big():\n    return pl.DataFrame({'a': list(range(500_000))})\n"
         (result,) = ex.wait([ex.submit(_call(code))], threading.Event())
@@ -132,9 +134,11 @@ def test_warm_spares_are_used_and_learn_imports():
         ex.close()
 
 
-@pytest.mark.parametrize("launcher", ["exec", "multiprocessing"])
-def test_both_launchers_run_tasks(launcher):
-    ex = LocalExecutor(WorkerPool(MP_CONTEXT, 0, launcher=launcher))
+@pytest.mark.parametrize(
+    ("kind", "launcher"), [("local", "exec"), ("local", "multiprocessing"), ("remote", None)]
+)
+def test_both_launchers_run_tasks(kind, launcher):
+    ex = make_executor(kind, launcher=launcher)
     try:
         code = "def tup():\n    return pl.DataFrame({'a': [1]}), {'n': 1}\n"
         (result,) = ex.wait([ex.submit(_call(code))], threading.Event())
@@ -149,7 +153,7 @@ class _RecordingExecutor:
     """Runs nothing in a subprocess: proves the Runner only talks to the
     executor it was given."""
 
-    def __init__(self, inner: LocalExecutor) -> None:
+    def __init__(self, inner: Executor) -> None:
         self.inner = inner
         self.entries: list[str] = []
 

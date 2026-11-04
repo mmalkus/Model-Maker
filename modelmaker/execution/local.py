@@ -45,11 +45,20 @@ class LocalExecutor:
     once, from different threads, through the one shared executor."""
 
     def __init__(
-        self, pool: WorkerPool | None = None, max_result_bytes: int | None = None, task_timeout: float | None = None
+        self,
+        pool: WorkerPool | None = None,
+        max_result_bytes: int | None = None,
+        task_timeout: float | None = None,
+        raw_results: bool = False,
     ) -> None:
         """`task_timeout`: wall-clock seconds a task may run once started;
         one still running then is stopped and fails with a message saying
-        so (None or 0: no limit, the local app's default)."""
+        so (None or 0: no limit, the local app's default).
+
+        `raw_results`: a successful result's `value` is the task's result
+        frame itself (bytes, its structure validated by wire.read_header but
+        its value not decoded) -- for a relay that passes results on to the
+        process that decodes them (the runner agent, agent.py)."""
         if pool is None:
             import multiprocessing
 
@@ -58,6 +67,7 @@ class LocalExecutor:
         # None: read MODELMAKER_MAX_RESULT_MB at each wait (see wire.py).
         self.max_result_bytes = max_result_bytes
         self.task_timeout = task_timeout or None
+        self.raw_results = raw_results
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         if harden_requested():
@@ -79,15 +89,30 @@ class LocalExecutor:
             return TaskHandle(next(self._ids), task)
 
     def wait(
-        self, handles: list[TaskHandle], cancel: threading.Event, max_concurrent: int | None = None
+        self,
+        handles: list[TaskHandle],
+        cancel: threading.Event,
+        max_concurrent: int | None = None,
+        *,
+        max_result_bytes: int | None = None,
+        task_timeout: float | None = None,
+        cwd: str | None = None,
     ) -> list[TaskResult]:
+        """See Executor.wait. The keyword-only arguments override, for this
+        batch only, the executor's result cap and time limit (the stricter
+        of the two applies) and the directory its tasks run in -- what a
+        relay running each of its client's tasks as its own batch needs."""
         limit = len(handles) if max_concurrent is None else max(1, max_concurrent)
         max_bytes = self.max_result_bytes if self.max_result_bytes is not None else wire.max_bytes_from_env()
+        if max_result_bytes is not None:
+            max_bytes = min(max_bytes, max_result_bytes)
         pending = list(handles)
         running: dict[TaskHandle, Worker] = {}
         started: dict[TaskHandle, float] = {}
         results: dict[TaskHandle, TaskResult] = {}
         timeout = self.task_timeout
+        if task_timeout:
+            timeout = task_timeout if timeout is None else min(timeout, task_timeout)
 
         def _start_next() -> None:
             # Acquire every free slot's worker before sending any task: a
@@ -101,7 +126,7 @@ class LocalExecutor:
             for handle in batch:
                 started[handle] = time.monotonic()
                 try:
-                    running[handle].send_task(handle.task.entry, handle.task.args, handle.task.env)
+                    running[handle].send_task(handle.task.entry, handle.task.args, handle.task.env, cwd)
                 except (BrokenPipeError, EOFError, OSError):
                     pass  # died before taking the task -- reported as a crash by the loop below
 
@@ -150,7 +175,10 @@ class LocalExecutor:
         except wire.WireError as e:
             return TaskResult(handle, ok=False, error=f"result rejected: {e}")
         try:
-            fields, value = wire.decode_frame(frame, max_bytes=max_bytes)
+            if self.raw_results:
+                fields, value = wire.read_header(frame, max_bytes=max_bytes)[0]["fields"], frame
+            else:
+                fields, value = wire.decode_frame(frame, max_bytes=max_bytes)
         except wire.WireError as e:
             return TaskResult(handle, ok=False, error=f"result rejected: {e}")
         except Exception as e:  # noqa: BLE001 -- a decoder bug must still be a red block, not a dead dispatch
