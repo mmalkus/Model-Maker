@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { BuildReportList } from './BuildReport'
-import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMSettingsOut, PlanQuestion } from './types'
+import type { BuildEvent, BuildOut, BuildPlan, BuildStage, ContinuableBuild, GraphOut, LLMProviderSettings, LLMSettingsOut, PlanQuestion } from './types'
 import { host } from './host'
 import { has } from './features'
 
@@ -236,8 +236,8 @@ function StartForm({
 
       <details style={{ marginTop: 8 }}>
         <summary style={{ cursor: 'pointer', color: 'var(--mm-fg-4)' }}>Models and options</summary>
-        <LlmPicker label="Plan LLM" value={planLlm} fallback={llmSettings?.agent.plan} capable={capable} onChange={setPlanLlm} />
-        <LlmPicker label="Build LLM" value={buildLlm} fallback={llmSettings?.agent.build} capable={capable} onChange={setBuildLlm} />
+        <LlmPicker label="Plan LLM" value={planLlm} fallback={llmSettings?.agent.plan} capable={capable} settings={llmSettings?.settings} onChange={setPlanLlm} />
+        <LlmPicker label="Build LLM" value={buildLlm} fallback={llmSettings?.agent.build} capable={capable} settings={llmSettings?.settings} onChange={setBuildLlm} />
         <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
           <input type="checkbox" checked={fullRun} onChange={(e) => setFullRun(e.target.checked)} />
           Finish with a run on the full data
@@ -309,18 +309,23 @@ function LlmPicker({
   value,
   fallback,
   capable,
+  settings,
   onChange,
 }: {
   label: string
   value: { provider: string; model: string }
   fallback?: { provider: string; model: string | null }
   capable: string[]
+  settings?: Record<string, LLMProviderSettings>
   onChange: (v: { provider: string; model: string }) => void
 }) {
+  // The provider in effect (the picked one, else the default) and the
+  // models it offers: a dropdown when there's a list, else a free text box.
+  const offered = settings?.[value.provider || fallback?.provider || '']?.models ?? []
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 6 }}>
       <span style={{ width: 64 }}>{text}</span>
-      <select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value })}>
+      <select value={value.provider} onChange={(e) => onChange({ provider: e.target.value, model: '' })}>
         <option value="">{fallback ? `default (${fallback.provider})` : 'default'}</option>
         {capable.map((p) => (
           <option key={p} value={p}>
@@ -328,12 +333,23 @@ function LlmPicker({
           </option>
         ))}
       </select>
-      <input
-        value={value.model}
-        onChange={(e) => onChange({ ...value, model: e.target.value })}
-        placeholder={fallback?.model ?? 'default model'}
-        style={{ flex: 1, minWidth: 0 }}
-      />
+      {offered.length > 0 ? (
+        <select value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} style={{ flex: 1, minWidth: 0 }}>
+          <option value="">{!value.provider && fallback?.model ? `default (${fallback.model})` : 'default model'}</option>
+          {offered.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          value={value.model}
+          onChange={(e) => onChange({ ...value, model: e.target.value })}
+          placeholder={fallback?.model ?? 'default model'}
+          style={{ flex: 1, minWidth: 0 }}
+        />
+      )}
     </div>
   )
 }
