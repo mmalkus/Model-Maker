@@ -14,6 +14,7 @@ which leave the local app's behaviour unchanged when unused:
 from __future__ import annotations
 
 import contextvars
+import json
 import os
 import subprocess
 import threading
@@ -192,7 +193,7 @@ def test_each_workspace_has_its_own_library(hosted):
     assert (a.library_dir / "mine.py").exists() and not (b.library_dir / "mine.py").exists()
     assert [f["name"] for f in ca.get("/api/library").json()["files"]] == ["mine.py"]
     assert cb.get("/api/library").json()["files"] == []
-    assert ca.get("/api/library").json()["dir"] == str(a.library_dir)
+    assert ca.get("/api/library").json()["dir"] == "/library"
     # Outside any request, the process-wide folder, as before.
     assert library_store.library_dir() == library_store.default_library_dir()
     with api.workspace_context(b):
@@ -229,25 +230,46 @@ def test_browse_load_and_save_stay_inside_the_root(hosted, tmp_path):
     a, _ = hosted
     ca = _client(a)
     root = a.root
-    assert ca.get("/api/browse").json()["path"] == str(root)
+    assert ca.get("/api/browse").json()["path"] == "/"
     assert ca.get("/api/browse").json()["parent"] is None
-    assert ca.get("/api/browse", params={"path": "projects"}).json()["path"] == str(root / "projects")
-    assert ca.get("/api/browse", params={"path": str(tmp_path)}).status_code == 403
+    assert ca.get("/api/browse", params={"path": "projects"}).json()["path"] == "/projects"
+    assert ca.get("/api/browse", params={"path": "/projects"}).json()["path"] == "/projects"
+    assert ca.get("/api/browse", params={"path": "/.."}).status_code == 403
     assert ca.get("/api/browse", params={"path": "../b"}).status_code == 403
     (root / "projects" / "out").symlink_to(tmp_path / "b")
     assert ca.get("/api/browse", params={"path": str(root / "projects" / "out")}).status_code == 403
 
-    assert ca.post("/api/project/save", json={"path": str(tmp_path / "b" / "x")}).status_code == 403
+    assert ca.post("/api/project/save", json={"path": "/../b/x"}).status_code == 403
     assert ca.post("/api/project/save", json={"path": str(root / "projects" / "out" / "x")}).status_code == 403
     assert ca.post("/api/project/save", json={"path": "projects/fine"}).status_code == 200
     assert (root / "projects" / "fine" / "model.json").exists()
-    assert ca.post("/api/project/load", json={"path": str(tmp_path / "b")}).status_code == 403
+    assert ca.post("/api/project/load", json={"path": "/../b"}).status_code == 403
 
     # A project holding a link out of the root (as a git pull could bring)
     # is neither loaded nor saved over.
     (root / "projects" / "fine" / "files" / "leak").symlink_to(tmp_path / "b")
     assert ca.post("/api/project/load", json={"path": "projects/fine"}).status_code == 403
     assert ca.post("/api/project/save", json={"path": "projects/fine"}).status_code == 403
+
+
+def test_a_hosted_user_sees_workspace_paths_not_server_paths(hosted):
+    a, _ = hosted
+    ca = _client(a)
+    server_path = str(a.root)
+    assert ca.get("/api/project/default_dir").json()["path"] == "/projects"
+    saved = ca.post("/api/project/save", json={"path": "/projects/p"})
+    assert saved.status_code == 200 and saved.json()["path"] == "/projects/p"
+    assert (a.root / "projects" / "p" / "model.json").exists()
+    graph = ca.get("/api/graph").json()
+    assert graph["project_path"] == "/projects/p"
+    listing = ca.get("/api/browse", params={"path": "/projects"}).json()
+    assert listing["parent"] == "/" and [e["path"] for e in listing["entries"]] == ["/projects/p"]
+    # Load takes the path as shown; a server path inside the root still works.
+    assert ca.post("/api/project/load", json={"path": "/projects/p"}).json()["project_path"] == "/projects/p"
+    assert ca.post("/api/project/load", json={"path": str(a.root / "projects" / "p")}).status_code == 200
+    for body in (graph, listing, ca.get("/api/library").json(), ca.get("/api/project/recovery").json()):
+        assert server_path not in json.dumps(body)
+    assert a.scrubbed(f"fatal: {a.root / 'projects' / 'p'}: bad") == "fatal: /projects/p: bad"
 
 
 def test_without_a_root_nothing_is_confined(tmp_path, monkeypatch):

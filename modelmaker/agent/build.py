@@ -297,7 +297,7 @@ class AgentBuild:
             "anchor_names": {a: b.name for a in self.anchors if (b := self.session.graph.blocks.get(a)) is not None},
             "project": {
                 "name": self.session.project_name,
-                "path": str(self.session.project_path.parent) if self.session.project_path else None,
+                "path": _shown(self.session.project_path.parent) if self.session.project_path else None,
             },
             "phase": phase,
             "created_at": self.created_at,
@@ -626,3 +626,10 @@ def _truncate(value: Any, limit: int = 4000) -> Any:
     if len(text) <= limit:
         return value
     return {"truncated": text[:limit] + "..."}
+
+
+def _shown(path: Any) -> str | None:
+    """The project folder as the build's user sees it (Workspace.shown)."""
+    from ..api import current_workspace  # the API imports this module
+
+    return current_workspace().shown(path)
