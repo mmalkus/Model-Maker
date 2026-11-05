@@ -71,9 +71,28 @@ class CacheStore:
     def __init__(self, cache_dir: Path | None = None):
         self._mem: dict[str, CacheEntry] = {}
         self._dir = cache_dir
-        if self._dir:
-            self._dir.mkdir(parents=True, exist_ok=True)
+        # The folder is made on the first write, not here: a store is
+        # created whenever a session is (including the API module's default
+        # workspace at import), and a process may well start somewhere it
+        # can't write -- e.g. as an unprivileged user in a read-only
+        # install directory -- without ever caching anything there.
+        self._dir_ready = False
+        if self._dir is not None and self._dir.is_dir():
             self._remove_legacy()
+
+    def _ensure_dir(self) -> bool:
+        """Whether the cache folder exists (creating it if need be). False
+        when it can't be made: entries then stay in memory only."""
+        if self._dir_ready:
+            return True
+        assert self._dir is not None
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("can't create cache folder %s (%s); caching in memory only", self._dir, e)
+            return False
+        self._dir_ready = True
+        return True
 
     def _remove_legacy(self) -> None:
         """Delete pickle files an older version wrote: never loaded, and
@@ -123,7 +142,11 @@ class CacheStore:
             except (wire.WireError, RecursionError) as e:
                 log.info("not writing cache entry %s to disk: %s", key, e)
             else:
-                _write_atomic(p, data)
+                if self._ensure_dir():
+                    try:
+                        _write_atomic(p, data)
+                    except OSError as e:
+                        log.warning("not writing cache entry %s to disk: %s", key, e)
         return entry
 
 
