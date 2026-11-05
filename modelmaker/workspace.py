@@ -188,6 +188,26 @@ class Workspace:
     def __repr__(self) -> str:
         return f"Workspace({self.id!r}, cache_dir={str(self.cache_dir)!r})"
 
+    def shown(self, path: Path | str | None) -> str | None:
+        """A server path as this workspace's user sees it. Without a root,
+        the path itself (the local app). With one, a workspace path: "/" is
+        the root, so a hosted user never sees where their workspace lives on
+        the server (the API maps such paths back, see api._confined)."""
+        if path is None:
+            return None
+        path = Path(path)
+        if self.root is None or not path.is_relative_to(self.root):
+            return str(path)
+        rel = path.relative_to(self.root).as_posix()
+        return "/" if rel == "." else "/" + rel
+
+    def scrubbed(self, message: str) -> str:
+        """`message` with the root's server path replaced by "/" (git's error
+        messages name the folders they ran in)."""
+        if self.root is None:
+            return message
+        return message.replace(str(self.root) + os.sep, "/").replace(str(self.root), "/")
+
     # ---- the open project ---------------------------------------------
 
     def new_session(self) -> ProjectSession:

@@ -149,18 +149,33 @@ capabilities.set_resolver(lambda: current_workspace().capabilities)
 def _confined(raw: str | os.PathLike[str] | None) -> Path | None:
     """`raw` as an absolute, resolved path -- refused with a 403 when the
     request's workspace has a `root` and the path (symlinks followed) leaves
-    it. Relative paths count from that root (else from the cwd). None stays
-    None."""
+    it. Relative paths count from that root (else from the cwd). With a
+    root, an absolute path is a workspace path as _shown() writes it ("/" is
+    the root), unless it already lies inside the root (a server-side path).
+    None stays None."""
     if raw is None:
         return None
     root = current_workspace().root
     path = Path(raw).expanduser()
-    if root is not None and not path.is_absolute():
-        path = root / path
+    if root is not None:
+        if not path.is_absolute():
+            path = root / path
+        elif not path.is_relative_to(root):
+            path = root / path.relative_to(path.anchor)
     path = path.resolve()
     if root is not None and not path.is_relative_to(root):
         raise HTTPException(403, "that path is outside your workspace")
     return path
+
+
+def _shown(path: Path | str | None) -> str | None:
+    """A server path as the client sees it (Workspace.shown)."""
+    return current_workspace().shown(path)
+
+
+def _scrubbed(message: str) -> str:
+    """An error message without the workspace root's server path."""
+    return current_workspace().scrubbed(message)
 
 
 def _check_project_links(folder: Path) -> None:
@@ -547,7 +562,7 @@ def _graph_out() -> dict[str, Any]:
         # The project *folder*, not the PROJECT_FILENAME inside it -- that's
         # the unit Save/Load/the Git panel all operate on; _session().project_path
         # itself stays the full file path internally (see project.py).
-        "project_path": str(_session().project_path.parent) if _session().project_path else None,
+        "project_path": _shown(_session().project_path.parent) if _session().project_path else None,
         "dirty": _session().dirty,
         "can_undo": _session().can_undo,
         "can_redo": _session().can_redo,
@@ -727,7 +742,7 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
                 continue
             if not e.is_dir() and ext and not e.name.lower().endswith(ext.lower()):
                 continue
-            entry: dict[str, Any] = {"name": e.name, "path": str(e), "is_dir": e.is_dir()}
+            entry: dict[str, Any] = {"name": e.name, "path": _shown(e), "is_dir": e.is_dir()}
             # Flagged so a project-folder picker (Save/Load) can tell a
             # folder that already holds a project from one that's just a
             # plain directory to browse into -- harmless, and ignored, for
@@ -742,8 +757,8 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
     if root is not None and base == root:
         parent = base
     return {
-        "path": str(base),
-        "parent": str(parent) if parent != base else None,
+        "path": _shown(base),
+        "parent": _shown(parent) if parent != base else None,
         "entries": entries,
     }
 
@@ -752,7 +767,7 @@ def browse(path: str | None = None, ext: str | None = None) -> dict[str, Any]:
 def project_default_dir() -> dict[str, str]:
     projects_dir = current_workspace().projects_dir
     projects_dir.mkdir(parents=True, exist_ok=True)
-    return {"path": str(projects_dir)}
+    return {"path": _shown(projects_dir)}
 
 
 @app.post("/api/project/new")
@@ -792,8 +807,8 @@ def save_project_ep(req: SaveRequest) -> dict[str, Any]:
     try:
         path = _session().save(target)
     except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"path": str(path.parent)}
+        raise HTTPException(400, _scrubbed(str(e)))
+    return {"path": _shown(path.parent)}
 
 
 def _project_dir() -> Path:
@@ -819,7 +834,7 @@ def git_init_ep() -> dict[str, Any]:
     try:
         gitops.init(_project_dir())
     except gitops.GitError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, _scrubbed(str(e)))
     return gitops.status(_project_dir())
 
 
@@ -830,7 +845,7 @@ def git_remote_ep(req: GitRemoteRequest) -> dict[str, Any]:
     try:
         gitops.set_remote(_project_dir(), req.url.strip())
     except gitops.GitError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, _scrubbed(str(e)))
     return gitops.status(_project_dir())
 
 
@@ -841,7 +856,7 @@ def git_commit_ep(req: GitCommitRequest) -> dict[str, Any]:
     try:
         gitops.commit(_project_dir(), req.message.strip())
     except gitops.GitError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, _scrubbed(str(e)))
     return gitops.status(_project_dir())
 
 
@@ -850,7 +865,7 @@ def git_push_ep() -> dict[str, Any]:
     try:
         gitops.push(_project_dir())
     except gitops.GitError as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, _scrubbed(str(e)))
     return gitops.status(_project_dir())
 
 
@@ -859,7 +874,7 @@ def git_pull_ep() -> dict[str, Any]:
     try:
         gitops.pull(_project_dir())
     except gitops.GitError as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, _scrubbed(str(e)))
     return gitops.status(_project_dir())
 
 
@@ -867,7 +882,10 @@ def git_pull_ep() -> dict[str, Any]:
 def recovery_info_ep() -> dict[str, Any]:
     """Metadata about the crash-recovery snapshot, if there is one. Offered
     to the user on a fresh start; never applied on its own."""
-    return {"recovery": _session().recovery_info()}
+    info = _session().recovery_info()
+    if info is not None and info.get("project_path"):
+        info["project_path"] = _shown(info["project_path"])
+    return {"recovery": info}
 
 
 @app.post("/api/project/recover")

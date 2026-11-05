@@ -119,6 +119,13 @@ def _usage() -> dict[str, list[str]]:
     return out
 
 
+
+def _shown(path: Any) -> str | None:
+    from .api import current_workspace  # api imports this module
+
+    return current_workspace().shown(path)
+
+
 @router.get("/api/library")
 def list_library(refresh: bool = False) -> dict[str, Any]:
     """Every library file and its blocks, plus the built-ins grouped by file
@@ -130,7 +137,7 @@ def list_library(refresh: bool = False) -> dict[str, Any]:
             continue
         builtin_files.setdefault(d.origin or "built-in", []).append(block_summary(d))
     return {
-        "dir": str(store.library_dir()),
+        "dir": _shown(store.library_dir()),
         "generation": store.generation,
         "files": [file_summary(f) for f in files],
         "builtin_files": [{"name": name, "blocks": blocks} for name, blocks in builtin_files.items()],
