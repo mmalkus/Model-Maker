@@ -1227,18 +1227,31 @@ def _redacted_provider_settings(provider_name: str, **fields: Any) -> dict[str, 
     never the key itself. This is the only place a stored key's presence is
     surfaced to the client."""
     result: dict[str, Any] = dict(fields)
-    if provider_name in _API_KEY_ENV_VARS:
+    kind = current_workspace().kind_of(provider_name)
+    if kind in _API_KEY_ENV_VARS:
         override = _llm_settings().for_provider(provider_name).get("api_key")
         if override:
             result["api_key_set"] = True
             result["api_key_source"] = "override"
         else:
             env_value = next(
-                (os.environ.get(var) for var in _API_KEY_ENV_VARS[provider_name] if os.environ.get(var)), None
+                (os.environ.get(var) for var in _API_KEY_ENV_VARS[kind] if os.environ.get(var)), None
             )
             result["api_key_set"] = bool(env_value)
             result["api_key_source"] = "env" if env_value else None
     return result
+
+
+def _capable_providers() -> list[str]:
+    """Providers that can drive an AI build: the capable kinds, then named
+    connections of a capable kind."""
+    ws = current_workspace()
+    named = [n for n, e in ws.llm_settings.per_provider.items() if e.get("kind") and ws.kind_of(n) in AGENT_CAPABLE_PROVIDERS]
+    capable = [*AGENT_CAPABLE_PROVIDERS, *sorted(n for n in named if n not in AGENT_CAPABLE_PROVIDERS)]
+    if "llm_settings" not in ws.features:
+        # Users who can't set providers up get only the ones that are.
+        capable = [n for n in capable if n in ws.llm_settings.per_provider]
+    return capable
 
 
 def _effective_llm_settings() -> dict[str, Any]:
@@ -1289,6 +1302,16 @@ def _effective_llm_settings() -> dict[str, Any]:
             or os.environ.get("MODELMAKER_LLM_MODEL")
             or _anthropic_provider.DEFAULT_MODEL,
         )
+    # Named connections (a settings entry with a "kind": e.g. an
+    # OpenAI-compatible service under its own name), and the models each
+    # provider's users may pick from ("models"; absent: any, typed in).
+    ws = current_workspace()
+    for name, entry in _llm_settings().per_provider.items():
+        if entry.get("kind") and name not in settings:
+            settings[name] = _redacted_provider_settings(name, model=entry.get("model"), base_url=entry.get("base_url"))
+            settings[name]["kind"] = entry["kind"]
+        if entry.get("models") and name in settings:
+            settings[name]["models"] = ws.connection_models(name)
     active = _llm_settings().active_provider or os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
 
     def agent_choice(stored: dict[str, Any]) -> dict[str, Any]:
@@ -1308,7 +1331,7 @@ def _effective_llm_settings() -> dict[str, Any]:
         "agent": {
             "plan": agent_choice(_llm_settings().agent_plan),
             "build": agent_choice(_llm_settings().agent_build),
-            "capable_providers": list(AGENT_CAPABLE_PROVIDERS),
+            "capable_providers": _capable_providers(),
             "small_context": _llm_settings().agent_small_context,
             "decision_hints": _llm_settings().agent_decision_hints,
         },
@@ -1326,8 +1349,8 @@ def update_llm_settings(req: LLMSettingsUpdate) -> dict[str, Any]:
         raise HTTPException(400, f"unknown LLM provider: {req.active_provider}")
     for choice in (req.agent_plan, req.agent_build):
         provider = (choice or {}).get("provider")
-        if provider and provider not in AGENT_CAPABLE_PROVIDERS:
-            raise HTTPException(400, f"{provider} can't drive an AI build; use one of {', '.join(AGENT_CAPABLE_PROVIDERS)}")
+        if provider and current_workspace().kind_of(provider) not in AGENT_CAPABLE_PROVIDERS:
+            raise HTTPException(400, f"{provider} can't drive an AI build; use one of {', '.join(_capable_providers())}")
     _llm_settings().update(
         req.active_provider,
         req.include_reference,
@@ -1397,7 +1420,30 @@ def list_llm_models(provider: str, base_url: str | None = None) -> dict[str, lis
     the Settings panel's "Fetch models" so the user can pick one instead of
     typing an id from memory. `base_url` (LM Studio and openai only) lets
     the panel query a not-yet-saved address before committing it via
-    PUT /llm/settings."""
+    PUT /llm/settings. A provider with a list of models its users may pick
+    (a hosted server's allowlist) answers with that list; a named
+    connection is queried as its kind."""
+    ws = current_workspace()
+    if offered := ws.connection_models(provider):
+        return {"models": offered}
+    if (kind := ws.kind_of(provider)) != provider:
+        entry = ws.llm_settings.for_provider(provider)
+        conn_url, conn_key = base_url or entry.get("base_url"), _resolve_api_key(provider)
+        try:
+            if kind in ("openai", "lmstudio") and not conn_url:
+                raise HTTPException(400, f"{provider} has no base URL")
+            if kind == "openai":
+                return {"models": _openai_provider.list_models(conn_url, conn_key or "")}
+            if kind == "lmstudio":
+                return {"models": _lmstudio_provider.list_models(conn_url)}
+            if kind == "gemini":
+                return {"models": _gemini_provider.list_models(conn_url or _gemini_provider.DEFAULT_BASE_URL, conn_key or "")}
+            if kind == "anthropic" and _anthropic_provider is not None:
+                client = _anthropic_provider.anthropic.Anthropic(api_key=conn_key, base_url=conn_url)
+                return {"models": [m.id for m in client.models.list()]}
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+        raise HTTPException(400, f"{provider} ({kind}) can't list its models")
     if provider == "lmstudio":
         effective_base_url = base_url or _effective_llm_settings()["settings"]["lmstudio"]["base_url"]
         try:
@@ -1869,10 +1915,13 @@ def agent_start(req: AgentBuildStart, request: Request) -> dict[str, Any]:
     plan = agent_llm_choice(ws.llm_settings.agent_plan, req.plan_llm.model_dump() if req.plan_llm else None)
     build = agent_llm_choice(ws.llm_settings.agent_build, req.build_llm.model_dump() if req.build_llm else None)
     for label, choice in (("plan", plan), ("build", build)):
-        if choice.provider not in AGENT_CAPABLE_PROVIDERS:
+        if ws.kind_of(choice.provider) not in AGENT_CAPABLE_PROVIDERS:
             raise HTTPException(
-                400, f"{choice.provider} can't drive an AI build; pick one of {', '.join(AGENT_CAPABLE_PROVIDERS)} in Settings"
+                400, f"{choice.provider} can't drive an AI build; pick one of {', '.join(_capable_providers())} in Settings"
             )
+        offered = ws.connection_models(choice.provider)
+        if offered and choice.model and choice.model not in offered:
+            raise HTTPException(400, f"{choice.model} isn't offered for {choice.provider}; pick one of {', '.join(offered)}")
         # Construct the loop once up front (no network call) so a missing
         # API key / model / CLI is a clear 400 now, not a failed build later.
         try:

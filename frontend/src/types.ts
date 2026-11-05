@@ -443,6 +443,12 @@ export interface LLMProviderSettings {
   api_key_source?: 'override' | 'env' | null
   // copilot only: whether the VS Code extension's relay is reachable.
   available?: boolean
+  // A named connection's provider kind (e.g. an OpenAI-compatible service
+  // under its own name is kind "openai").
+  kind?: string
+  // The models users may pick for this provider (a hosted server's
+  // allowlist); absent: any model, typed in.
+  models?: string[]
 }
 
 export interface AgentLLMChoice {

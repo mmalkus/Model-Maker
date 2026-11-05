@@ -86,6 +86,14 @@ API_KEY_ENV_VARS: dict[str, list[str]] = {
 }
 
 
+# Keys of a provider's settings entry that describe the connection rather
+# than configure the provider class: "kind", the registered provider a named
+# connection uses (e.g. an OpenAI-compatible service named "openrouter" is
+# kind "openai"; absent: the name is the kind), and "models", the models its
+# users may pick (absent or empty: any, typed in).
+CONNECTION_KEYS = ("kind", "models")
+
+
 def default_provider_name() -> str:
     return os.environ.get("MODELMAKER_LLM_PROVIDER", "claude_cli")
 
@@ -244,6 +252,15 @@ class Workspace:
 
     # ---- LLMs ------------------------------------------------------------
 
+    def kind_of(self, name: str) -> str:
+        """The registered provider behind `name`: a named connection's kind,
+        else the name itself."""
+        return self.llm_settings.for_provider(name).get("kind") or name
+
+    def connection_models(self, name: str) -> list[str]:
+        """The models users may pick for `name` (empty: any)."""
+        return list(self.llm_settings.for_provider(name).get("models") or [])
+
     def resolve_api_key(self, provider_name: str) -> str | None:
         """The API key this workspace would use for `provider_name` right
         now: its Settings override, else the first set process env var.
@@ -251,7 +268,7 @@ class Workspace:
         override = self.llm_settings.for_provider(provider_name).get("api_key")
         if override:
             return override
-        for var in API_KEY_ENV_VARS.get(provider_name, []):
+        for var in API_KEY_ENV_VARS.get(self.kind_of(provider_name), []):
             value = os.environ.get(var)
             if value:
                 return value
@@ -266,10 +283,12 @@ class Workspace:
         base_url, api_key, include_reference). A fresh instance per call,
         so nothing one workspace configured is left behind for another."""
         provider_name = name or self.active_provider()
-        overrides: dict[str, Any] = dict(self.llm_settings.for_provider(provider_name))
+        overrides: dict[str, Any] = {
+            k: v for k, v in self.llm_settings.for_provider(provider_name).items() if k not in CONNECTION_KEYS
+        }
         if self.llm_settings.include_reference is not None:
             overrides.setdefault("include_reference", self.llm_settings.include_reference)
-        return get_provider(provider_name, **overrides)
+        return get_provider(self.kind_of(provider_name), **overrides)
 
     def agent_llm_choice(self, stored: dict[str, Any], override: dict[str, Any] | None) -> LLMChoice:
         """Resolve the plan or build LLM: a per-build override, else
@@ -285,7 +304,7 @@ class Workspace:
         with this workspace's key, endpoint, callback address and token."""
         provider = choice.provider or "claude_cli"
         return make_loop(
-            provider,
+            self.kind_of(provider),
             choice.model,
             api_base_url=self.agent_callback_url,
             token=self.agent.token or "",
