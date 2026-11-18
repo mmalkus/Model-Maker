@@ -3,7 +3,10 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
-## 0.3.1 (pre-release)
+## 0.3.1
+
+The first stable release: install it from the Marketplace without opting
+in to pre-releases. Releases are stable from here on.
 
 - Needs `quantology-modelmaker` 0.3.1, whose **Run all** re-reads a data
   source after its settings change (for example when a column role is
@@ -11,8 +14,7 @@ it runs (see vscode-extension-plan.md §8.2).
 
 ## 0.3.0 (pre-release)
 
-The first release. Odd minor versions go to the Marketplace's pre-release
-channel; 0.4.0 is planned as the first stable one. Needs
+The first release, on the Marketplace's pre-release channel. Needs
 `quantology-modelmaker` 0.3.0 or newer, the first version with the backend
 switches the extension uses.
 

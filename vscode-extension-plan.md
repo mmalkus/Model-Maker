@@ -415,7 +415,8 @@ guard invariants 1 and 2. Changes:
   still accepts any backend at or above its declared minimum version
   with the same `/api/version` compat level. A user with a newer pip
   package therefore isn't forced to update the extension.
-- **Pre-release channel.** Odd minor versions are published with
+- **Pre-release channel.** (Changed after 0.3.0: releases are stable
+  unless the GitHub release is marked as a pre-release.) Odd minor versions are published with
   `vsce publish --pre-release` (Marketplace convention); even minors are
   stable.
 

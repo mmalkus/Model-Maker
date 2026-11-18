@@ -47,9 +47,11 @@ The extension needs:
    `vscode/package.json`. In `vscode/`, `npm version X.Y.Z
    --no-git-tag-version` updates the lockfile too. Add a `vscode/CHANGELOG.md`
    entry. CI fails if the two versions differ.
-   - An **odd minor** (0.3, 0.5, …) goes to the Marketplace's pre-release
-     channel, and an even one to stable. The workflow picks the channel from
-     the version.
+   - The extension is published as **stable**. To publish one to the
+     Marketplace's pre-release channel instead, tick **Set as a
+     pre-release** when creating the GitHub release. PyPI gets the version
+     either way. A version can't move between channels later, so a fix for a
+     pre-release ships as a new version.
    - If the release changes the HTTP API in a way older clients can't
      handle, bump `API_COMPAT_LEVEL` in `modelmaker/api.py` and `API_COMPAT`
      in `vscode/src/backend.ts` together. Also raise the minimum version in
@@ -65,7 +67,8 @@ The extension needs:
    --install-extension modelmaker.vsix`).
 5. **Smoke test** in a clean profile:
    1. Run `code --profile release-check`, and in it install Model-Maker from
-      the Marketplace (switch to the pre-release version for an odd minor).
+      the Marketplace (switch to the pre-release version if the release was
+      one).
    2. Open an empty folder, create a virtual environment, and select it as
       the interpreter.
    3. Run `pip install quantology-modelmaker && modelmaker-demo .` in that
@@ -86,7 +89,9 @@ The extension needs:
 >   "input block is not green". A source whose settings are unchanged is
 >   still re-read only by **Refresh sources**. The streaming Run all does
 >   the same.
-> - The VS Code extension needs this version: its chat tools rely on it.
+> - The VS Code extension needs this version, and is now published as
+>   **stable**: install it from the Marketplace without opting in to
+>   pre-releases.
 
 ## v0.3.0 release notes
 
