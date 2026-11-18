@@ -162,6 +162,20 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     },
   })
 
+  // ---- writing library blocks -------------------------------------------------
+
+  register<Record<string, never>>('modelmaker_get_block_guide', {
+    describe: () => 'Reading how to write a library block',
+    edits: false,
+    run: (ctx) => ctx.backend.json('/assistant/block_guide'),
+  })
+
+  register<{ name: string }>('modelmaker_check_block_file', {
+    describe: (i) => `Checking the block file ${i.name}`,
+    edits: false,
+    run: (ctx, i) => ctx.backend.json('/assistant/check_block_file', { method: 'POST', body: { name: i.name } }),
+  })
+
   // ---- editing --------------------------------------------------------------
 
   register<{ name: string }>('modelmaker_add_lane', {

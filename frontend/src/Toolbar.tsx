@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import type { AutosaveStatus } from './App'
 import { api } from './api'
 import { CodeEditor } from './CodeEditor'
@@ -36,6 +36,7 @@ export function Toolbar({
   onRedo,
   sampleRows,
   autosave,
+  onOpenLibrary,
 }: {
   onChanged: () => void
   projectPath: string | null
@@ -54,6 +55,8 @@ export function Toolbar({
   onRedo: () => void
   sampleRows: number | null
   autosave: AutosaveStatus
+  // The block library (VS Code: its own tab); absent where custom blocks are off.
+  onOpenLibrary?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [compiled, setCompiled] = useState<string | null>(null)
@@ -159,6 +162,11 @@ export function Toolbar({
         borderBottom: '1px solid rgba(11,35,64,0.1)',
       }}
     >
+      {lean && (
+        <a href="https://www.quantology.nl/" target="_blank" rel="noreferrer" title="Quantology Model Maker" style={{ display: 'flex', marginRight: 2 }}>
+          <img src={`${import.meta.env.BASE_URL}brand-quantology/icon-mark-light.svg`} alt="Quantology" width={20} height={20} style={{ display: 'block' }} />
+        </a>
+      )}
       {!lean && (
         <a
           href="https://www.quantology.nl/"
@@ -220,6 +228,11 @@ export function Toolbar({
       <button disabled={busy} onClick={() => doCompile()} title={lean ? 'Compile the pipeline to one Python script, opened in an editor tab' : undefined}>
         Compile
       </button>
+      {lean && onOpenLibrary && (
+        <button onClick={onOpenLibrary} title="Open the block library in a tab of its own">
+          Library
+        </button>
+      )}
       {lean ? (
         <div style={{ position: 'relative' }}>
           <button disabled={busy} onClick={() => setShowMore((m) => !m)} title="More run and compile options">
@@ -234,6 +247,9 @@ export function Toolbar({
                 { label: 'Refresh sources', disabled: running, onClick: () => run(() => api.refreshAll()) },
                 { label: 'Check all sources', disabled: running, onClick: () => run(() => api.checkAllSources()) },
                 { label: 'Compile (streaming)', onClick: () => doCompile(true) },
+                { label: 'Quantology', href: 'https://www.quantology.nl/', divider: true },
+                { label: 'Model-Maker on GitHub', href: 'https://github.com/mmalkus/Model-Maker' },
+                { label: 'Apache 2.0 License', href: 'https://www.apache.org/licenses/LICENSE-2.0' },
               ]}
             />
           )}
@@ -401,7 +417,8 @@ export function Toolbar({
   )
 }
 
-type MenuItem = { label: string; onClick: () => void; disabled?: boolean }
+// An action, or a link (opened in the browser); `divider` starts a group.
+type MenuItem = { label: string; onClick?: () => void; href?: string; disabled?: boolean; divider?: boolean }
 
 function MoreMenu({ items, onClose }: { items: MenuItem[]; onClose: () => void }) {
   return (
@@ -428,18 +445,33 @@ function MoreMenu({ items, onClose }: { items: MenuItem[]; onClose: () => void }
         }}
       >
         {items.map((item) => (
-          <button
-            key={item.label}
-            role="menuitem"
-            disabled={item.disabled}
-            onClick={() => {
-              onClose()
-              item.onClick()
-            }}
-            style={{ textAlign: 'left', border: 'none', background: 'transparent' }}
-          >
-            {item.label}
-          </button>
+          <Fragment key={item.label}>
+            {item.divider && <hr style={{ border: 'none', borderTop: '1px solid var(--mm-border)', margin: '4px 0', width: '100%' }} />}
+            {item.href ? (
+              <a
+                role="menuitem"
+                href={item.href}
+                target="_blank"
+                rel="noreferrer"
+                onClick={onClose}
+                style={{ padding: '4px 10px', fontSize: 12, textDecoration: 'none', color: 'inherit' }}
+              >
+                {item.label}
+              </a>
+            ) : (
+              <button
+                role="menuitem"
+                disabled={item.disabled}
+                onClick={() => {
+                  onClose()
+                  item.onClick?.()
+                }}
+                style={{ textAlign: 'left', border: 'none', background: 'transparent' }}
+              >
+                {item.label}
+              </button>
+            )}
+          </Fragment>
         ))}
       </div>
     </>

@@ -78,6 +78,12 @@ with defaults. It returns one pl.DataFrame. Shared code may go in private \
 helper functions whose names start with _.
 - Use only polars (in scope as `pl`; import anything else inside the \
 function). No pandas, no I/O, no globals, no network.
+- Inputs may be large (tens of millions of rows): write the block as polars \
+expressions (select/filter/with_columns/group_by/join), select only the \
+columns it needs, and reduce early (to one row per account, snapshot date or \
+period); if it must collect a LazyFrame, do so only after reducing, with \
+.collect(engine="streaming"). Never .to_pandas(), .iter_rows(), \
+.map_elements() or Python loops over rows.
 - Never hardcode an existing input column's name in the body: take it as a \
 `<descriptive>_col` str parameter defaulted to the real column name (or \
 `<descriptive>_cols` for a list) and use pl.col(param). New columns you \

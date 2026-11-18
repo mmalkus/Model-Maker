@@ -100,6 +100,12 @@ function AppInner() {
   // The block library overlay (null: closed), the counter the palette
   // refetches the library on, and the block whose update dialog is open.
   const [libraryView, setLibraryView] = useState<LibraryView | null>(null)
+  // In VS Code the library is an editor tab of its own (vscode/src/library.ts);
+  // in the browser, a dialog over the canvas.
+  const openLibrary = useCallback((view: LibraryView) => {
+    if (host.kind === 'vscode') host.post('openLibrary', view)
+    else setLibraryView(view)
+  }, [])
   const [libraryVersion, setLibraryVersion] = useState(0)
   const [updateBlockId, setUpdateBlockId] = useState<string | null>(null)
   const [selectedPort, setSelectedPort] = useState<{ blockId: string; port: string; portType: PortType } | null>(null)
@@ -640,6 +646,26 @@ function AppInner() {
     [reload],
   )
 
+  // From the library's own tab (VS Code; see LibraryPage): place a block
+  // here, so it's in this canvas's undo history; open the update dialog;
+  // refresh the palette's library section.
+  useEffect(
+    () =>
+      host.onEvent(({ name, data }) => {
+        const d = (data ?? {}) as { file?: string; id?: string; category?: string; blockId?: string }
+        if (name === 'placeLibraryBlock' && d.file && d.id) addLibraryBlock(d.file, d.id).catch((e) => host.notify((e as Error).message))
+        else if (name === 'placeBuiltinBlock' && d.category) addBlock(d.category)
+        else if (name === 'openUpdate' && d.blockId) {
+          reload()
+          setUpdateBlockId(d.blockId)
+        } else if (name === 'libraryChanged') {
+          setLibraryVersion((v) => v + 1)
+          reload()
+        }
+      }),
+    [addBlock, addLibraryBlock, reload],
+  )
+
   const onDragOver = useCallback((e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes('application/x-modelmaker-block')) return
     e.preventDefault()
@@ -696,6 +722,7 @@ function AppInner() {
         onRedo={redo}
         sampleRows={graph?.sample_rows ?? null}
         autosave={autosave}
+        onOpenLibrary={has('custom_blocks') ? () => openLibrary({ kind: 'browse' }) : undefined}
       />
       {graph?.sample_rows != null && (
         <div
@@ -759,8 +786,8 @@ function AppInner() {
           onToggle={lean ? togglePalette : undefined}
           onAdd={addBlock}
           onAddLibrary={(file, id) => addLibraryBlock(file, id).catch((e) => host.notify(e.message))}
-          onOpenLibrary={() => setLibraryView({ kind: 'browse' })}
-          onCreateWithAI={() => setLibraryView({ kind: 'ai', start: { addToCanvas: true, contextBlock: selectedBlockContext } })}
+          onOpenLibrary={() => openLibrary({ kind: 'browse' })}
+          onCreateWithAI={() => openLibrary({ kind: 'ai', start: { addToCanvas: true, contextBlock: selectedBlockContext } })}
           onAddLane={addLane}
           libraryVersion={libraryVersion}
         />
@@ -805,7 +832,8 @@ function AppInner() {
                   AI is editing -- canvas read-only
                 </span>
               )}
-              {has('ai_builder') && (
+              {/* In VS Code the assistant beside the canvas (Copilot, Claude Code) builds. */}
+              {has('ai_builder') && !lean && (
                 <button
                   className={buildOpen ? undefined : 'brand-primary'}
                   onClick={() => setBuildOpen((o) => !o)}
@@ -841,7 +869,7 @@ function AppInner() {
             )}
           </ReactFlow>
         </div>
-        {graph && has('ai_builder') && (buildOpen || buildLive) && (
+        {graph && has('ai_builder') && !lean && (buildOpen || buildLive) && (
           // Kept mounted (just hidden) while a build is live, so it keeps
           // polling the build -- and the canvas -- with the panel closed.
           <div style={{ display: buildOpen ? 'flex' : 'none' }}>
@@ -871,8 +899,8 @@ function AppInner() {
             onChanged={reload}
             provider={llmSettings?.active_provider ?? null}
             onOpenUpdate={(b) => setUpdateBlockId(b.id)}
-            onFixWithAI={(b) => setLibraryView({ kind: 'ai', start: { fixBlock: b.id } })}
-            onOpenInLibrary={(file, id) => setLibraryView({ kind: 'browse', selected: { file, id } })}
+            onFixWithAI={(b) => openLibrary({ kind: 'ai', start: { fixBlock: b.id } })}
+            onOpenInLibrary={(file, id) => openLibrary({ kind: 'browse', selected: { file, id } })}
           />
         )}
       </div>

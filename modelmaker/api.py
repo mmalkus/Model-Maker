@@ -784,6 +784,16 @@ def project_default_dir() -> dict[str, str]:
     return {"path": _shown(projects_dir)}
 
 
+@app.get("/api/project/disk_state")
+def project_disk_state() -> dict[str, bool]:
+    """Whether model.json was changed on disk by something other than this
+    backend (`changed`), and whether the canvas has edits not yet saved
+    (`dirty`): lets the VS Code extension reload quietly after an outside
+    edit, ask only when that would discard work, and ignore its own saves."""
+    session = _session()
+    return {"changed": session.disk_changed(), "dirty": session.dirty}
+
+
 @app.post("/api/project/new")
 def new_project_ep() -> dict[str, Any]:
     """The 'New' toolbar button: discards the in-memory graph in favor of a

@@ -323,3 +323,83 @@ def test_assistant_builds_from_an_empty_canvas(demo_client):
     assert r.status_code == 200, r.text
     _run_all(c)
     assert {b["status"] for b in c.get("/api/assistant/graph").json()["blocks"]} == {"green"}
+
+
+def test_disk_state_tells_an_outside_edit_from_our_own_save(demo_client, tmp_path):
+    c = demo_client
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}
+    # Our own edit and save: not an outside change.
+    c.post("/api/assistant/lanes", json={"name": "Extra"})
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": True}
+    assert c.post("/api/project/save", json={}).status_code == 200
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}
+    # Something else rewrites the file.
+    f = tmp_path / "demo" / "model.json"
+    f.write_text(f.read_text().replace('"Extra"', '"Renamed elsewhere"'))
+    assert c.get("/api/project/disk_state").json()["changed"] is True
+    # Reloading makes the file what the session has again.
+    c.post("/api/project/load", json={"path": str(tmp_path / "demo")})
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}
+
+
+LAZY_SOURCE = '''"""Loan data sources."""
+import polars as pl
+
+BLOCKS = {
+    "monthly_panel": {
+        "display_name": "Monthly panel",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out", "type": "dataframe", "lazy": True}],
+        "form": [{"key": "path", "label": "File", "kind": "path"}],
+        "capabilities": ["filesystem"],
+    },
+}
+
+
+def monthly_panel(path: str = "panel.csv") -> pl.LazyFrame:
+    """Reads the monthly loan panel lazily, only the columns needed."""
+    return pl.scan_csv(path).select("loan_id", "period", "dpd")
+
+
+def _example_monthly_panel():
+    import os
+    import tempfile
+
+    p = os.path.join(tempfile.mkdtemp(), "p.csv")
+    pl.DataFrame({"loan_id": [1, 1], "period": [202001, 202002], "dpd": [0, 30], "extra": ["a", "b"]}).write_csv(p)
+    out = monthly_panel(p).collect()
+    assert out.columns == ["loan_id", "period", "dpd"] and out.height == 2
+'''
+
+
+def test_block_guide_and_check_for_an_assistant_writing_files(demo_client, block_library_dir, tmp_path):
+    c = demo_client
+    guide = c.get("/api/assistant/block_guide").json()
+    assert guide["library_dir"] == str(block_library_dir) and guide["files"] == []
+    assert "BLOCKS = {" in guide["template"]
+    assert any("pl.scan_csv" in r and 'engine="streaming"' in r for r in guide["rules"])
+
+    block_library_dir.mkdir(parents=True, exist_ok=True)
+    (block_library_dir / "loans.py").write_text(LAZY_SOURCE)
+    checked = c.post("/api/assistant/check_block_file", json={"name": "loans.py"}).json()
+    assert checked["ok"] is True, checked
+    assert checked["examples"]["monthly_panel"]["ok"] is True
+    assert c.get("/api/assistant/block_guide").json()["files"] == [{"name": "loans.py", "blocks": ["monthly_panel"]}]
+
+    # A library data source is listed and placeable from the chat tools.
+    sources = c.get("/api/assistant/block_types", params={"tag": "data_sources"}).json()["blocks"]
+    assert {"category": "monthly_panel", "summary": "Reads the monthly loan panel lazily, only the columns needed.", "library": "loans.py"} in sources
+    csv = tmp_path / "panel.csv"
+    csv.write_text("loan_id,period,dpd,extra\n1,202001,0,a\n")
+    placed = c.post("/api/assistant/blocks", json={"category": "monthly_panel", "params": {"path": str(csv)}})
+    assert placed.status_code == 200, placed.text
+    assert placed.json()["library_block"] is True
+
+    # A broken file says what's wrong; an unknown one lists what's there.
+    (block_library_dir / "broken.py").write_text(LAZY_SOURCE.replace("assert out.columns", "assert not out.columns"))
+    bad = c.post("/api/assistant/check_block_file", json={"name": "broken.py"}).json()
+    assert bad["ok"] is False and bad["examples"]["monthly_panel"]["ok"] is False
+    missing = c.post("/api/assistant/check_block_file", json={"name": "nope.py"})
+    assert missing.status_code == 404 and "loans.py" in missing.json()["detail"]

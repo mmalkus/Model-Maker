@@ -14,6 +14,9 @@ export type BridgeHooks = {
   // The canvas is writing, or just wrote, the project file (so a
   // file-watcher event now is ours).
   onSaved(): void
+  // Any other one-way message (the library tab and the canvas talking to
+  // each other through the extension, see library.ts).
+  onPost?(name: string, data: unknown): void
 }
 
 export function attachBridge(webview: vscode.Webview, projectFolder: string, hooks: BridgeHooks): vscode.Disposable {
@@ -85,5 +88,7 @@ async function handlePost(name: string, data: unknown, hooks: BridgeHooks) {
     await vscode.window.showTextDocument(doc, { preview: false })
   } else if (name === 'saving' || name === 'saved') {
     hooks.onSaved()
+  } else {
+    hooks.onPost?.(name, data)
   }
 }

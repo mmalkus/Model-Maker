@@ -34,6 +34,19 @@ def extract_json_response(text: str) -> dict:
         return json.loads(brace.group(0))
     raise ValueError(f"model did not return parseable JSON: {text[:500]!r}")
 
+# How a block handles a table that doesn't fit in memory -- told to every
+# block writer: Create with AI / Fix with AI (CONTRACT), and an outside
+# assistant writing library files (assistant_api's block guide).
+LARGE_DATA_RULES = (
+    "a table can have tens of millions of rows and not fit in memory. An input block that reads a file "
+    "returns a lazy scan (`pl.scan_csv(path)` / `pl.scan_parquet(path)`, never `pl.read_*`), takes the file "
+    'from a `path` parameter (a "path" form field, with "capabilities": ["filesystem"]) and marks its output '
+    '"lazy": true; select only the columns needed and filter as early as possible. A block that reduces a big '
+    "table (to one row per account, per snapshot date or per period) does it in polars expressions; if it must "
+    'collect, it collects only after selecting, filtering and aggregating, with `.collect(engine="streaming")`. '
+    "Never `.to_pandas()`, `.iter_rows()`, `.map_elements()` or Python loops over rows."
+)
+
 CONTRACT = """You write one block for the block library of a visual, \
 Polars-based model development tool. A block is a plain Python function plus \
 a literal description of it (its BLOCKS entry). Follow the contract exactly:
@@ -50,7 +63,9 @@ output port (a tuple when there are several).
 about the result. It must pass.
 - Only `polars` is available at the top (as `pl`; don't import it). Import \
 anything else (numpy, scipy, sklearn) *inside* the function that uses it. \
-No pandas, no file or network I/O, no global state.
+No pandas, no network I/O, no global state, and no file I/O except an input \
+block reading its source (see large data below).
+- Large data: {LARGE_DATA}
 - Give the function a docstring: first line a one-sentence summary, then \
 what it computes, its inputs and outputs, and its parameters.
 - Never hardcode an *existing* input column's name in the body: read it \
@@ -91,6 +106,8 @@ their style instead of duplicating code.
 
 Leave `params` empty. Keep `explanation` to one or two plain-English \
 sentences: what the block does, or what you changed and why."""
+
+CONTRACT = CONTRACT.replace("{LARGE_DATA}", LARGE_DATA_RULES)
 
 CONTRACT_ANALYZE_DATA = """You are analyzing one block's output columns in \
 a visual, Polars-based data pipeline tool, given only column names, dtypes, \

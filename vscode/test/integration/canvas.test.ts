@@ -91,4 +91,19 @@ suite('Model-Maker canvas', () => {
       backends.release(folder())
     }
   })
+
+  test('the block library opens in a tab of its own, once per project', async () => {
+    await activate()
+    const file = vscode.Uri.file(path.join(folder(), 'model.json'))
+    await vscode.commands.executeCommand('vscode.openWith', file, 'modelmaker.model')
+    const libraryTabs = () =>
+      vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.input instanceof vscode.TabInputWebview && t.label.startsWith('Block Library'))
+    await vscode.commands.executeCommand('modelmaker.openLibrary')
+    await until(async () => (libraryTabs().length === 1 ? true : undefined), 30_000, 'the library tab')
+    assert.equal(libraryTabs()[0].label, 'Block Library: demo_pd_model')
+    // Asking again brings the same tab to the front.
+    await vscode.commands.executeCommand('vscode.openWith', file, 'modelmaker.model')
+    await vscode.commands.executeCommand('modelmaker.openLibrary')
+    assert.equal(libraryTabs().length, 1)
+  })
 })

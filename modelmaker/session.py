@@ -40,6 +40,16 @@ RECOVERY_PATH = CACHE_DIR / "recovery.json"
 UNDO_LIMIT = 50
 
 
+def file_digest(path: Path) -> str | None:
+    """sha256 of a file's bytes, or None when it can't be read."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def new_id(prefix: str = "b") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
@@ -116,6 +126,9 @@ class ProjectSession:
         # changed since the revision we last wrote to the project file".
         self.revision = 0
         self.saved_revision = 0
+        # What model.json held when this session last read or wrote it (see
+        # disk_changed): an outside edit is a file that no longer matches.
+        self.disk_digest: str | None = None
         self._undo: list[Snapshot] = []
         self._redo: list[Snapshot] = []
         # Depth of open transaction() blocks -- while > 0, edit() still
@@ -367,11 +380,13 @@ class ProjectSession:
         self.clear_recovery()
 
     def load(self, path: Path) -> None:
+        digest = file_digest(path)
         graph = load_project(path)
         self.check_graph(graph)
         self.graph = graph
         self.runner = self._new_runner(sample_rows=self.runner.sample_rows)
         self.project_path = path
+        self.disk_digest = digest
         # `path` is always <project folder>/PROJECT_FILENAME -- the folder is
         # the project, so its name is the project's name, not the fixed
         # filename's stem.
@@ -382,11 +397,20 @@ class ProjectSession:
         self.revision = 0
         self.saved_revision = 0
 
+    def disk_changed(self) -> bool:
+        """Whether the project file on disk differs from what this session
+        last read or wrote -- changed by something else (an editor, git, an
+        assistant), not by this session's own save."""
+        if self.project_path is None:
+            return False
+        return file_digest(self.project_path) != self.disk_digest
+
     def save(self, path: Path | None = None) -> Path:
         target = path or self.project_path
         if target is None:
             raise ValueError("no project path set; provide one to save")
         save_project(self.graph, target, project_name=self.project_name)
+        self.disk_digest = file_digest(target)
         self.project_path = target
         self.project_name = target.parent.name
         self.saved_revision = self.revision
