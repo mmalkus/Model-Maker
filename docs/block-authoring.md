@@ -176,6 +176,47 @@ parameters the app fills in (`output_dir`, `block_id`, role params such as
   schema and summary statistics only. The flag is honored for built-ins;
   for library blocks it is shown but not trusted.
 
+### Large data
+
+Model-Maker materializes each block's output (it's cached, shown on the
+canvas and handed to the next block), so a block that produces a full
+table needs that table in memory, whatever polars does inside it. A
+monthly loan panel of 28 million rows × 100 columns is about 15 GB. Three
+habits keep big sources workable:
+
+- **An input block returns a lazy scan.** `pl.scan_csv(path)` or
+  `pl.scan_parquet(path)`, never `pl.read_*`, with `"lazy": true` on its
+  output, as the built-in Read CSV does. The engine collects it, pushing
+  sample mode's row cap into the scan, and a streaming run (**Run all
+  (streaming)**) fuses it with the lazy blocks after it.
+- **Read only what you need, and reduce early.** `.select(...)` the needed
+  columns right after the scan and `.filter(...)` as soon as possible. A
+  block that turns a big table into a small one (one row per loan, per
+  snapshot date, per period) does it in polars expressions and, if it must
+  collect inside, collects only after reducing:
+
+  ```python
+  def loan_snapshots(path: str, snapshot_month: int = 12) -> pl.DataFrame:
+      """One row per loan per year: the monthly performance file at its
+      snapshot month, with only the columns the PD model needs."""
+      return (
+          pl.scan_csv(path, separator="|", has_header=False)
+          .select(...)                                  # only the needed columns
+          .filter(pl.col("period") % 100 == snapshot_month)
+          .collect(engine="streaming")                  # never the full table in memory
+      )
+  ```
+
+- **No row-by-row Python.** `.to_pandas()`, `.iter_rows()`,
+  `.map_elements()` and loops over rows copy the data out of polars and
+  are slow on millions of rows.
+
+Converting a large CSV source to Parquet once also helps a lot: a Parquet
+scan reads only the columns a query uses.
+
+Create with AI, Fix with AI and the AI builder are told the same (see
+`modelmaker/llm/prompts.py` and `modelmaker/agent/prompts.py`).
+
 ### Form field kinds
 
 `text`, `number` (`step`), `select` (`options`), `column` (`auto_role`:

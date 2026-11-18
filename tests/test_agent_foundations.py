@@ -293,3 +293,13 @@ def test_role_bound_params_are_marked():
     lr = {p["name"]: p for p in describe_block_type("logistic_regression")["params"]}
     assert lr["target"]["auto_fills_from_role"] == "target"
     assert lr["C"]["default"] == 1.0
+
+
+def test_block_writers_are_told_how_to_handle_large_data():
+    # Create with AI / Fix with AI, and the AI builder's new blocks.
+    from modelmaker.agent.prompts import CUSTOM_CONTRACT
+    from modelmaker.llm.prompts import contract_for
+
+    draft = contract_for("draft")
+    assert "pl.scan_csv" in draft and 'engine="streaming"' in draft and "never `pl.read_*`" in draft
+    assert 'engine="streaming"' in CUSTOM_CONTRACT and ".to_pandas()" in CUSTOM_CONTRACT

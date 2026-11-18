@@ -19,6 +19,8 @@ it runs (see vscode-extension-plan.md §8.2).
   ignored.
 - **Set Up Claude Code** can register the tools for all your projects
   (`claude mcp add --scope user`), not just the workspace's `.mcp.json`.
+- Blocks drafted by AI read large sources lazily and reduce them with
+  Polars' streaming engine, instead of loading a table bigger than memory.
 
 ## 0.3.2
 

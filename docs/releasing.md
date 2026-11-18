@@ -99,6 +99,12 @@ The extension needs:
 > - **Set Up Claude Code** can register the Model-Maker tools for all your
 >   projects.
 >
+> **Large data.** Blocks drafted by AI (Create with AI, Fix with AI, the AI
+> builder) now read large sources lazily (`pl.scan_csv`/`scan_parquet`),
+> select only the columns they need, reduce early and collect with Polars'
+> streaming engine, so a table bigger than memory never has to be loaded
+> whole. The block-authoring guide has a new "Large data" section.
+>
 > **Python package.** `GET /api/project/disk_state` says whether the
 > project file changed on disk since the backend last read or wrote it.
 

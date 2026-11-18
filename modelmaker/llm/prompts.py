@@ -50,7 +50,18 @@ output port (a tuple when there are several).
 about the result. It must pass.
 - Only `polars` is available at the top (as `pl`; don't import it). Import \
 anything else (numpy, scipy, sklearn) *inside* the function that uses it. \
-No pandas, no file or network I/O, no global state.
+No pandas, no network I/O, no global state, and no file I/O except an input \
+block reading its source (see large data below).
+- Large data: a table can have tens of millions of rows and not fit in \
+memory. An input block that reads a file returns a lazy scan \
+(`pl.scan_csv(path)` / `pl.scan_parquet(path)`, never `pl.read_*`), takes \
+the file from a `path` parameter (a "path" form field, with "capabilities": \
+["filesystem"]) and marks its output "lazy": true; select only the columns \
+needed and filter as early as possible. A block that reduces a big table (to \
+one row per account, per snapshot date or per period) does it in polars \
+expressions; if it must collect, it collects only after selecting, filtering \
+and aggregating, with `.collect(engine="streaming")`. Never `.to_pandas()`, \
+`.iter_rows()`, `.map_elements()` or Python loops over rows.
 - Give the function a docstring: first line a one-sentence summary, then \
 what it computes, its inputs and outputs, and its parameters.
 - Never hardcode an *existing* input column's name in the body: read it \

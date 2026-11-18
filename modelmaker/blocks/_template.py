@@ -33,6 +33,11 @@ BLOCKS = {
         # means the function returns a pl.LazyFrame (the engine collects it).
         # "aggregate": True marks an output as a statistics table (one row
         # per feature/bin/grade/..., never per record).
+        # Large sources: an input block returns pl.scan_csv/scan_parquet
+        # (lazy output), select only the needed columns and reduce early;
+        # collect inside a block only after reducing, with
+        # .collect(engine="streaming"). See "Large data" in
+        # docs/block-authoring.md.
         "inputs": [{"name": "df", "type": "dataframe", "lazy": True}],
         "outputs": [{"name": "out", "type": "dataframe"}],
         # Params form fields worth a label, placeholder or options; every
