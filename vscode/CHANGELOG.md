@@ -3,6 +3,12 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## 0.3.1 (pre-release)
+
+- Needs `quantology-modelmaker` 0.3.1, whose **Run all** re-reads a data
+  source after its settings change (for example when a column role is
+  tagged), so a chat assistant's run no longer leaves the pipeline red.
+
 ## 0.3.0 (pre-release)
 
 The first release. Odd minor versions go to the Marketplace's pre-release

@@ -263,7 +263,7 @@ export function Toolbar({
 
       <label
         style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--brand-charcoal)' }}
-        title="Run the whole pipeline on the first N rows of every source, for fast iteration. Sources need re-reading when this changes."
+        title="Run the whole pipeline on the first N rows of every source, for fast iteration. The next Run all re-reads the sources."
       >
         <input
           type="checkbox"

@@ -136,7 +136,7 @@ def test_a_real_mcp_client_lists_and_calls_the_tools(backend):
 
 
 def test_a_whole_run_rereads_a_source_whose_settings_changed(backend, tmp_path, monkeypatch):
-    # Run all alone leaves a stale source alone, and the split goes red.
+    # Tagging a role makes the source stale; Run all re-reads it.
     monkeypatch.chdir(tmp_path)
     r = mm.Resolver(backend, None, discovery=tmp_path / "none")
     call(r, "open_project", folder="p", create=True)
@@ -147,4 +147,4 @@ def test_a_whole_run_rereads_a_source_whose_settings_changed(backend, tmp_path, 
     assert call(r, "run")["statuses"] == {"green": 2}
     call(r, "set_column_role", block=load["id"], column="default_flag", role="target")
     ran = call(r, "run")
-    assert ran["statuses"] == {"green": 2} and ran["refreshed_sources"] == [load["name"]], ran
+    assert ran["statuses"] == {"green": 2}, ran

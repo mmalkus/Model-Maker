@@ -117,21 +117,44 @@ def test_run_all_flags_sweep_running_while_in_flight(tmp_path):
     assert runner.sweep_running is False
 
 
-def test_run_all_does_not_reread_a_source_already_read_but_stale(tmp_path):
+def test_run_all_rereads_a_source_whose_settings_changed(tmp_path):
     graph, csv_path = _csv_graph(tmp_path)
     runner = Runner(graph, CacheStore())
     runner.run_all()
     assert runner.status("b_read") == "green"
-    read_key_before = runner.state["b_read"].last_successful_key
 
     other_csv = tmp_path / "other.csv"
     other_csv.write_text("a,b\n9,90\n")
     graph.blocks["b_read"].params["path"] = str(other_csv)
     assert runner.status("b_read") == "orange"
 
+    report = runner.run_all()
+    assert runner.status("b_read") == "green"
+    assert report["b_filter"] == "green"
+    out = runner.cache.get(runner.state["b_read"].last_successful_key).outputs["out"]
+    assert out.data["a"].to_list() == [9]
+
+
+def test_run_all_rereads_a_source_after_a_column_role_is_tagged(tmp_path):
+    graph, _ = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
     runner.run_all()
+    graph.blocks["b_read"].column_role_overrides["b"] = "target"
     assert runner.status("b_read") == "orange"
-    assert runner.state["b_read"].last_successful_key == read_key_before
+    assert runner.run_all()["b_filter"] == "green"
+    assert runner.status("b_read") == "green"
+
+
+def test_run_all_does_not_reread_a_current_source(tmp_path):
+    # New data in the file is Refresh sources' job, not Run all's.
+    graph, csv_path = _csv_graph(tmp_path)
+    runner = Runner(graph, CacheStore())
+    runner.run_all()
+    key = runner.state["b_read"].last_successful_key
+    read_at = runner.state["b_read"].last_successful_read_at
+    runner.run_all()
+    assert runner.state["b_read"].last_successful_key == key
+    assert runner.state["b_read"].last_successful_read_at == read_at
 
 
 def test_red_status_keeps_stale_green_output_and_recovers(tmp_path):
