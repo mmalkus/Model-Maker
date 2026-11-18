@@ -4,7 +4,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import type { CopilotRelay } from './copilot'
-import { resolvePython } from './python'
+import type { PythonEnvironments, Runtime } from './environment'
 
 // The /api/version "api" level this extension speaks (modelmaker/api.py's
 // API_COMPAT_LEVEL). A backend reporting another level -- or none, from
@@ -82,6 +82,7 @@ export class BackendManager implements vscode.Disposable {
   constructor(
     private readonly log: vscode.OutputChannel,
     private readonly relay: CopilotRelay,
+    private readonly environments: PythonEnvironments,
   ) {}
 
   /** The folder's backend, started if needed; pair with release(). */
@@ -128,20 +129,29 @@ export class BackendManager implements vscode.Disposable {
 
   private async start(folder: string): Promise<Backend> {
     const uri = vscode.Uri.file(folder)
-    const python = await resolvePython(uri)
     return vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Model-Maker: starting backend for ${path.basename(folder)}` },
       async (progress) => {
-        await ensurePackage(python, this.log, progress)
-        let backend = await this.spawnHealthy(folder, python, progress)
+        const runtime = await this.environments.runtime(uri, progress)
+        // Only a Model-Maker installed in the interpreter can be missing or
+        // out of date: the bundled one always matches this extension.
+        const installed = runtime.mode === 'installedPackage'
+        if (installed) await ensurePackage(runtime.python, this.log, progress)
+        let backend = await this.spawnHealthy(folder, runtime, progress)
         if (!(await isCompatible(backend))) {
           backend.stop()
-          await offerUpgrade(python, this.log, progress)
-          backend = await this.spawnHealthy(folder, python, progress)
+          if (!installed) {
+            throw new BackendError(
+              "the Model-Maker that ships with this extension doesn't answer as expected -- " +
+                'run Model-Maker: Repair Python Environment, and see Model-Maker: Show Backend Log',
+            )
+          }
+          await offerUpgrade(runtime.python, this.log, progress)
+          backend = await this.spawnHealthy(folder, runtime, progress)
           if (!(await isCompatible(backend))) {
             backend.stop()
             throw new BackendError(
-              `the ${PACKAGE} package in ${python} is too old or too new for this extension -- ` +
+              `the ${PACKAGE} package in ${runtime.python} is too old or too new for this extension -- ` +
                 `upgrade both, or set modelmaker.packageSpec to a matching version`,
             )
           }
@@ -163,11 +173,11 @@ export class BackendManager implements vscode.Disposable {
     else if (choice === 'Show Log') this.log.show()
   }
 
-  private async spawnHealthy(folder: string, python: string, progress: Progress): Promise<Backend> {
+  private async spawnHealthy(folder: string, runtime: Runtime, progress: Progress): Promise<Backend> {
     progress.report({ message: 'launching' })
     // A free port can be taken between checking and binding: retry then.
     for (let attempt = 1; ; attempt++) {
-      const backend = await this.spawn(folder, python, await freePort())
+      const backend = await this.spawn(folder, runtime, await freePort())
       try {
         await waitHealthy(backend)
         return backend
@@ -178,10 +188,12 @@ export class BackendManager implements vscode.Disposable {
     }
   }
 
-  private async spawn(folder: string, python: string, port: number): Promise<Backend> {
+  private async spawn(folder: string, runtime: Runtime, port: number): Promise<Backend> {
+    const python = runtime.python
     const config = vscode.workspace.getConfiguration('modelmaker', vscode.Uri.file(folder))
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      ...runtime.env,
       PYTHONUNBUFFERED: '1',
       MODELMAKER_HOST: '127.0.0.1',
       MODELMAKER_PORT: String(port),
@@ -203,7 +215,8 @@ export class BackendManager implements vscode.Disposable {
     env.MODELMAKER_AUTH_TOKEN = token
 
     const name = path.basename(folder)
-    this.log.appendLine(`[${name}] ${python} -m modelmaker.api on port ${port}`)
+    const which = runtime.mode === 'installedPackage' ? 'installed package' : `bundled ${runtime.version}, ${runtime.mode} environment`
+    this.log.appendLine(`[${name}] ${python} -m modelmaker.api (${which}) on port ${port}`)
     const proc = spawn(python, ['-c', 'from modelmaker.api import main; main()'], {
       cwd: folder,
       env,

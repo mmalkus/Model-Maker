@@ -38,4 +38,31 @@ export const lm = {
   },
 }
 
-export const workspace = { asRelativePath: (p: string) => p }
+// Settings the tests set, read through getConfiguration('modelmaker').
+export const settings = new Map<string, unknown>()
+
+export const workspace = {
+  asRelativePath: (p: string) => p,
+  getConfiguration: (section?: string) => ({
+    get: <T>(key: string, fallback?: T): T | undefined => {
+      const full = section ? `${section}.${key}` : key
+      return (settings.has(full) ? settings.get(full) : fallback) as T | undefined
+    },
+    update: async (key: string, value: unknown) => {
+      settings.set(section ? `${section}.${key}` : key, value)
+    },
+  }),
+}
+
+export const extensions = { getExtension: () => undefined }
+
+export const ConfigurationTarget = { Global: 1, Workspace: 2 }
+
+// What showInformationMessage answers (the tests set it).
+export const answers: Array<string | undefined> = []
+
+export const window = {
+  showInformationMessage: async () => answers.shift(),
+}
+
+export const Uri = { file: (fsPath: string) => ({ fsPath }) }

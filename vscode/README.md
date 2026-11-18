@@ -7,12 +7,13 @@ GitHub Copilot can be the AI that drafts blocks and runs AI model builds.
 
 ## What you need
 
-- Python 3.11 or newer. The extension runs the
-  [`quantology-modelmaker`](https://pypi.org/project/quantology-modelmaker/)
-  package in it and offers to `pip install` the package if it's missing.
-  A virtual environment is the safe choice; pick it with the
-  [Python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
-  or the `modelmaker.pythonPath` setting.
+- **Python 3.11 or newer** on the machine, and access to a package index:
+  PyPI, or your company's mirror (whatever `pip` is configured for).
+  Model-Maker itself ships inside the extension. The first time a canvas
+  opens, the extension makes its own Python environment with Model-Maker's
+  open-source requirements (polars, scikit-learn, scipy, numpy, matplotlib,
+  fastapi and a few more; about 500 MB). It never installs a Model-Maker
+  package and never touches your other Python environments.
 - Optional: GitHub Copilot, for the AI features. Without it, the canvas's
   Settings offers the other providers (Anthropic, OpenAI, Gemini, a local
   LM Studio, the Claude Code CLI).
@@ -45,7 +46,23 @@ edits autosave.
 
 Each open project gets its own local backend: `python -m modelmaker.api`
 on a random `127.0.0.1` port with a random access token, started in the
-project folder and stopped when the canvas closes. The canvas is the same
+project folder and stopped when the canvas closes.
+
+Which Python runs it is `modelmaker.python.environment`:
+
+- `managed` (the default): the extension's own environment, in its storage
+  folder. It's made once from a Python 3.11+ (`modelmaker.basePython`, else
+  `py -3`, `python3` or `python`), and its requirements are reinstalled only
+  when a new version of the extension needs different ones. **Model-Maker:
+  Repair Python Environment** reinstalls them.
+- `interpreter`: the interpreter you select (the Python extension's choice,
+  or `modelmaker.pythonPath`). The extension offers to install whatever
+  requirements it lacks. Use it to add your own packages for library blocks.
+- `installedPackage`: the `quantology-modelmaker` package installed in the
+  selected interpreter, for working on Model-Maker itself (`pip install -e`).
+
+The first two run the Model-Maker that ships with the extension, so it
+always matches the extension's version. The canvas is the same
 app `modelmaker-api` serves in a browser. The extension declares
 `extensionKind: workspace`, so over Remote-SSH, WSL, Dev Containers and
 Codespaces the backend runs next to your files.
@@ -94,7 +111,8 @@ once per workspace:
 3. Open a canvas, or ask Claude to create a project. Its edits show up on
    the canvas as it works.
 
-The `.mcp.json` entry holds your interpreter's path. Before committing it
+The `.mcp.json` entry holds the paths of the extension's Python and its
+copy of Model-Maker, which stay put across extension updates. Before committing it
 for others, change `command` to a path that works for them. The server
 finds the canvases through small files in `~/.modelmaker/vscode-backends/`
 (each backend's local address and access token, readable by you only).
@@ -113,16 +131,19 @@ http://127.0.0.1:8001`.
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |
 | Model-Maker: Show Backend Log | Backend output, pip installs, relay errors |
-| Model-Maker: Select Python Interpreter | Choose the interpreter that runs the backend |
-| Model-Maker: Install / Upgrade Python Package | `pip install -U` the package into it |
+| Model-Maker: Repair Python Environment | Reinstall the managed environment's requirements |
+| Model-Maker: Select Python Interpreter | Choose the interpreter for the `interpreter` and `installedPackage` environments |
+| Model-Maker: Install / Upgrade Python Package | `installedPackage` only: `pip install -U` the package into the interpreter |
 
 ## Settings
 
 | Setting | Default | |
 |---|---|---|
-| `modelmaker.pythonPath` | (empty) | Interpreter for the backend; empty uses the Python extension's selection |
-| `modelmaker.autoInstall` | `ask` | `ask`, `always` or `never` install the package when missing or too old |
-| `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.1` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
+| `modelmaker.python.environment` | `managed` | `managed`, `interpreter` or `installedPackage` (see How it works) |
+| `modelmaker.basePython` | (empty) | The Python the managed environment is made from |
+| `modelmaker.pythonPath` | (empty) | Interpreter for `interpreter`/`installedPackage`; empty uses the Python extension's selection |
+| `modelmaker.autoInstall` | `ask` | `ask`, `always` or `never` install what a selected interpreter is missing |
+| `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.1` | `installedPackage` only: what gets installed, e.g. `-e /path/to/checkout` |
 | `modelmaker.llm.useCopilot` | `true` | Offer Copilot to the backend and make it the default provider |
 | `modelmaker.backend.extraEnv` | `{}` | Extra environment variables for the backend, e.g. API keys |
 | `modelmaker.mcp.discovery` | `true` | Let `modelmaker-mcp` (Claude Code) find the open canvases |

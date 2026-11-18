@@ -10,3 +10,4 @@ modelmaker/examples/
 sample_data/credit_risk_data.csv
 build/
 .env
+vscode/python/

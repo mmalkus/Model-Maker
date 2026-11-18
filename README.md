@@ -55,10 +55,11 @@ it. It creates a `.venv` next to itself if missing, installs/upgrades
 ## VS Code
 
 The extension in [`vscode/`](vscode/README.md) opens a project's
-`model.json` as the canvas in an editor tab. It starts the same
-`modelmaker-api` from the selected Python interpreter, one backend per
-open project, and offers to `pip install` the package if it's missing. It
-can also offer your GitHub Copilot models as the `copilot` AI provider.
+`model.json` as the canvas in an editor tab, one backend per open project.
+Model-Maker ships inside the extension, which runs it in a Python
+environment of its own: all it needs is Python 3.11+ and access to PyPI or
+a company mirror for the open-source requirements. It can also offer your
+GitHub Copilot models as the `copilot` AI provider.
 The pip package works on its own exactly as described here; the extension
 is another way to run it. See
 [`vscode-extension-plan.md`](vscode-extension-plan.md) for the design and
@@ -72,6 +73,10 @@ pip install -e .
 cd vscode && npm ci && npm run build
 code --extensionDevelopmentPath="$PWD" path/to/workspace
 ```
+
+A development build has no bundled Model-Maker and runs the installed
+package (`pip install -e .` above). To try the bundled one, run
+`pip install build && python scripts/bundle-python.py` in `vscode/`.
 
 ## Claude Code and other MCP clients
 

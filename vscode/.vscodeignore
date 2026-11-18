@@ -2,6 +2,7 @@
 **
 !dist/extension.js
 !media/**
+!python/**
 !package.json
 !README.md
 !CHANGELOG.md

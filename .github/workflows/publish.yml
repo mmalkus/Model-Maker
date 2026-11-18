@@ -78,12 +78,17 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  # The VS Code extension installs the package from PyPI, so it publishes
-  # after it (vscode-extension-plan.md §8).
+  # The extension carries its own copy of the package (vscode/python/), so
+  # it needs nothing from PyPI; it still publishes after it, so a release
+  # that fails on PyPI ships nothing (vscode-extension-plan.md §8).
   build-vscode:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - uses: actions/setup-node@v4
         with:
@@ -112,6 +117,12 @@ jobs:
         working-directory: frontend
       - run: npm ci
         working-directory: vscode
+
+      - name: Bundle the Python package into the extension
+        working-directory: vscode
+        run: |
+          python -m pip install build
+          python scripts/bundle-python.py
 
       - name: Package the .vsix
         working-directory: vscode
