@@ -44,7 +44,12 @@ LARGE_DATA_RULES = (
     '"lazy": true; select only the columns needed and filter as early as possible. A block that reduces a big '
     "table (to one row per account, per snapshot date or per period) does it in polars expressions; if it must "
     'collect, it collects only after selecting, filtering and aggregating, with `.collect(engine="streaming")`. '
-    "Never `.to_pandas()`, `.iter_rows()`, `.map_elements()` or Python loops over rows."
+    "Never `.to_pandas()`, `.iter_rows()`, `.map_elements()` or Python loops over rows. A block that is only "
+    'polars expressions marks its dataframe inputs "lazy": true, so a streaming run fuses it with its neighbours. '
+    "Panel data (several rows per id, e.g. a loan per month): per-id logic uses `.over(id)` or a `group_by` on "
+    "the id joined back, and anything that looks ahead per id (an outcome flag) runs on the complete history "
+    "before rows are thinned. Downcast a table that stays large (Float64 to Float32, Int64 to Int32, repeated "
+    "text to Categorical)."
 )
 
 CONTRACT = """You write one block for the block library of a visual, \

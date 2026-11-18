@@ -120,7 +120,49 @@ def run_preflight(build: AgentBuild) -> dict[str, Any]:
     ):
         warnings.append(_issue("no_date", "The goal mentions out-of-time/vintages but no column is tagged date."))
     max_rows = max((f.data.height for f in frames), default=None)
+    if runner.sample_rows is None and frames:
+        # The full data: what the build's large-data guidance and size
+        # hints scale a sample's numbers up to (see AgentBuild.full_rows).
+        build.full_rows = max_rows
+        build.full_bytes = max(f.data.estimated_size() for f in frames)
+    warnings += _large_data_issues(build, frames, max_rows)
     return {"blocking": blocking, "warnings": warnings, "max_rows": max_rows}
+
+
+def _large_data_issues(build: AgentBuild, frames: list[DataFramePacket], max_rows: int | None) -> list[dict[str, Any]]:
+    """Preflight warnings for a source big enough to build on a sample:
+    without an ID tagged on the input block itself, sample mode cuts the
+    first N rows -- for a panel sorted by id and date, a few ids' histories
+    and nothing else."""
+    big = (
+        (max_rows or 0) > AUTO_SAMPLE_THRESHOLD_ROWS
+        or bool(build.options.sample_rows)
+        or build.session.runner.sample_rows is not None
+    )
+    if not big:
+        return []
+    from ..runner import sample_key
+
+    graph = build.session.graph
+    scope = build.scope_block_ids()
+    inputs = [bid for bid in graph.topo_order() if bid in scope and graph.blocks[bid].block_type == "input"]
+    if not inputs or any(sample_key(graph.blocks[bid]) for bid in inputs):
+        return []
+    tagged = sorted({n for f in frames for n, m in f.schema_meta.items() if m.role == ColumnRole.ID})
+    where = (
+        f"{tagged[0]} is tagged id downstream, but not on the input block, where sample mode reads it"
+        if tagged
+        else "No column is tagged id on the input block"
+    )
+    return [
+        _issue(
+            "sample_without_id",
+            f"{where}. The data is large, so the build runs on a sample: with the id (loan, account) tagged on "
+            "the input block, the sample keeps every row of a random set of ids -- complete histories from "
+            "across the file -- instead of the file's first rows.",
+            inputs,
+        )
+    ]
 
 
 def _record_resolved_model(choice: LLMChoice, loop: AgentLoop) -> None:
@@ -583,14 +625,28 @@ class BuildController:
         current = session.runner.sample_rows
         if not requested or current is not None:
             # Off, or the user already has sample mode on -- build on
-            # whatever they're looking at and leave the setting alone.
+            # whatever they're looking at and leave the setting alone. A
+            # sample the user turned on hides the full size: unknown.
             b.sample_rows_used = current
+            b.sample_scale = 1.0 if current is None else None
             return
         session.set_sample_rows(requested)
         b.sample_rows_used = requested
         b.changed_sample_mode = True
         b.log("sample_mode", rows=requested)
         self._reread_inputs()
+        sampled = self._anchor_rows()
+        b.sample_scale = b.full_rows / sampled if b.full_rows and sampled else None
+
+    def _anchor_rows(self) -> int | None:
+        """The anchors' largest current output, in rows."""
+        runner = self.session.runner
+        rows = []
+        for a in self.build.anchors:
+            st = runner.state.get(a)
+            entry = runner.cache.get(st.last_successful_key) if st and st.last_successful_key else None
+            rows += [v.data.height for v in (entry.outputs.values() if entry else []) if isinstance(v, DataFramePacket)]
+        return max(rows, default=None)
 
     def _read_stale_inputs(self) -> None:
         """(Re)read the in-scope input blocks that aren't current. Caller

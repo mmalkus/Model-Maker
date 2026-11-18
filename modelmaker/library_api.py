@@ -17,7 +17,7 @@ from . import block_library as bl
 from . import capabilities
 from . import library_store as store
 from . import library_updates
-from .blocks.base import BLOCK_REGISTRY, BlockDefinition
+from .blocks.base import BLOCK_REGISTRY, BlockDefinition, streaming_note
 from .forms import block_form
 from .packet import DataFramePacket
 
@@ -50,16 +50,7 @@ def architecture(d: BlockDefinition) -> dict[str, Any]:
         changes.append("file changes (modified time and size)")
     if "sql" in kinds and "env" in kinds:
         changes.append("its probe query, when set")
-    df_inputs = [p for p in d.inputs if p.type == "dataframe"]
-    single_df_out = len(d.outputs) == 1 and d.outputs[0].type == "dataframe"
-    if d.block_type == "input" and single_df_out and d.outputs[0].lazy:
-        streaming = "fuses: its lazy scan streams into the blocks after it"
-    elif single_df_out and df_inputs and len(df_inputs) == len(d.inputs) and all(p.lazy for p in df_inputs):
-        streaming = "fuses with neighbouring lazy blocks in a streaming run"
-    elif d.block_type == "output" and not d.outputs and len(d.inputs) == 1 and d.inputs[0].lazy:
-        streaming = "streams its input straight to its destination (a sink)"
-    else:
-        streaming = None
+    streaming = streaming_note(d)
     return {
         "change_detection": changes if d.block_type == "input" else [],
         "streaming": streaming,

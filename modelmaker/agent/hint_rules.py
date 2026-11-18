@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-
+import polars as pl
 
 from ..packet import DataFramePacket
 from . import hints as h
@@ -47,6 +47,19 @@ def _split_hints(outputs: dict[str, Any]) -> list[str]:
     for port, packet in outputs.items():
         if isinstance(packet, DataFramePacket) and packet.data.height == 0:
             hints.append(f"{port} is empty -- check the split settings (test_size, cutoff, oot_end).")
+    # A random row split of a panel (several rows per id) puts rows of one
+    # id on both sides. Only for train/test: an out-of-time split of a
+    # panel is meant to see the same ids again, later.
+    train, test = outputs.get("train"), outputs.get("test")
+    key = h.id_column(train)
+    if key is not None and isinstance(test, DataFramePacket) and key in test.data.columns:
+        shared = train.data.select(pl.col(key).unique()).filter(pl.col(key).is_in(test.data[key].implode())).height
+        if shared:
+            hints.append(
+                f"{shared:,} {key} values have rows in both train and test -- the data has several rows per "
+                f"{key} (a panel), so a random row split leaks: test isn't unseen. Split by time "
+                "(time_split), or derive a per-id split flag and filter on it."
+            )
     thin = [f"{p} has {ev}" for p, (_, _, ev) in samples.items() if ev is not None and ev < h.MIN_EVENTS]
     if thin:
         hints.append(f"Few events (< {h.MIN_EVENTS}): {h.names(thin)} -- metrics on it will be noisy.")

@@ -21,7 +21,7 @@ from ..runslot import RunBusy, RunFailed
 from ..session import new_id, wire_is_valid
 from . import catalogue, leakage
 from .build import AWAITING_APPROVAL, AWAITING_INPUT, BUILDING, PLANNING, STAGE_ACTIVE, STAGE_DONE, STAGE_SKIPPED, AgentBuild, ToolError
-from .hints import decision_hints
+from .hints import decision_hints, size_hints
 from .layout import Placer, next_lane_order
 
 READ = frozenset({PLANNING, BUILDING})
@@ -267,7 +267,9 @@ def block_hints(b: AgentBuild, block_id: str) -> list[str]:
             outputs[p.name] = b.current_output(block_id, p.name)[1]
         except ToolError:
             continue
-    return decision_hints(blk.resolve(), outputs)
+    # Size applies to every block: a large table is worth reducing before
+    # whatever comes next, whichever block made it.
+    return decision_hints(blk.resolve(), outputs) + size_hints(outputs, b.sample_scale)
 
 
 def suspicious_features(b: AgentBuild) -> dict[str, float | None]:

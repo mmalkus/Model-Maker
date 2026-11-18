@@ -10,7 +10,7 @@ from typing import Any
 
 from .. import capabilities
 from ..block_library import INJECTED_PARAMS, load_builtin
-from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
+from ..blocks.base import BLOCK_REGISTRY, BlockDefinition, streaming_note
 from ..packet import ColumnRole
 from ..signature import ParamSpec
 from ..util import ROLE_PARAM_NAMES, find_role_param
@@ -248,6 +248,9 @@ def catalogue_entry(spec: BlockDefinition, detail: bool = False) -> dict[str, An
     if detail:
         entry["doc"] = doc
         entry["params"] = block_params(spec)
+        # What it costs on large data: a block that doesn't stream holds its
+        # whole input and output tables in memory on the full run.
+        entry["streaming"] = streaming_note(spec) or "no: holds its whole input and output tables in memory"
     return entry
 
 
