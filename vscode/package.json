@@ -38,6 +38,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onUri",
     "workspaceContains:**/model.json"
   ],
   "contributes": {
@@ -62,6 +63,11 @@
       {
         "command": "modelmaker.newProject",
         "title": "New Project…",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.setUpClaudeCode",
+        "title": "Set Up Claude Code",
         "category": "Model-Maker"
       },
       {
@@ -159,6 +165,11 @@
             "type": "string"
           },
           "markdownDescription": "Extra environment variables for the backend process, e.g. `{\"ANTHROPIC_API_KEY\": \"…\"}`."
+        },
+        "modelmaker.mcp.discovery": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Let `modelmaker-mcp` (Claude Code and other MCP clients) find the open canvases: writes each one's local backend address and access token to `~/.modelmaker/vscode-backends/`, readable by you only, and removes it when the canvas closes."
         }
       }
     },

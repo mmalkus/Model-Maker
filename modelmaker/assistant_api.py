@@ -59,6 +59,8 @@ def _block_brief(bid: str) -> dict[str, Any]:
         "outputs": [f"{p.name}:{p.type}" for p in block.outputs],
         "position": {"x": block.position.x, "y": block.position.y},
     }
+    if block.block_type == "input":
+        out["data_source"] = True
     if block.definition is not None:
         out["library_block"] = True
     if block.column_role_overrides:

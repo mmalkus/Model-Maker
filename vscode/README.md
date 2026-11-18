@@ -81,12 +81,35 @@ Every edit asks you first, lands in the canvas's undo history, and shows up
 on the canvas straight away. Copilot sees the same data the AI builder
 does: column names, types, roles and summary statistics, never your rows.
 
+## Claude Code
+
+Claude Code can use the same tools through a small MCP server in the
+Python package, `modelmaker-mcp`, on the canvas you used last. Set it up
+once per workspace:
+
+1. Run **Model-Maker: Set Up Claude Code**. It adds a `modelmaker` entry
+   to the workspace's `.mcp.json`, using the selected Python interpreter.
+2. Start (or restart) Claude Code in that folder, in the panel or the
+   terminal, and approve the `modelmaker` server.
+3. Open a canvas, or ask Claude to create a project. Its edits show up on
+   the canvas as it works.
+
+The `.mcp.json` entry holds your interpreter's path. Before committing it
+for others, change `command` to a path that works for them. The server
+finds the canvases through small files in `~/.modelmaker/vscode-backends/`
+(each backend's local address and access token, readable by you only).
+Turn this off with `modelmaker.mcp.discovery`.
+
+The same server works with the browser app: `modelmaker-mcp --url
+http://127.0.0.1:8001`.
+
 ## Commands
 
 | Command | |
 |---|---|
 | Model-Maker: Open Project… | Open a project folder's canvas |
 | Model-Maker: New Project… | Create a project folder (model.json, files/, git) |
+| Model-Maker: Set Up Claude Code | Add the Model-Maker tools to the workspace's `.mcp.json` |
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |
 | Model-Maker: Show Backend Log | Backend output, pip installs, relay errors |
@@ -102,6 +125,7 @@ does: column names, types, roles and summary statistics, never your rows.
 | `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.0` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
 | `modelmaker.llm.useCopilot` | `true` | Offer Copilot to the backend and make it the default provider |
 | `modelmaker.backend.extraEnv` | `{}` | Extra environment variables for the backend, e.g. API keys |
+| `modelmaker.mcp.discovery` | `true` | Let `modelmaker-mcp` (Claude Code) find the open canvases |
 
 ## License
 

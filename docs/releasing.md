@@ -83,7 +83,9 @@ Paste the PyPI part into the GitHub release; the extension's own notes are in
 > Copilot can be the AI that drafts blocks and runs AI builds. In Copilot
 > Chat's agent mode, Copilot can build a model from an empty canvas: create
 > the project, find the data, lay out lanes, add and wire blocks, run them
-> and check the result for leakage, asking before every edit. Install
+> and check the result for leakage, asking before every edit. Claude Code
+> gets the same tools through `modelmaker-mcp` (**Model-Maker: Set Up
+> Claude Code**). Install
 > "Model-Maker" from the Marketplace (pre-release) or Open VSX, or use the
 > `.vsix` attached to this release.
 >
@@ -150,12 +152,18 @@ Paste the PyPI part into the GitHub release; the extension's own notes are in
 > - A runner agent and `RemoteExecutor`, to run block tasks in a separate,
 >   sandboxed process behind a socket.
 >
+> **Claude Code and other MCP clients.** `modelmaker-mcp` gives an
+> assistant the tools to build a model on the open canvas, in VS Code or
+> the browser app (`--url`). The canvas shows edits made from outside
+> within a couple of seconds.
+>
 > **Embedding API (opt-in).**
 >
 > - `GET /api/version`.
 > - `/api/assistant/*`: read-only views of the graph, block catalogue and
 >   redacted output summaries, a leakage and hints check, and block and lane
->   placement for chat assistants.
+>   placement for chat assistants. `GET /api/graph/stamp` tells a canvas
+>   the graph changed.
 > - `MODELMAKER_AUTH_TOKEN` requires a token on `/api/*`, and
 >   `MODELMAKER_CORS_ORIGIN_REGEX` admits extra origins.
 >

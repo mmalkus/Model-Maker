@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { type Backend, type BackendManager } from './backend'
 import { attachBridge } from './bridge'
+import type { Discovery } from './discovery'
 
 export const VIEW_TYPE = 'modelmaker.model'
 
@@ -25,6 +26,7 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     private readonly context: vscode.ExtensionContext,
     private readonly backends: BackendManager,
     private readonly log: vscode.OutputChannel,
+    private readonly discovery?: Discovery,
   ) {
     context.subscriptions.push(
       backends.onDidRestart(async (folder) => {
@@ -33,8 +35,8 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     )
   }
 
-  static register(context: vscode.ExtensionContext, backends: BackendManager, log: vscode.OutputChannel) {
-    const provider = new ModelEditorProvider(context, backends, log)
+  static register(context: vscode.ExtensionContext, backends: BackendManager, log: vscode.OutputChannel, discovery?: Discovery) {
+    const provider = new ModelEditorProvider(context, backends, log, discovery)
     context.subscriptions.push(
       vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
         // The canvas's own state (selection, viewport, open panels) survives
@@ -95,13 +97,16 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
         if (choice === 'Reload') panel.webview.postMessage({ kind: 'event', name: 'reload' })
       }),
       panel.onDidChangeViewState(() => {
-        if (panel.active) this.active = this.lastActive = panel
-        else if (this.active === panel) this.active = undefined
+        if (panel.active) {
+          this.active = this.lastActive = panel
+          this.discovery?.touch(folder)
+        } else if (this.active === panel) this.active = undefined
       }),
     ]
     panel.onDidDispose(() => {
       disposables.forEach((d) => d.dispose())
       set.delete(panel)
+      if (set.size === 0) this.discovery?.withdraw(folder)
       if (this.active === panel) this.active = undefined
       if (this.lastActive === panel) this.lastActive = undefined
       this.backends.release(folder)
@@ -131,6 +136,7 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
       portMapping: [{ webviewPort: backend.port, extensionHostPort: backend.port }],
     }
     panel.webview.html = await webviewHtml(panel.webview, media, backend)
+    this.discovery?.publish(folder, backend.apiBase, backend.token, panel.active || first)
   }
 }
 

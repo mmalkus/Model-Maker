@@ -2,6 +2,7 @@ import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { BackendManager, installPackage } from './backend'
 import { CopilotRelay } from './copilot'
+import { Discovery } from './discovery'
 import { ModelEditorProvider, VIEW_TYPE } from './editor'
 import { onPythonChanged, resolvePython } from './python'
 import { registerTools } from './tools'
@@ -19,8 +20,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
   const log = vscode.window.createOutputChannel('Model-Maker')
   const relay = new CopilotRelay(log)
   const backends = new BackendManager(log, relay)
-  context.subscriptions.push(log, relay, backends)
-  const editor = ModelEditorProvider.register(context, backends, log)
+  // For Claude Code and other MCP clients (modelmaker-mcp): see discovery.ts.
+  const discovery = new Discovery(() => vscode.workspace.getConfiguration('modelmaker').get<boolean>('mcp.discovery', true))
+  context.subscriptions.push(log, relay, backends, discovery)
+  const editor = ModelEditorProvider.register(context, backends, log, discovery)
   registerTools(context, backends, editor, (folder, create) => openProjectFolder(backends, folder, create))
 
   const command = (id: string, fn: (...args: never[]) => unknown) =>
@@ -43,6 +46,30 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     await openCanvas(file)
   })
   command('modelmaker.newProject', () => newProject(backends))
+  command('modelmaker.setUpClaudeCode', () => setUpClaudeCode())
+
+  // vscode://quantology.modelmaker/open?folder=<path>[&create=1]: how
+  // modelmaker-mcp's open_project asks for a canvas (see assistant_mcp.py).
+  context.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri: async (uri) => {
+        if (uri.path !== '/open') return
+        const params = new URLSearchParams(uri.query)
+        const folder = params.get('folder')
+        if (!folder || !path.isAbsolute(folder)) return
+        const create = params.get('create') === '1'
+        if (create && !(await exists(vscode.Uri.joinPath(vscode.Uri.file(folder), PROJECT_FILE)))) {
+          const ok = await vscode.window.showInformationMessage(`An assistant asks to create a Model-Maker project in ${folder}.`, { modal: true }, 'Create')
+          if (ok !== 'Create') return
+        }
+        try {
+          await openProjectFolder(backends, folder, create)
+        } catch (e) {
+          vscode.window.showErrorMessage(`Model-Maker: ${e instanceof Error ? e.message : e}`)
+        }
+      },
+    }),
+  )
   command('modelmaker.save', () => editor.saveActive())
   command('modelmaker.restartBackend', () => backends.restart())
   command('modelmaker.showLog', () => log.show())
@@ -182,6 +209,28 @@ async function openProjectFolder(backends: BackendManager, folder: string, creat
   }
   await openCanvas(file)
   return target.fsPath
+}
+
+/** Writes the workspace's .mcp.json entry that lets Claude Code use the
+ * Model-Maker tools (modelmaker-mcp) on the open canvas. */
+async function setUpClaudeCode() {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri
+  if (!root) return vscode.window.showErrorMessage('Open a workspace folder first.')
+  const python = await resolvePython(root)
+  const file = vscode.Uri.joinPath(root, '.mcp.json')
+  let config: { mcpServers?: Record<string, unknown> } = {}
+  try {
+    config = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(file)).toString('utf8'))
+  } catch (e) {
+    if (await exists(file)) return vscode.window.showErrorMessage(`.mcp.json isn't valid JSON (${e instanceof Error ? e.message : e}); fix it first.`)
+  }
+  config.mcpServers = { ...config.mcpServers, modelmaker: { command: python, args: ['-m', 'modelmaker.assistant_mcp'] } }
+  await vscode.workspace.fs.writeFile(file, Buffer.from(JSON.stringify(config, null, 2) + '\n'))
+  const choice = await vscode.window.showInformationMessage(
+    'Added Model-Maker to .mcp.json. Start (or restart) Claude Code in this folder and approve the "modelmaker" server; it works on the canvas you used last.',
+    'Open .mcp.json',
+  )
+  if (choice) await vscode.window.showTextDocument(file)
 }
 
 async function selectInterpreter() {

@@ -29,6 +29,8 @@ import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, R
 import { host } from './host'
 import { has } from './features'
 
+const STAMP_POLL_MS = 1500
+
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
 
@@ -314,6 +316,30 @@ function AppInner() {
     // from all-grey to done between two 700ms-apart polls.
     const id = setInterval(reload, 200)
     return () => clearInterval(id)
+  }, [anyRunning, reload])
+
+  // Edits made elsewhere -- an assistant such as Claude Code over MCP,
+  // another tab -- show up within a couple of seconds: poll a cheap stamp
+  // and reload the graph only when it changes. (Runs poll faster, above.)
+  const stampRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (anyRunning) return
+    let stopped = false
+    const id = setInterval(() => {
+      if (document.hidden) return
+      api
+        .graphStamp()
+        .then(({ stamp }) => {
+          if (stopped) return
+          if (stampRef.current !== null && stamp !== stampRef.current) reload()
+          stampRef.current = stamp
+        })
+        .catch(() => {})
+    }, STAMP_POLL_MS)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
   }, [anyRunning, reload])
 
   useEffect(() => {

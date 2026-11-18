@@ -73,6 +73,22 @@ cd vscode && npm ci && npm run build
 code --extensionDevelopmentPath="$PWD" path/to/workspace
 ```
 
+## Claude Code and other MCP clients
+
+`modelmaker-mcp` gives an MCP client the tools to build a model on an open
+canvas: open or create a project, find the data, add lanes and blocks,
+wire, run, check for leakage and compile. Each edit goes into the canvas's
+undo history and shows up on the canvas within a couple of seconds.
+Assistants see schemas and summary statistics, never your data's rows.
+
+```bash
+modelmaker-api                                           # the canvas, in a browser
+claude mcp add modelmaker -- modelmaker-mcp --url http://127.0.0.1:8001
+```
+
+Inside VS Code, the extension's **Model-Maker: Set Up Claude Code** does
+the setup, and the tools work on the canvas you used last.
+
 ## Projects
 
 A project is a folder, not a file: **Save**/**Load** browse for a folder

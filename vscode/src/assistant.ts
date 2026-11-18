@@ -14,6 +14,7 @@ export type BlockBrief = {
   position: { x: number; y: number }
   error?: string
   stale_reason?: string | null
+  data_source?: boolean
 }
 
 export type Graph = {

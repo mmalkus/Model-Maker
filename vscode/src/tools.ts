@@ -247,14 +247,26 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     describe: (i) => (i.block ? `Running up to ${i.block}` : 'Running the whole pipeline'),
     edits: true,
     run: async (ctx, i, token) => {
-      const target = i.block ? findBlock(await graph(ctx), i.block).id : null
+      const before = await graph(ctx)
+      const target = i.block ? findBlock(before, i.block).id : null
+      const deadline = Date.now() + RUN_TIMEOUT_MS
+      const refreshed: string[] = []
+      if (!target) {
+        // Run all reads a data source only the first time; one whose settings
+        // changed since (a param, a column role) stays stale and everything
+        // after it fails. An assistant's whole-pipeline run re-reads those.
+        for (const b of before.blocks.filter((b) => b.data_source && b.status === 'orange')) {
+          await ctx.backend.json(`/blocks/${b.id}/refresh`, { method: 'POST' })
+          await waitIdle(ctx, deadline, token)
+          refreshed.push(b.name)
+        }
+      }
       await ctx.backend.json(target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
       // The canvas polls while it sees a run: let it see this one.
       setTimeout(() => editor.refresh(ctx.folder), 300)
-      const deadline = Date.now() + RUN_TIMEOUT_MS
       for (;;) {
         const g = await graph(ctx)
-        if (!g.running) return withChecks(ctx, runOutcome(g, target), target)
+        if (!g.running) return withChecks(ctx, { ...runOutcome(g, target), ...(refreshed.length ? { refreshed_sources: refreshed } : {}) }, target)
         if (token.isCancellationRequested) {
           await ctx.backend.json('/run/cancel', { method: 'POST' }).catch(() => {})
           throw new Error('cancelled -- the run was stopped')
@@ -273,6 +285,13 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       return source.length > SCRIPT_CHARS ? { source: source.slice(0, SCRIPT_CHARS), truncated: true } : { source }
     },
   })
+}
+
+async function waitIdle(ctx: Ctx, deadline: number, token: vscode.CancellationToken) {
+  while (Date.now() < deadline && !token.isCancellationRequested) {
+    if (!(await ctx.backend.json<Graph>('/assistant/graph')).running) return
+    await new Promise((r) => setTimeout(r, 500))
+  }
 }
 
 type Check = { leaks: unknown[]; suspicious_features: unknown[]; hints: Record<string, string[]>; ok: boolean }

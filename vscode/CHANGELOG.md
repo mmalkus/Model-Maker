@@ -23,6 +23,9 @@ switches the extension uses.
   wire, unwire and delete blocks, tag column roles, run, check for holdout
   leakage and suspicious features (with the AI builder's decision hints),
   and compile.
+- Claude Code can use the same tools on the canvas you used last, through
+  `modelmaker-mcp` from the Python package. **Model-Maker: Set Up Claude
+  Code** adds it to the workspace's `.mcp.json`.
 - A compact canvas inside VS Code: one toolbar row with the rarer run modes
   under **More**, a palette that folds to a rail, and an inspector that
   appears only for a selected block.

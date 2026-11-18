@@ -125,6 +125,9 @@ test('builds a model from an empty canvas', opts, async () => {
   assert.ok(names.length > 3)
   const roled = await call('modelmaker_set_column_role', { block: load.id, column: names[0], role: 'excluded' })
   assert.deepEqual(roled.column_roles, { [names[0]]: 'excluded' })
+  // The role made the source stale: a whole run re-reads it.
+  const rerun = await call('modelmaker_run', {})
+  assert.deepEqual([rerun.statuses, rerun.refreshed_sources], [{ green: 2 }, ['Loans']], JSON.stringify(rerun))
   const renamed = await call('modelmaker_set_params', { block: split.id, name: 'Holdout split', params: { seed: 11 } })
   assert.deepEqual([renamed.name, renamed.params.seed], ['Holdout split', 11])
   const check = await call('modelmaker_check', {})
