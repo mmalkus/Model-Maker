@@ -362,7 +362,9 @@ def test_build_on_a_sample_then_full_run(tmp_path, prepared):
     controller.approve()
     controller.join(180)
     assert b.phase == DONE, (b.phase, b.pending_question, b.error)
-    assert seen["run"]["outputs"]["out"]["row_count"] == 200
+    # The source tags an ID column, so sample mode keeps whole IDs: about
+    # 200 rows, not exactly (see run_worker._sample_by_key).
+    assert 150 <= seen["run"]["outputs"]["out"]["row_count"] <= 250
     assert session.runner.sample_rows is None  # restored
     assert b.results[0]["row_count"] == 5000  # key output refreshed on the full data
     assert session.runner.status(anchor) == "green"

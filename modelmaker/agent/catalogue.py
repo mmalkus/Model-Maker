@@ -32,6 +32,7 @@ AGENT_DISALLOWED: dict[str, str] = {
     "read_dataset": "input blocks are prepared by the user, not the AI build",
     "read_source": "input blocks are prepared by the user, not the AI build",
     "write_csv": "writing files is left to the user",
+    "write_parquet": "writing files is left to the user",
     "export": "exporting results is left to the user",
     "iterate": "fan-out (iterate/collect) isn't supported in AI builds yet",
     "collect": "fan-out (iterate/collect) isn't supported in AI builds yet",

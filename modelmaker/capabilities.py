@@ -13,9 +13,9 @@ The capabilities this package knows:
 
 - ``filesystem`` -- the block reads or writes files at paths the user
   types, or reaches a database through a connection variable: read_csv,
-  read_parquet, read_json, read_excel, read_sql, write_csv. Any block with
-  a form field of kind ``path`` or ``env`` needs it too. The local app
-  grants it.
+  read_parquet, read_json, read_excel, read_sql, write_csv, write_parquet.
+  Any block with a form field of kind ``path`` or ``env`` needs it too.
+  The local app grants it.
 - ``datasets`` -- the block reads a dataset by name (a form field of kind
   ``dataset``): read_dataset. Granted when an embedding application gives
   the workspace a dataset provider (see datasets.py).

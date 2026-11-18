@@ -27,7 +27,7 @@ from modelmaker.session import ProjectSession
 from modelmaker.workspace import Workspace
 
 HEADER = "X-Test-Workspace"
-PATH_BLOCKS = {"read_csv", "read_parquet", "read_json", "read_excel", "read_sql", "write_csv"}
+PATH_BLOCKS = {"read_csv", "read_parquet", "read_json", "read_excel", "read_sql", "write_csv", "write_parquet"}
 DATA_BLOCKS = {"read_dataset", "read_source", "export"}
 
 

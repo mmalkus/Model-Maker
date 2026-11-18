@@ -212,7 +212,17 @@ habits keep big sources workable:
   are slow on millions of rows.
 
 Converting a large CSV source to Parquet once also helps a lot: a Parquet
-scan reads only the columns a query uses.
+scan reads only the columns a query uses. **Read CSV → Write Parquet**, run
+with **Run all (streaming)**, does it without loading the file: Read CSV
+takes a `separator` (`|` for pipe-delimited files), `has_header`,
+`column_names` for a file without a header row, and `infer_schema_rows`
+(0 reads every column as text, the safe choice when a file's first rows
+aren't representative). Read dataset and Read from source stream like
+Read CSV and Read Parquet do.
+
+For panel data (one row per loan per month, say), tag the ID column on
+the input block before turning sample mode on: the sample then keeps whole
+loans, so anything computed per loan over time sees complete histories.
 
 Create with AI, Fix with AI and the AI builder are told the same (see
 `modelmaker/llm/prompts.py` and `modelmaker/agent/prompts.py`).
@@ -375,11 +385,11 @@ driven by what the block declares:
 
 | What | How |
 |---|---|
-| Sample mode | The engine caps each input block's output at N rows (`.head(n)`, pushed into lazy scans). |
+| Sample mode | The engine caps each input block's output at N rows (`.head(n)`, pushed into lazy scans), or, when the input block tags an ID column, keeps whole IDs adding up to about N rows. |
 | Change detection | From `path` fields (file fingerprint), `dataset` fields (the dataset's version), or `sql` + `env` fields plus a `probe_query`. |
 | Capabilities | From `capabilities` and the field kinds: a block the workspace doesn't allow isn't offered or run. |
 | Streaming | From the `lazy` port flags. |
-| Caching | Keyed by the definition's sha plus params and upstream, so an edited block never serves a stale result. Results are cached as data (Arrow and JSON), never pickled. |
+| Caching | Keyed by the definition's sha plus params and upstream, so an edited block never serves a stale result. Results are cached as data (Arrow and JSON), never pickled. In memory up to a budget (a quarter of RAM, or `MODELMAKER_CACHE_MEMORY_MB`; 0 = no limit), beyond which the least recently used results are read back from disk when needed. |
 | Column roles | `meta`, as above, plus the user's own role tags. |
 | AI decision hints | `hints`. |
 | Group by | Any block with a dataframe input can run once per group. |

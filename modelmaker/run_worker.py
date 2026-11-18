@@ -42,23 +42,60 @@ def resolve_fn(category: str, code: str | None):
     return BLOCK_REGISTRY[category].fn
 
 
-def _collect(value: Any, sample_rows: int | None) -> Any:
-    """A LazyFrame result collected (with sample mode's row cap pushed down
-    first); a DataFrame truncated the same way; anything else as is."""
+def _sample_by_key(value: Any, rows: int, key: str) -> Any:
+    """Sample mode keyed on an ID column: keeps every row of a pseudo-random
+    subset of IDs, sized so that about `rows` rows come back. All of an
+    entity's rows stay together -- a loan's whole monthly history, say --
+    so per-entity work downstream (forward-looking default flags, lags,
+    splits by ID) sees complete histories, unlike a plain first-N-rows cut
+    of a file sorted by ID and date, which keeps a few entities' histories
+    and nothing else.
+
+    The subset is the IDs whose hash falls below a threshold: deterministic
+    (the same file and size give the same sample) and computed inside the
+    lazy plan, so a scan never loads more than it keeps. Counting the rows
+    first costs one pass over the source (cheap for Parquet: its metadata).
+    `value` is a LazyFrame or a DataFrame; the result is a DataFrame."""
     import polars as pl
 
+    lf = value.lazy() if isinstance(value, pl.DataFrame) else value
+    total = lf.select(pl.len()).collect().item()
+    if total <= rows:
+        return lf.collect()
+    threshold = int(rows / total * 2**64)
+    return lf.filter(pl.col(key).hash(seed=0) < pl.lit(threshold, dtype=pl.UInt64)).collect()
+
+
+def _collect(value: Any, sample: int | dict[str, Any] | None) -> Any:
+    """A LazyFrame result collected (with sample mode's row cap pushed down
+    first); a DataFrame sampled the same way; anything else as is.
+
+    `sample` is sample mode's setting for an input block: None (off), a
+    row count (the first that many rows), or {"rows": n, "key": column}
+    (whole IDs, about n rows -- see _sample_by_key; used when the block
+    tags a column as the ID). A key the output doesn't have falls back to
+    the first n rows."""
+    import polars as pl
+
+    if sample is None or not isinstance(value, (pl.LazyFrame, pl.DataFrame)):
+        return value.collect() if isinstance(value, pl.LazyFrame) else value
+    if isinstance(sample, dict):
+        rows, key = int(sample["rows"]), sample.get("key")
+        names = value.collect_schema().names() if isinstance(value, pl.LazyFrame) else value.columns
+        if key and key in names:
+            return _sample_by_key(value, rows, key)
+    else:
+        rows = int(sample)
     if isinstance(value, pl.LazyFrame):
-        return (value.head(sample_rows) if sample_rows is not None else value).collect()
-    if isinstance(value, pl.DataFrame) and sample_rows is not None:
-        return value.head(sample_rows)
-    return value
+        return value.head(rows).collect()
+    return value.head(rows)
 
 
 def run_worker_entry(
     category: str,
     code: str | None,
     kwargs: dict[str, Any],
-    sample_rows: int | None,
+    sample_rows: int | dict[str, Any] | None,
     result_queue: Any,
     task_key: Any,
 ) -> None:
@@ -69,8 +106,8 @@ def run_worker_entry(
     the parent's `_dispatch` waiting until it notices the process died.
 
     LazyFrame results are collected here (a LazyFrame can't cross the
-    process boundary as data), after sample mode's `.head(sample_rows)` --
-    set only for an input block -- so the row cap reaches the scan."""
+    process boundary as data), after sample mode's cap -- set only for an
+    input block, see _collect -- so the row cap reaches the scan."""
     try:
         fn = resolve_fn(category, code)
         result = fn(**kwargs)
