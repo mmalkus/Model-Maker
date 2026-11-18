@@ -90,6 +90,7 @@ them:
 | `#mmRun` | Runs the pipeline, or up to one block, and reports errors and leakage |
 | `#mmCheck` | Checks for holdout leakage and suspicious features, with each block's decision hints |
 | `#mmCompile` | Returns the compiled Python script |
+| `#mmBlockGuide`, `#mmCheckBlockFile` | Write a new block for your library: the rules (including data too big for memory) and template, then validate the file and run its examples |
 
 Copilot can start from nothing: ask agent mode to "create a project in
 `models/pd` and build a PD scorecard from `data/loans.csv`". It opens the

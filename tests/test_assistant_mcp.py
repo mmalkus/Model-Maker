@@ -148,3 +148,21 @@ def test_a_whole_run_rereads_a_source_whose_settings_changed(backend, tmp_path, 
     call(r, "set_column_role", block=load["id"], column="default_flag", role="target")
     ran = call(r, "run")
     assert ran["statuses"] == {"green": 2}, ran
+
+
+def test_an_assistant_writes_and_checks_a_library_block(backend, tmp_path, monkeypatch, block_library_dir):
+    from tests.test_embedding import LAZY_SOURCE
+
+    monkeypatch.chdir(tmp_path)
+    r = mm.Resolver(backend, None, discovery=tmp_path / "none")
+    call(r, "open_project", folder="p", create=True)
+    guide = call(r, "get_block_guide")
+    assert any("Large data" in rule for rule in guide["rules"])
+    Path(guide["library_dir"]).mkdir(parents=True, exist_ok=True)
+    (Path(guide["library_dir"]) / "loans.py").write_text(LAZY_SOURCE)
+    assert call(r, "check_block_file", name="loans.py")["ok"] is True
+    csv = tmp_path / "panel.csv"
+    csv.write_text("loan_id,period,dpd,extra\n1,202001,0,a\n")
+    block = call(r, "add_block", category="monthly_panel", params={"path": str(csv)})
+    assert call(r, "run")["statuses"] == {"green": 1}
+    assert [c["name"] for c in call(r, "get_output_summary", block=block["id"])["columns"]] == ["loan_id", "period", "dpd"]

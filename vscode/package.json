@@ -283,7 +283,7 @@
         "name": "modelmaker_list_block_types",
         "toolReferenceName": "mmBlockTypes",
         "displayName": "Model-Maker: List Block Types",
-        "modelDescription": "Without a tag: the block tags (data_sources and exports first, then e.g. data_prep, sampling, binning_woe, regression, performance, stability) with a description of each. With a tag: that tag's blocks (category id and one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one.",
+        "modelDescription": "Without a tag: the block tags (data_sources and exports first, then e.g. data_prep, sampling, binning_woe, regression, performance, stability) with a description of each. With a tag: that tag's blocks (category id and one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one. If no block does what's needed, write one for the library: modelmaker_get_block_guide.",
         "userDescription": "List the blocks Model-Maker offers",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
@@ -395,6 +395,46 @@
               "description": "A block id (or exact name) from modelmaker_get_graph."
             }
           }
+        }
+      },
+      {
+        "name": "modelmaker_get_block_guide",
+        "toolReferenceName": "mmBlockGuide",
+        "displayName": "Model-Maker: Get Block Guide",
+        "modelDescription": "How to write a new block (or change one) for the user's block library, when no built-in block does what's needed: the library folder to write the .py file into, the files already there, the rules (including how to handle data too big for memory: lazy scans, reduce early, streaming collect) and the commented template. Call this before writing or editing a block file, then modelmaker_check_block_file.",
+        "userDescription": "How to write a block for your library",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "modelmaker_check_block_file",
+        "toolReferenceName": "mmCheckBlockFile",
+        "displayName": "Model-Maker: Check Block File",
+        "modelDescription": "Checks a block file written in the library folder: re-reads the folder, validates the file (the BLOCKS entry, the functions, the params) and runs its _example_ self-checks. Fix what it reports until ok, then place the block with modelmaker_add_block (its id as the category).",
+        "userDescription": "Validate a library block file and run its examples",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The file's name in the library folder, e.g. fannie_mae.py."
+            }
+          },
+          "required": [
+            "name"
+          ]
         }
       },
       {

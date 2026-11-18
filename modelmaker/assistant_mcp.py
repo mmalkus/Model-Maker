@@ -367,7 +367,8 @@ def list_files(r: Resolver, a: dict[str, Any]) -> Any:
     "list_block_types",
     "Without a tag: the block tags (data_sources and exports first, then e.g. data_prep, sampling, binning_woe, "
     "regression, performance, stability) with a description of each. With a tag: that tag's blocks (category id and "
-    "one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one.",
+    "one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one. If no "
+    "block does what's needed, write one for the library: get_block_guide.",
     {"tag": {"type": "string", "description": "A tag from the tag list."}},
 )
 def list_block_types(r: Resolver, a: dict[str, Any]) -> Any:
@@ -430,6 +431,29 @@ def check(r: Resolver, a: dict[str, Any]) -> Any:
     t = r.target()
     target = find_block(_graph(t), a["block"])["id"] if a.get("block") else None
     return t.get("/assistant/check", block=target)
+
+
+@tool(
+    "get_block_guide",
+    "How to write a new block (or change one) for the user's block library, when no built-in block does what's "
+    "needed: the library folder to write the .py file into, the files already there, the rules (including how "
+    "to handle data too big for memory: lazy scans, reduce early, streaming collect) and the commented "
+    "template. Call this before writing or editing a block file, then check_block_file.",
+)
+def get_block_guide(r: Resolver, a: dict[str, Any]) -> Any:
+    return r.target().get("/assistant/block_guide")
+
+
+@tool(
+    "check_block_file",
+    "Checks a block file you wrote in the library folder: re-reads the folder, validates the file (the BLOCKS "
+    "entry, the functions, the params) and runs its _example_ self-checks. Fix what it reports until ok, then "
+    "place the block with add_block (its id as the category).",
+    {"name": {"type": "string", "description": "The file's name in the library folder, e.g. fannie_mae.py."}},
+    ["name"],
+)
+def check_block_file(r: Resolver, a: dict[str, Any]) -> Any:
+    return r.target().post("/assistant/check_block_file", {"name": a["name"]}, timeout=300)
 
 
 @tool(

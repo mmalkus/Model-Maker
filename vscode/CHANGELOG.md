@@ -21,6 +21,10 @@ it runs (see vscode-extension-plan.md §8.2).
   (`claude mcp add --scope user`), not just the workspace's `.mcp.json`.
 - Blocks drafted by AI read large sources lazily and reduce them with
   Polars' streaming engine, instead of loading a table bigger than memory.
+- New chat tools `get_block_guide` and `check_block_file` (Copilot and
+  Claude Code): an assistant writing a block file for your library gets the
+  rules and template first, then validates the file and runs its examples.
+  Your library's data-source blocks can now be placed from chat too.
 
 ## 0.3.2
 

@@ -103,7 +103,11 @@ The extension needs:
 > builder) now read large sources lazily (`pl.scan_csv`/`scan_parquet`),
 > select only the columns they need, reduce early and collect with Polars'
 > streaming engine, so a table bigger than memory never has to be loaded
-> whole. The block-authoring guide has a new "Large data" section.
+> whole. The block-authoring guide has a new "Large data" section. Chat
+> assistants get the same rules, plus the block template, from two new
+> tools: `get_block_guide` before writing a block file for your library, and
+> `check_block_file` to validate it and run its examples. Your library's
+> data-source blocks can now be placed from chat too.
 >
 > **Python package.** `GET /api/project/disk_state` says whether the
 > project file changed on disk since the backend last read or wrote it.

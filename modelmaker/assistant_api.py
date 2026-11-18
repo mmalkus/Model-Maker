@@ -17,6 +17,7 @@ from . import capabilities, features
 from .agent import catalogue, leakage
 from .agent.hints import decision_hints
 from .agent.layout import DEFAULT_LANE_HEIGHT, Placer, next_lane_order
+from .llm.prompts import LARGE_DATA_RULES
 from .agent.tools import is_statistics_output, leak_graph, summarize_value, suspicious_in_graph, table_rows
 from .packet import DataFramePacket
 from .blocks.base import BLOCK_REGISTRY
@@ -115,7 +116,32 @@ def _io_blocks(kind: str) -> list[dict[str, Any]]:
         spec = BLOCK_REGISTRY.get(category)
         if spec is not None and capabilities.allowed(spec):
             out.append({"category": category, "summary": catalogue._first_sentence(spec.summary or spec.display_name)})
+    if kind == "input":
+        # The user's own data-source blocks (the AI builder's catalogue
+        # leaves library input blocks out; here the user confirms each edit).
+        for file, d in _library_inputs():
+            out.append({"category": d.id, "summary": catalogue._first_sentence(d.summary or d.display_name), "library": file})
     return out
+
+
+def _library_inputs():
+    """(file, definition) of each valid library input block this workspace allows."""
+    from . import library_store
+
+    if features.CUSTOM_BLOCKS not in _workspace().features:
+        return []
+    found = []
+    try:
+        files = library_store.list_files()
+    except library_store.LibraryError:
+        return []
+    for f in files:
+        if f.parsed.file_errors:
+            continue
+        for d in f.parsed.definitions:
+            if d.block_type == "input" and not f.parsed.errors.get(d.id) and d.id not in BLOCK_REGISTRY and capabilities.allowed(d):
+                found.append((f.name, d))
+    return found
 
 
 @router.get("/block_types")
@@ -166,6 +192,10 @@ def add_block(req: NewBlock) -> dict[str, Any]:
     from . import library_store
 
     spec = catalogue.lookup(req.category, True)
+    library_input = None
+    if spec is None:
+        library_input = next(((f, d) for f, d in _library_inputs() if d.id == req.category), None)
+        spec = library_input[1] if library_input else None
     if spec is None:
         raise HTTPException(400, f"unknown block category {req.category!r}{catalogue.unknown_category_hint(req.category, True)}")
     known = {p["name"] for p in catalogue.block_params(spec)}
@@ -177,7 +207,7 @@ def add_block(req: NewBlock) -> dict[str, Any]:
         if features.CUSTOM_BLOCKS not in _workspace().features:
             raise HTTPException(403, features.refusal(features.CUSTOM_BLOCKS))
         try:
-            definition, ref = library_store.placeable(spec.origin, req.category)
+            definition, ref = library_store.placeable(library_input[0] if library_input else spec.origin, req.category)
         except library_store.LibraryError as e:
             raise HTTPException(400, str(e))
     session = _session()
@@ -277,3 +307,88 @@ def check(block: str | None = None) -> dict[str, Any]:
         "hints": hints,
         "ok": not leaks and not suspicious,
     }
+
+
+# ---- writing library blocks: an assistant's guide and check ------------------
+
+BLOCK_FILE_RULES = [
+    "A block file is one .py file in the library folder holding one or more blocks: a module docstring "
+    "(the file's heading in the library), `import polars as pl`, a `BLOCKS = {...}` dict literal keyed by block "
+    "id (read without running the file, so literals only), and for each id a top-level function of that name. "
+    "The template below shows every key, commented; start from it.",
+    "A function's first parameters are its input ports (named as in \"inputs\"), then its params, each with "
+    "a default. It returns one value per output port (a tuple for several).",
+    "Never hardcode an existing input column's name in the body: take it as a `<descriptive>_col` str param "
+    "defaulted to the real column name (`<descriptive>_cols` for a list). New columns get literal names via "
+    ".alias(...).",
+    "Only polars at module level; import numpy, scipy or sklearn inside the function that uses them. No "
+    "pandas, no network, no global state, and no file I/O except an input block reading its source.",
+    "Give each block an `_example_<id>()` self-check: build a tiny pl.DataFrame by hand, call the block, "
+    "assert something meaningful. check_block_file runs it.",
+    "Block ids are unique across the library and the built-ins. When you change a block, bump its "
+    "\"version\": copies already placed on a canvas then offer Update.",
+    "Large data: " + LARGE_DATA_RULES,
+    "When the file is written, call check_block_file with its name and fix what it reports until ok; then "
+    "place a block with add_block, its id as the category.",
+]
+
+
+def _library_or_403():
+    from . import library_store
+
+    if features.CUSTOM_BLOCKS not in _workspace().features:
+        raise HTTPException(403, features.refusal(features.CUSTOM_BLOCKS))
+    return library_store
+
+
+@router.get("/block_guide")
+def block_guide() -> dict[str, Any]:
+    """How to write a block file for the user's library, for an assistant
+    that writes files itself (Claude Code): where the library is, what's in
+    it, the rules, and the commented template."""
+    from . import block_library as bl
+
+    store = _library_or_403()
+    files = []
+    for f in store.list_files(force=True):
+        files.append({"name": f.name, "blocks": [d.id for d in f.parsed.definitions], **({"errors": True} if not f.parsed.ok else {})})
+    return {
+        "library_dir": _workspace().shown(store.library_dir()),
+        "files": files,
+        "rules": BLOCK_FILE_RULES,
+        "template": bl.TEMPLATE_PATH.read_text(encoding="utf-8"),
+        "full_guide": "https://github.com/mmalkus/Model-Maker/blob/main/docs/block-authoring.md",
+    }
+
+
+class CheckFile(BaseModel):
+    name: str  # the file's name in the library folder, e.g. "fannie_mae.py"
+
+
+@router.post("/check_block_file")
+def check_block_file(req: CheckFile) -> dict[str, Any]:
+    """Re-reads the library folder, then checks one file there: parse and
+    validation errors per block, and its _example_ self-checks run (in a
+    worker process, never this one)."""
+    from . import block_library as bl
+
+    store = _library_or_403()
+    store.reload()
+    try:
+        f = store.get_file(req.name)
+    except store.LibraryError as e:
+        names = ", ".join(x.name for x in store.list_files()) or "none yet"
+        raise HTTPException(404, f"{e} (the library folder holds: {names})")
+    blocks = [{"id": d.id, "block_type": d.block_type, **({"errors": f.parsed.errors[d.id]} if f.parsed.errors.get(d.id) else {})} for d in f.parsed.definitions]
+    examples: dict[str, Any] = {}
+    if not f.parsed.file_errors and f.parsed.examples:
+        session = _workspace().session
+        examples = bl.run_examples(f.source, f.name, None, executor=session.runner.executor, env=_workspace().env_vars.snapshot())
+    ok = f.parsed.ok and all(r.get("ok") is not False for r in examples.values()) and bool(f.parsed.definitions)
+    out: dict[str, Any] = {"file": f.name, "ok": ok, "file_errors": f.parsed.file_errors, "blocks": blocks, "examples": examples}
+    missing = [d.id for d in f.parsed.definitions if d.id not in f.parsed.examples]
+    if missing:
+        out["missing_examples"] = missing
+    if ok:
+        out["next"] = "place a block with add_block, its id as the category"
+    return out
