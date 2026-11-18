@@ -323,3 +323,20 @@ def test_assistant_builds_from_an_empty_canvas(demo_client):
     assert r.status_code == 200, r.text
     _run_all(c)
     assert {b["status"] for b in c.get("/api/assistant/graph").json()["blocks"]} == {"green"}
+
+
+def test_disk_state_tells_an_outside_edit_from_our_own_save(demo_client, tmp_path):
+    c = demo_client
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}
+    # Our own edit and save: not an outside change.
+    c.post("/api/assistant/lanes", json={"name": "Extra"})
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": True}
+    assert c.post("/api/project/save", json={}).status_code == 200
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}
+    # Something else rewrites the file.
+    f = tmp_path / "demo" / "model.json"
+    f.write_text(f.read_text().replace('"Extra"', '"Renamed elsewhere"'))
+    assert c.get("/api/project/disk_state").json()["changed"] is True
+    # Reloading makes the file what the session has again.
+    c.post("/api/project/load", json={"path": str(tmp_path / "demo")})
+    assert c.get("/api/project/disk_state").json() == {"changed": False, "dirty": False}

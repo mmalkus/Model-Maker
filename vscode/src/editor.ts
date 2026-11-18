@@ -62,6 +62,22 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     return open.length === 1 ? open[0][0] : undefined
   }
 
+  /** The library tab's opener (library.ts), for the canvas's Library button. */
+  onOpenLibrary?: (folder: string, view: unknown) => void
+
+  /** Sends an event to a folder's canvases; false when none is open. */
+  postToCanvas(folder: string, name: string, data?: unknown): boolean {
+    const panels = this.panels.get(folder)
+    for (const panel of panels ?? []) panel.webview.postMessage({ kind: 'event', name, data })
+    return !!panels?.size
+  }
+
+  /** Brings a folder's canvas to the front. */
+  revealCanvas(folder: string) {
+    const panel = [...(this.panels.get(folder) ?? [])][0]
+    panel?.reveal(panel.viewColumn)
+  }
+
   /** Re-reads the graph in a folder's canvases (after a chat tool edit). */
   refresh(folder: string) {
     for (const panel of this.panels.get(folder) ?? []) panel.webview.postMessage({ kind: 'event', name: 'refresh' })
@@ -87,15 +103,13 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(folder), 'model.json'))
     const disposables: vscode.Disposable[] = [
       watcher,
-      attachBridge(panel.webview, folder, { onSaved: () => (lastSave = Date.now()) }),
-      watcher.onDidChange(async () => {
-        if (Date.now() - lastSave < OWN_SAVE_WINDOW_MS) return
-        const choice = await vscode.window.showInformationMessage(
-          `${path.basename(folder)}/model.json changed on disk. Reload the canvas from it?`,
-          'Reload',
-        )
-        if (choice === 'Reload') panel.webview.postMessage({ kind: 'event', name: 'reload' })
+      attachBridge(panel.webview, folder, {
+        onSaved: () => (lastSave = Date.now()),
+        onPost: (name, data) => {
+          if (name === 'openLibrary') this.onOpenLibrary?.(folder, data)
+        },
       }),
+      watcher.onDidChange(() => this.changedOnDisk(folder, panel, () => Date.now() - lastSave < OWN_SAVE_WINDOW_MS)),
       panel.onDidChangeViewState(() => {
         if (panel.active) {
           this.active = this.lastActive = panel
@@ -114,6 +128,39 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
 
     panel.webview.html = loadingHtml(`Starting the Model-Maker backend for ${path.basename(folder)}…`)
     await this.render(panel, folder, true)
+  }
+
+  /** model.json changed on disk. The backend knows whether it still holds
+   * what it last read or wrote: if so it was our own save, and nothing
+   * happens. Otherwise the canvas reloads from the file, quietly when it has
+   * no unsaved edits, and asks first when reloading would discard them. */
+  private async changedOnDisk(folder: string, panel: vscode.WebviewPanel, ownSave: () => boolean) {
+    if (ownSave()) return
+    const name = `${path.basename(folder)}/model.json`
+    let state: { changed: boolean; dirty: boolean }
+    try {
+      const backend = await this.backends.acquire(folder)
+      try {
+        state = await backend.json<{ changed: boolean; dirty: boolean }>('/project/disk_state')
+      } finally {
+        this.backends.release(folder)
+      }
+    } catch {
+      // An older backend without /project/disk_state: ask, as before.
+      state = { changed: true, dirty: true }
+    }
+    if (!state.changed) return
+    if (state.dirty) {
+      const choice = await vscode.window.showWarningMessage(
+        `${name} was changed outside the canvas, which also has edits not saved yet. Reload from the file, discarding those edits?`,
+        'Reload from File',
+        'Keep My Edits',
+      )
+      if (choice !== 'Reload from File') return
+    } else {
+      vscode.window.setStatusBarMessage(`Model-Maker: reloaded ${name}, changed outside the canvas`, 5000)
+    }
+    panel.webview.postMessage({ kind: 'event', name: 'reload' })
   }
 
   private async render(panel: vscode.WebviewPanel, folder: string, first = false) {
@@ -140,7 +187,9 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
   }
 }
 
-async function webviewHtml(webview: vscode.Webview, media: vscode.Uri, backend: Backend): Promise<string> {
+/** The app's page for a webview on `backend`; `extra` goes into its
+ * window.__MODELMAKER__ config (e.g. {view: 'library'}). */
+export async function webviewHtml(webview: vscode.Webview, media: vscode.Uri, backend: Backend, extra: Record<string, unknown> = {}): Promise<string> {
   let html: string
   try {
     html = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(media, 'index.html'))).toString('utf8')
@@ -159,7 +208,8 @@ async function webviewHtml(webview: vscode.Webview, media: vscode.Uri, backend: 
     `font-src ${webview.cspSource} data:`,
     `connect-src ${api}`,
   ].join('; ')
-  const config = JSON.stringify({ apiBase: api, token: backend.token })
+  // Escaped for an inline <script>: a value can't close the tag.
+  const config = JSON.stringify({ apiBase: api, token: backend.token, ...extra }).replace(/</g, '\\u003c')
   const head = [
     `<base href="${webview.asWebviewUri(media)}/">`,
     `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
@@ -168,7 +218,7 @@ async function webviewHtml(webview: vscode.Webview, media: vscode.Uri, backend: 
   return html.replace('<head>', `<head>\n    ${head}`).replace(/<script type="module"/g, `<script nonce="${nonce}" type="module"`)
 }
 
-function loadingHtml(message: string, error = false): string {
+export function loadingHtml(message: string, error = false): string {
   const escaped = message.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!)
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"></head>
 <body style="font-family: var(--vscode-font-family); color: var(--vscode-${error ? 'errorForeground' : 'foreground'}); padding: 24px; white-space: pre-wrap">${escaped}${

@@ -2,7 +2,7 @@
   "name": "modelmaker",
   "displayName": "Model-Maker",
   "description": "Visual pipeline builder for financial model development: the Model-Maker canvas inside VS Code, with GitHub Copilot as its AI.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "quantology",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -77,6 +77,12 @@
         "icon": "$(type-hierarchy-sub)"
       },
       {
+        "command": "modelmaker.openLibrary",
+        "title": "Open Block Library",
+        "category": "Model-Maker",
+        "icon": "$(library)"
+      },
+      {
         "command": "modelmaker.save",
         "title": "Save Project",
         "category": "Model-Maker"
@@ -112,6 +118,11 @@
         {
           "command": "modelmaker.openCanvas",
           "when": "resourceFilename == model.json && activeCustomEditorId != modelmaker.model",
+          "group": "navigation"
+        },
+        {
+          "command": "modelmaker.openLibrary",
+          "when": "activeCustomEditorId == modelmaker.model",
           "group": "navigation"
         }
       ],

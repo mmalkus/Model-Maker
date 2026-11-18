@@ -21,6 +21,10 @@ export type HostEvent = { name: string; data?: unknown }
 
 export interface Host {
   readonly kind: 'browser' | 'vscode'
+  // What this page shows: the canvas, or (in its own VS Code tab) the block
+  // library, opened on `initialLibraryView`.
+  readonly view: 'canvas' | 'library'
+  readonly initialLibraryView?: unknown
   // Prefix for every API URL: '' in the browser (same origin), the backend's
   // http://127.0.0.1:<port> in VS Code.
   readonly apiBase: string
@@ -48,7 +52,7 @@ export interface Host {
 
 declare global {
   interface Window {
-    __MODELMAKER__?: { apiBase: string; token: string }
+    __MODELMAKER__?: { apiBase: string; token: string; view?: 'canvas' | 'library'; libraryView?: unknown }
   }
 }
 
@@ -67,6 +71,7 @@ function anchorDownload(href: string, name: string) {
 
 export const browserHost: Host = {
   kind: 'browser',
+  view: 'canvas',
   apiBase: '',
   authHeaders: () => ({}),
   withToken: (url) => url,
@@ -112,7 +117,7 @@ declare function acquireVsCodeApi(): VsCodeApi
 //                         {kind: 'post', name, data}             (one-way)
 //   extension -> webview  {kind: 'response', id, ok, result | error}
 //                         {kind: 'event', name, data}
-function makeVsCodeHost(config: { apiBase: string; token: string }): Host {
+function makeVsCodeHost(config: { apiBase: string; token: string; view?: 'canvas' | 'library'; libraryView?: unknown }): Host {
   const vscode = acquireVsCodeApi()
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   const listeners = new Set<(event: HostEvent) => void>()
@@ -155,6 +160,8 @@ function makeVsCodeHost(config: { apiBase: string; token: string }): Host {
 
   return {
     kind: 'vscode',
+    view: config.view ?? 'canvas',
+    initialLibraryView: config.libraryView,
     apiBase: config.apiBase,
     authHeaders,
     withToken: (url) => appendQuery(url, 'token', config.token),

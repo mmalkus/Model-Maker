@@ -3,6 +3,23 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## 0.3.3
+
+- **The block library opens in a tab of its own**, beside the canvas: the
+  toolbar's new **Library** button, **Model-Maker: Open Block Library**, or
+  the library icon in the editor title bar. Placing a block from it puts it
+  on the canvas, in the canvas's undo history, and brings the canvas back.
+- **Build with AI** is gone from the canvas in VS Code: the assistant beside
+  it (Copilot Chat, Claude Code) builds models there.
+- The Quantology mark is back on the toolbar, and **More** links to the
+  Quantology site, GitHub and the license.
+- **"model.json changed on disk"** only asks when the file really changed
+  outside the canvas *and* the canvas has unsaved edits. A change with no
+  unsaved edits reloads quietly; the canvas's own saves are recognised and
+  ignored.
+- **Set Up Claude Code** can register the tools for all your projects
+  (`claude mcp add --scope user`), not just the workspace's `.mcp.json`.
+
 ## 0.3.2
 
 The first stable release: install it from the Marketplace without opting

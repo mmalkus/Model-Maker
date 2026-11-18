@@ -71,6 +71,7 @@ function fileToBase64(file: File): Promise<string> {
  * file, create or fix a block with AI, import and export. A full-screen
  * overlay over the canvas. */
 export function LibraryPanel({
+  page = false,
   initialView,
   graph,
   provider,
@@ -80,6 +81,9 @@ export function LibraryPanel({
   onPlaceBuiltin,
   onOpenUpdate,
 }: {
+  // A page of its own (VS Code's library tab) rather than a dialog over the
+  // canvas: no backdrop, no close button.
+  page?: boolean
   initialView: LibraryView
   graph: GraphOut | null
   provider: string | null
@@ -114,11 +118,11 @@ export function LibraryPanel({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && view.kind === 'browse') onClose()
+      if (e.key === 'Escape' && view.kind === 'browse' && !page) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [view.kind, onClose])
+  }, [view.kind, onClose, page])
 
   const title =
     view.kind === 'browse'
@@ -134,11 +138,21 @@ export function LibraryPanel({
           : 'Import blocks'
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,35,64,0.35)', zIndex: 50, display: 'flex', padding: 24 }}>
+    <div
+      style={
+        page
+          ? { position: 'fixed', inset: 0, display: 'flex' }
+          : { position: 'fixed', inset: 0, background: 'rgba(11,35,64,0.35)', zIndex: 50, display: 'flex', padding: 24 }
+      }
+    >
       <div
-        role="dialog"
+        role={page ? 'main' : 'dialog'}
         aria-label={title}
-        style={{ flex: 1, background: 'var(--mm-bg-subtle-3)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 50px rgba(11,35,64,0.3)' }}
+        style={
+          page
+            ? { flex: 1, background: 'var(--mm-bg-subtle-3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+            : { flex: 1, background: 'var(--mm-bg-subtle-3)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 20px 50px rgba(11,35,64,0.3)' }
+        }
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--mm-border)', background: 'var(--mm-bg)' }}>
           {view.kind !== 'browse' && (
@@ -168,9 +182,11 @@ export function LibraryPanel({
               </button>
             </>
           )}
-          <button aria-label="Close" onClick={onClose}>
-            ✕
-          </button>
+          {!page && (
+            <button aria-label="Close" onClick={onClose}>
+              ✕
+            </button>
+          )}
         </div>
         {error && (
           <div style={{ background: 'var(--mm-error-bg)', color: 'var(--mm-error)', padding: '6px 16px', fontSize: 12 }}>

@@ -82,7 +82,27 @@ The extension needs:
    5. If Copilot is signed in, ask agent mode to "describe this pipeline"
       (it should call `#mmGraph`).
 
-## v0.3.2 release notes (draft)
+## v0.3.3 release notes (draft)
+
+> **Model-Maker 0.3.3**
+>
+> **VS Code.**
+>
+> - The block library opens in a tab of its own, beside the canvas (the
+>   toolbar's **Library** button). Placing a block from it puts it on the
+>   canvas.
+> - **Build with AI** no longer shows on the canvas in VS Code: Copilot Chat
+>   or Claude Code beside it builds models there.
+> - The "model.json changed on disk" prompt only appears when reloading
+>   would discard unsaved edits; otherwise the canvas reloads quietly, and
+>   its own saves never trigger it.
+> - **Set Up Claude Code** can register the Model-Maker tools for all your
+>   projects.
+>
+> **Python package.** `GET /api/project/disk_state` says whether the
+> project file changed on disk since the backend last read or wrote it.
+
+## v0.3.2 release notes
 
 0.3.1 was never released: everything prepared for it ships here.
 

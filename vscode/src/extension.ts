@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { BackendManager, installPackage } from './backend'
 import { CopilotRelay } from './copilot'
 import { Discovery } from './discovery'
 import { PythonEnvironments } from './environment'
+import { LibraryPanels } from './library'
 import { ModelEditorProvider, VIEW_TYPE } from './editor'
 import { onPythonChanged, resolvePython } from './python'
 import { registerTools } from './tools'
@@ -26,6 +28,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
   const discovery = new Discovery(() => vscode.workspace.getConfiguration('modelmaker').get<boolean>('mcp.discovery', true))
   context.subscriptions.push(log, relay, backends, discovery)
   const editor = ModelEditorProvider.register(context, backends, log, discovery)
+  const libraries = new LibraryPanels(context, backends, editor, log)
+  context.subscriptions.push(libraries)
   registerTools(context, backends, editor, (folder, create) => openProjectFolder(backends, folder, create))
 
   const command = (id: string, fn: (...args: never[]) => unknown) =>
@@ -48,7 +52,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     await openCanvas(file)
   })
   command('modelmaker.newProject', () => newProject(backends))
-  command('modelmaker.setUpClaudeCode', () => setUpClaudeCode(environments))
+  command('modelmaker.setUpClaudeCode', () => setUpClaudeCode(environments, log))
   command('modelmaker.repairEnvironment', async () => {
     await environments.repair()
     await backends.restart()
@@ -78,6 +82,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     }),
   )
   command('modelmaker.save', () => editor.saveActive())
+  command('modelmaker.openLibrary', () => {
+    const folder = editor.activeProject()
+    if (!folder) return vscode.window.showInformationMessage('Open a project\'s canvas first: the library opens beside it, on its backend.')
+    return libraries.open(folder)
+  })
   command('modelmaker.restartBackend', () => backends.restart())
   command('modelmaker.showLog', () => log.show())
   command('modelmaker.selectInterpreter', selectInterpreter)
@@ -223,37 +232,82 @@ async function openProjectFolder(backends: BackendManager, folder: string, creat
   return target.fsPath
 }
 
-/** Writes the workspace's .mcp.json entry that lets Claude Code use the
- * Model-Maker tools (modelmaker-mcp) on the open canvas: the same Python and
- * Model-Maker the canvas runs on (see environment.ts). */
-async function setUpClaudeCode(environments: PythonEnvironments) {
+/** Registers the Model-Maker tools (modelmaker-mcp) with Claude Code, on
+ * the same Python and Model-Maker the canvas runs on (see environment.ts):
+ * for all the user's projects through the `claude` CLI (`claude mcp add
+ * --scope user`), or in the workspace's .mcp.json. The tools act on the
+ * canvas used last. */
+async function setUpClaudeCode(environments: PythonEnvironments, log: vscode.OutputChannel) {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri
-  if (!root) return vscode.window.showErrorMessage('Open a workspace folder first.')
+  const scope = await vscode.window.showQuickPick(
+    [
+      { label: 'All my projects', description: 'claude mcp add --scope user', value: 'user' as const },
+      ...(root ? [{ label: 'This workspace only', description: '.mcp.json in the workspace folder', value: 'project' as const }] : []),
+    ],
+    { title: 'Set up Claude Code: where should it find the Model-Maker tools?' },
+  )
+  if (!scope) return
   let runtime
   try {
     runtime = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Model-Maker: preparing its Python environment' },
-      (progress) => environments.runtime(root, progress),
+      (progress) => environments.runtime(root ?? vscode.Uri.file(process.cwd()), progress),
     )
   } catch (e) {
     return vscode.window.showErrorMessage(`Model-Maker: ${e instanceof Error ? e.message : e}`)
   }
-  const file = vscode.Uri.joinPath(root, '.mcp.json')
+  const args = ['-m', 'modelmaker.assistant_mcp']
+  const env = runtime.env.PYTHONPATH ? { PYTHONPATH: runtime.env.PYTHONPATH } : undefined
+  const done = 'Start a new Claude Code conversation (or restart it) and check /mcp: "modelmaker" should be listed. It works on the canvas you used last.'
+
+  if (scope.value === 'user') {
+    // The name before -e, which takes several values and would swallow it.
+    const cli = ['claude', 'mcp', 'add', '--scope', 'user', 'modelmaker', ...(env ? ['-e', `PYTHONPATH=${env.PYTHONPATH}`] : []), '--', runtime.python, ...args]
+    // Replaces an earlier registration (e.g. with an older Python path).
+    await runQuiet('claude', ['mcp', 'remove', '--scope', 'user', 'modelmaker'])
+    const { code, out } = await runQuiet(cli[0], cli.slice(1))
+    log.appendLine(`[claude] $ ${cli.join(' ')}\n${out}`)
+    if (code === 0) return vscode.window.showInformationMessage(`Added Model-Maker to Claude Code for all your projects. ${done}`)
+    const command = cli.map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ')
+    const choice = await vscode.window.showWarningMessage(
+      "Couldn't run the claude command (is Claude Code's CLI on PATH?). Run this in a terminal instead:\n" + command,
+      { modal: true },
+      'Copy Command',
+    )
+    if (choice) await vscode.env.clipboard.writeText(command)
+    return
+  }
+
+  const file = vscode.Uri.joinPath(root!, '.mcp.json')
   let config: { mcpServers?: Record<string, unknown> } = {}
   try {
     config = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(file)).toString('utf8'))
   } catch (e) {
     if (await exists(file)) return vscode.window.showErrorMessage(`.mcp.json isn't valid JSON (${e instanceof Error ? e.message : e}); fix it first.`)
   }
-  const server: Record<string, unknown> = { command: runtime.python, args: ['-m', 'modelmaker.assistant_mcp'] }
-  if (runtime.env.PYTHONPATH) server.env = { PYTHONPATH: runtime.env.PYTHONPATH }
-  config.mcpServers = { ...config.mcpServers, modelmaker: server }
+  config.mcpServers = { ...config.mcpServers, modelmaker: { command: runtime.python, args, ...(env ? { env } : {}) } }
   await vscode.workspace.fs.writeFile(file, Buffer.from(JSON.stringify(config, null, 2) + '\n'))
   const choice = await vscode.window.showInformationMessage(
-    'Added Model-Maker to .mcp.json. Start (or restart) Claude Code in this folder and approve the "modelmaker" server; it works on the canvas you used last.',
+    `Added Model-Maker to ${vscode.workspace.asRelativePath(file)}. Open Claude Code in this folder and approve the "modelmaker" server. ${done}`,
     'Open .mcp.json',
   )
   if (choice) await vscode.window.showTextDocument(file)
+}
+
+/** Runs a command; its exit code (-1 when it can't start) and output. */
+function runQuiet(command: string, args: string[]): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    // Through the shell on Windows, where `claude` is a .cmd shim: quote
+    // what has spaces (a user folder often does).
+    const win = process.platform === 'win32'
+    const quoted = win ? args.map((a) => (/[\s&()^]/.test(a) ? `"${a}"` : a)) : args
+    const proc = spawn(command, quoted, { windowsHide: true, shell: win })
+    let out = ''
+    proc.stdout.on('data', (d: Buffer) => (out += d.toString()))
+    proc.stderr.on('data', (d: Buffer) => (out += d.toString()))
+    proc.on('error', (e) => resolve({ code: -1, out: String(e) }))
+    proc.on('close', (code) => resolve({ code: code ?? -1, out }))
+  })
 }
 
 async function selectInterpreter() {

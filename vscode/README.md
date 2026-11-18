@@ -38,8 +38,9 @@ tab.
 Inside VS Code the canvas uses your colour theme, whether light, dark or
 high contrast, and switches when you switch theme. It's laid out for an
 editor tab: one toolbar row (the rarer run modes are under **More**), a
-block palette that folds to a rail (**Blocks ›** opens it), and an inspector
-that appears when you select a block. Saving is VS Code's: Ctrl/Cmd+S, and
+block palette that folds to a rail (**Blocks ›** opens it), an inspector
+that appears when you select a block, and the block library in a tab of its
+own (**Library**). Saving is VS Code's: Ctrl/Cmd+S, and
 edits autosave.
 
 ## How it works
@@ -100,23 +101,24 @@ does: column names, types, roles and summary statistics, never your rows.
 
 ## Claude Code
 
-Claude Code can use the same tools through a small MCP server in the
-Python package, `modelmaker-mcp`, on the canvas you used last. Set it up
-once per workspace:
+Claude Code can use the same tools through a small MCP server that ships
+with Model-Maker (`modelmaker-mcp`), on the canvas you used last:
 
-1. Run **Model-Maker: Set Up Claude Code**. It adds a `modelmaker` entry
-   to the workspace's `.mcp.json`, using the selected Python interpreter.
-2. Start (or restart) Claude Code in that folder, in the panel or the
-   terminal, and approve the `modelmaker` server.
+1. Run **Model-Maker: Set Up Claude Code** and pick **All my projects**
+   (registers it with `claude mcp add --scope user`) or **This workspace
+   only** (adds it to the workspace's `.mcp.json`).
+2. Start a new Claude Code conversation, in the panel or the terminal, and
+   check `/mcp`: `modelmaker` should be listed. For a workspace's
+   `.mcp.json`, approve the server when asked.
 3. Open a canvas, or ask Claude to create a project. Its edits show up on
    the canvas as it works.
 
-The `.mcp.json` entry holds the paths of the extension's Python and its
-copy of Model-Maker, which stay put across extension updates. Before committing it
-for others, change `command` to a path that works for them. The server
-finds the canvases through small files in `~/.modelmaker/vscode-backends/`
-(each backend's local address and access token, readable by you only).
-Turn this off with `modelmaker.mcp.discovery`.
+Both point at the extension's own Python and copy of Model-Maker, at paths
+that stay put across extension updates. Before committing a workspace's
+`.mcp.json` for others, change its `command` to a path that works for them.
+The server finds the canvases through small files in
+`~/.modelmaker/vscode-backends/` (each backend's local address and access
+token, readable by you only). Turn this off with `modelmaker.mcp.discovery`.
 
 The same server works with the browser app: `modelmaker-mcp --url
 http://127.0.0.1:8001`.
@@ -127,7 +129,8 @@ http://127.0.0.1:8001`.
 |---|---|
 | Model-Maker: Open Project… | Open a project folder's canvas |
 | Model-Maker: New Project… | Create a project folder (model.json, files/, git) |
-| Model-Maker: Set Up Claude Code | Add the Model-Maker tools to the workspace's `.mcp.json` |
+| Model-Maker: Set Up Claude Code | Register the Model-Maker tools with Claude Code (all projects, or this workspace) |
+| Model-Maker: Open Block Library | The block library, in a tab beside the canvas |
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |
 | Model-Maker: Show Backend Log | Backend output, pip installs, relay errors |
