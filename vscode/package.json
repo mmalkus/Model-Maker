@@ -175,7 +175,7 @@
         },
         "modelmaker.packageSpec": {
           "type": "string",
-          "default": "quantology-modelmaker>=0.3.1",
+          "default": "quantology-modelmaker>=0.3.2",
           "markdownDescription": "For the `installedPackage` environment: what `pip install -U` installs. A PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
         },
         "modelmaker.llm.useCopilot": {

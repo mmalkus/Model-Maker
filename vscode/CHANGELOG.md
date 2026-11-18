@@ -5,6 +5,10 @@ it runs (see vscode-extension-plan.md §8.2).
 
 ## 0.3.2
 
+The first stable release: install it from the Marketplace without opting
+in to pre-releases. Releases are stable from here on. (0.3.1 was never
+released; its changes are here.)
+
 - **Model-Maker ships inside the extension.** No `quantology-modelmaker`
   package to install: the extension runs its own copy, which always
   matches its version.
@@ -20,15 +24,9 @@ it runs (see vscode-extension-plan.md §8.2).
   Repair Python Environment**.
 - **Set Up Claude Code** points `.mcp.json` at the same Python and
   Model-Maker, at paths that survive extension updates.
-
-## 0.3.1
-
-The first stable release: install it from the Marketplace without opting
-in to pre-releases. Releases are stable from here on.
-
-- Needs `quantology-modelmaker` 0.3.1, whose **Run all** re-reads a data
-  source after its settings change (for example when a column role is
-  tagged), so a chat assistant's run no longer leaves the pipeline red.
+- **Run all** re-reads a data source after its settings change (for example
+  when a column role is tagged), so a chat assistant's run no longer leaves
+  the pipeline red.
 
 ## 0.3.0 (pre-release)
 

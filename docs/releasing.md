@@ -84,6 +84,8 @@ The extension needs:
 
 ## v0.3.2 release notes (draft)
 
+0.3.1 was never released: everything prepared for it ships here.
+
 > **Model-Maker 0.3.2**
 >
 > **VS Code: nothing to install but Python.** Model-Maker now ships inside
@@ -96,21 +98,14 @@ The extension needs:
 > `modelmaker.python.environment` can switch to your own interpreter
 > instead.
 >
-> The Python package itself is unchanged from 0.3.1.
-
-## v0.3.1 release notes
-
-> **Model-Maker 0.3.1**
+> **The extension is now stable.** Install it from the Marketplace without
+> opting in to pre-releases.
 >
-> - **Run all** re-reads a data source whose settings changed since it was
->   read: an edited param, a tagged column role, sample mode toggled.
->   Before, it left the source stale, and the blocks after it failed with
->   "input block is not green". A source whose settings are unchanged is
->   still re-read only by **Refresh sources**. The streaming Run all does
->   the same.
-> - The VS Code extension needs this version, and is now published as
->   **stable**: install it from the Marketplace without opting in to
->   pre-releases.
+> **Run all re-reads a data source whose settings changed** since it was
+> read: an edited param, a tagged column role, sample mode toggled. Before,
+> it left the source stale, and the blocks after it failed with "input block
+> is not green". A source whose settings are unchanged is still re-read only
+> by **Refresh sources**. The streaming Run all does the same.
 
 ## v0.3.0 release notes
 

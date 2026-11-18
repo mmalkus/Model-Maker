@@ -13,7 +13,7 @@ export const API_COMPAT = 1
 
 const PACKAGE = 'quantology-modelmaker'
 // The first release with the switches this extension sets (auth, CORS, /api/version).
-const DEFAULT_SPEC = `${PACKAGE}>=0.3.1`
+const DEFAULT_SPEC = `${PACKAGE}>=0.3.2`
 const HEALTH_TIMEOUT_MS = 90_000
 // The webview's origin; the backend admits it through CORS.
 const WEBVIEW_ORIGIN_REGEX = '^vscode-webview://[a-z0-9-]+$'
