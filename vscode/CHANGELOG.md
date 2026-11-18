@@ -3,6 +3,17 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## Unreleased
+
+- **Claude Code finds the open canvas again.** When VS Code started, the
+  Python extension's interpreter report restarted Model-Maker's backend
+  even in the managed environment, which doesn't use that interpreter.
+  The canvas's first render could then finish after the restart and leave
+  Claude Code (and the canvas) pointed at the backend that was stopped,
+  so every Model-Maker tool answered "no Model-Maker canvas is open". Only
+  backends that run on the selected interpreter restart now, and a render
+  for a backend that was replaced meanwhile is dropped.
+
 ## 0.3.3
 
 - **The block library opens in a tab of its own**, beside the canvas: the

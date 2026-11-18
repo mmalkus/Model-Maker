@@ -164,16 +164,21 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
   }
 
   private async render(panel: vscode.WebviewPanel, folder: string, first = false) {
-    let backend: Backend
+    let backend: Backend | undefined
     try {
       backend = await (first ? this.backends.acquire(folder) : this.backends.acquire(folder).finally(() => this.backends.release(folder)))
       await backend.json('/project/load', { method: 'POST', body: { path: folder } })
     } catch (e) {
+      // Restarted meanwhile: the restart renders the new one.
+      if (backend?.stopped) return
       const message = e instanceof Error ? e.message : String(e)
       this.log.appendLine(`[${path.basename(folder)}] ${message}`)
       panel.webview.html = loadingHtml(`Couldn't start Model-Maker: ${message}`, true)
       return
     }
+    // Restarted while this render waited: the restart renders (and
+    // publishes) the new backend, and this one must not overwrite it.
+    if (backend.stopped) return
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'webview')
     panel.webview.options = {
       enableScripts: true,
@@ -182,7 +187,9 @@ export class ModelEditorProvider implements vscode.CustomReadonlyEditorProvider 
       // the same port from the webview, local or remote (SSH, WSL, ...).
       portMapping: [{ webviewPort: backend.port, extensionHostPort: backend.port }],
     }
-    panel.webview.html = await webviewHtml(panel.webview, media, backend)
+    const html = await webviewHtml(panel.webview, media, backend)
+    if (backend.stopped) return
+    panel.webview.html = html
     this.discovery?.publish(folder, backend.apiBase, backend.token, panel.active || first)
   }
 }

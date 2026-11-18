@@ -110,8 +110,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     }
   })
 
-  // A different interpreter means a different package: restart onto it.
-  onPythonChanged(() => backends.restart()).then((d) => context.subscriptions.push(d))
+  // A different interpreter means a different package: restart onto it --
+  // only the backends that run on it. The managed environment doesn't, and
+  // the Python extension reports an interpreter as it starts up, which
+  // restarted backends that had only just started (racing their first
+  // render, and leaving Claude Code pointed at the stopped one).
+  onPythonChanged(() => backends.restart(undefined, (f) => environments.mode(vscode.Uri.file(f)) !== 'managed')).then((d) =>
+    context.subscriptions.push(d),
+  )
 
   // Settings a running backend was started with: offer to restart onto them.
   context.subscriptions.push(

@@ -48,6 +48,11 @@ export class Backend {
     return this.proc.exitCode !== null || this.proc.signalCode !== null
   }
 
+  /** Stopped on purpose (replaced by a restart, or released) or gone. */
+  get stopped() {
+    return this.stopping || this.exited
+  }
+
   request(apiPath: string, init: { method?: string; body?: unknown } = {}): Promise<Response> {
     return fetch(`${this.apiBase}/api${apiPath}`, {
       method: init.method ?? 'GET',
@@ -106,9 +111,10 @@ export class BackendManager implements vscode.Disposable {
     entry.backend.then((b) => b.stop()).catch(() => {})
   }
 
-  /** Restarts every running backend (or one folder's), keeping its users. */
-  async restart(folder?: string) {
-    const keys = folder ? [path.resolve(folder)] : [...this.entries.keys()]
+  /** Restarts every running backend (or one folder's, or those `which`
+   * picks), keeping its users. */
+  async restart(folder?: string, which?: (folder: string) => boolean) {
+    const keys = (folder ? [path.resolve(folder)] : [...this.entries.keys()]).filter((key) => !which || which(key))
     await Promise.all(
       keys.map(async (key) => {
         const entry = this.entries.get(key)
