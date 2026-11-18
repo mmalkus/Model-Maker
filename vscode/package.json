@@ -164,10 +164,38 @@
     },
     "languageModelTools": [
       {
+        "name": "modelmaker_open_project",
+        "toolReferenceName": "mmOpenProject",
+        "displayName": "Model-Maker: Open Project",
+        "modelDescription": "Opens a Model-Maker project's canvas, so the other modelmaker tools work on it; with create: true, first makes a new, empty project in that folder (model.json, a files/ folder and a git repository). Returns the project's graph. Use this when no canvas is open, or to start a new model from scratch.",
+        "userDescription": "Open or create a Model-Maker project",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "folder": {
+              "type": "string",
+              "description": "The project folder, relative to the workspace folder (e.g. models/pd_2026) or absolute."
+            },
+            "create": {
+              "type": "boolean",
+              "description": "Create the project if the folder has none."
+            }
+          },
+          "required": [
+            "folder"
+          ]
+        }
+      },
+      {
         "name": "modelmaker_get_graph",
         "toolReferenceName": "mmGraph",
         "displayName": "Model-Maker: Get Graph",
-        "modelDescription": "The open Model-Maker project's pipeline: lanes, every block in run order (id, name, category, lane, status grey/green/orange/red/running, params, input and output ports as name:type, the error of a red block, why an orange block is stale) and every wire. Call this first, and again after edits.",
+        "modelDescription": "The open Model-Maker project's pipeline: lanes, every block in run order (id, name, category, lane, status grey/green/orange/red/running, params, input and output ports as name:type, the error of a red block, why an orange block is stale) and every wire. Call this first, and again after edits. Building a model from scratch: add lanes for its phases, a data source block (tag data_sources), tag the target column, then add, wire and run blocks one phase at a time, checking with modelmaker_check as you go.",
         "userDescription": "Read the open canvas's blocks, wires and statuses",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
@@ -180,10 +208,35 @@
         }
       },
       {
+        "name": "modelmaker_list_files",
+        "toolReferenceName": "mmFiles",
+        "displayName": "Model-Maker: List Data Files",
+        "modelDescription": "Lists a folder on the machine the backend runs on, to find data files for a read_csv/read_parquet/read_excel/read_json block's path param (use the path exactly as returned). Without a path: the project's folder. Also lists the workspace's datasets and sources when it offers them (for read_dataset/read_source blocks).",
+        "userDescription": "Find data files for the pipeline",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "A folder path from an earlier listing."
+            },
+            "ext": {
+              "type": "string",
+              "description": "Only files with this extension, e.g. .csv."
+            }
+          }
+        }
+      },
+      {
         "name": "modelmaker_list_block_types",
         "toolReferenceName": "mmBlockTypes",
         "displayName": "Model-Maker: List Block Types",
-        "modelDescription": "Without a tag: the block tags (e.g. data_prep, sampling, pd, validation) with a description of each. With a tag: that tag's blocks (category id and one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one.",
+        "modelDescription": "Without a tag: the block tags (data_sources and exports first, then e.g. data_prep, sampling, binning_woe, regression, performance, stability) with a description of each. With a tag: that tag's blocks (category id and one-sentence summary), built-ins and the user's library. Use describe_block_type before adding one.",
         "userDescription": "List the blocks Model-Maker offers",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
@@ -253,10 +306,79 @@
         }
       },
       {
+        "name": "modelmaker_get_input_columns",
+        "toolReferenceName": "mmColumns",
+        "displayName": "Model-Maker: Get Input Columns",
+        "modelDescription": "The columns (name, dtype, role) a block receives on each input port, from what its upstream blocks last produced -- use it to pick column-valued params such as target, features or by. Empty until the upstream blocks have run.",
+        "userDescription": "Read the columns a block receives",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            }
+          },
+          "required": [
+            "block"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_check",
+        "toolReferenceName": "mmCheck",
+        "displayName": "Model-Maker: Check Pipeline",
+        "modelDescription": "Reviews the pipeline as the AI builder would: holdout leakage in the wiring (a binning, WoE or model fitted on rows that include the test/out-of-time sample it is applied to), features fit_binning banded 'suspicious' (IV >= 0.5, usually leakage), and decision hints -- what each green block's result means and what to do next (event counts, IV screens, Gini, PSI, calibration...). With a block: just that block's hints. Report problems to the user rather than silently working around them.",
+        "userDescription": "Check the pipeline for leakage and read the hints",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            }
+          }
+        }
+      },
+      {
+        "name": "modelmaker_add_lane",
+        "toolReferenceName": "mmAddLane",
+        "displayName": "Model-Maker: Add Lane",
+        "modelDescription": "Adds a lane: a labelled horizontal band that groups one phase of the model (e.g. Data, Sampling, Binning, Estimation, Validation), below the existing ones. Returns its id. Adding a lane whose name exists returns that lane.",
+        "userDescription": "Add a lane to the canvas",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The lane's label."
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
         "name": "modelmaker_add_block",
         "toolReferenceName": "mmAddBlock",
         "displayName": "Model-Maker: Add Block",
-        "modelDescription": "Adds a block to the canvas (it starts grey; wire its inputs with modelmaker_connect, then run it). Returns the new block with its id and ports.",
+        "modelDescription": "Adds a block to the canvas, placed in its lane after what's there (it starts grey; wire its inputs with modelmaker_connect, then run it). Params are checked against the block's own. Returns the new block with its id and ports.",
         "userDescription": "Add a block to the canvas",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
@@ -291,9 +413,9 @@
       {
         "name": "modelmaker_set_params",
         "toolReferenceName": "mmSetParams",
-        "displayName": "Model-Maker: Set Params",
-        "modelDescription": "Changes some of a block's parameters (merged into its current ones). Downstream blocks go stale until re-run.",
-        "userDescription": "Change a block's parameters",
+        "displayName": "Model-Maker: Update Block",
+        "modelDescription": "Changes some of a block's parameters (merged into its current ones), and/or renames it or moves it to another lane. Downstream blocks go stale until re-run.",
+        "userDescription": "Change a block's parameters, name or lane",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
         "tags": [
@@ -309,11 +431,60 @@
             "params": {
               "type": "object",
               "description": "The parameters to change, with their new values."
+            },
+            "name": {
+              "type": "string",
+              "description": "A new display name."
+            },
+            "lane": {
+              "type": "string",
+              "description": "Lane id or name to move it to."
+            }
+          },
+          "required": [
+            "block"
+          ]
+        }
+      },
+      {
+        "name": "modelmaker_set_column_role",
+        "toolReferenceName": "mmColumnRole",
+        "displayName": "Model-Maker: Set Column Role",
+        "modelDescription": "Tags a column's role on a block's output, from there downstream: target, id, weight, feature, date, segment, excluded (never to be used as a feature), or unassigned to clear it. Params named target/target_col etc. auto-fill from the roles, so tag the target on the data source block early.",
+        "userDescription": "Tag a column's role (target, id, excluded...)",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "column": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "target",
+                "id",
+                "weight",
+                "feature",
+                "date",
+                "segment",
+                "excluded",
+                "unassigned"
+              ]
             }
           },
           "required": [
             "block",
-            "params"
+            "column",
+            "role"
           ]
         }
       },
@@ -355,10 +526,62 @@
         }
       },
       {
+        "name": "modelmaker_disconnect",
+        "toolReferenceName": "mmDisconnect",
+        "displayName": "Model-Maker: Disconnect",
+        "modelDescription": "Removes a wire: give its id (from modelmaker_get_graph), or the input it feeds (to_block and to_port).",
+        "userDescription": "Remove a wire",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "wire": {
+              "type": "string",
+              "description": "A wire id from modelmaker_get_graph."
+            },
+            "to_block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "to_port": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "modelmaker_delete_block",
+        "toolReferenceName": "mmDeleteBlock",
+        "displayName": "Model-Maker: Delete Block",
+        "modelDescription": "Deletes a block and the wires to and from it.",
+        "userDescription": "Delete a block",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            }
+          },
+          "required": [
+            "block"
+          ]
+        }
+      },
+      {
         "name": "modelmaker_run",
         "toolReferenceName": "mmRun",
         "displayName": "Model-Maker: Run",
-        "modelDescription": "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's status, with the error of any red block.",
+        "modelDescription": "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's status, with the error of any red block. Also reports any holdout leakage or suspicious features in the pipeline, and the target block's decision hints.",
         "userDescription": "Run the pipeline, or up to one block",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",

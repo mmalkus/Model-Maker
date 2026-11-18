@@ -32,10 +32,14 @@ and **Ctrl/Cmd+S** saves straight away. Git works through VS Code's
 Source Control. **Compile** opens the generated script in a new editor
 tab.
 
-## Theme
+## Theme and layout
 
 Inside VS Code the canvas uses your colour theme, whether light, dark or
-high contrast, and switches when you switch theme.
+high contrast, and switches when you switch theme. It's laid out for an
+editor tab: one toolbar row (the rarer run modes are under **More**), a
+block palette that folds to a rail (**Blocks ›** opens it), and an inspector
+that appears when you select a block. Saving is VS Code's: Ctrl/Cmd+S, and
+edits autosave.
 
 ## How it works
 
@@ -58,12 +62,20 @@ them:
 
 | Tool | Does |
 |---|---|
+| `#mmOpenProject` | Opens a project's canvas, or creates a new project |
 | `#mmGraph` | Reads the blocks, wires, statuses and errors |
-| `#mmBlockTypes`, `#mmDescribeBlock` | Browse and read the block catalogue, including your library |
-| `#mmOutput` | Summarizes a block's output: schema and statistics, never rows |
-| `#mmAddBlock`, `#mmSetParams`, `#mmConnect` | Edit the pipeline |
-| `#mmRun` | Runs the pipeline, or up to one block, and reports errors |
+| `#mmFiles` | Finds data files (and the workspace's datasets, if any) |
+| `#mmBlockTypes`, `#mmDescribeBlock` | Browse and read the block catalogue, including data sources and your library |
+| `#mmOutput`, `#mmColumns` | Summarize a block's output, or list the columns it receives: schema and statistics, never rows |
+| `#mmAddLane`, `#mmAddBlock`, `#mmSetParams`, `#mmColumnRole` | Lay out and configure the pipeline |
+| `#mmConnect`, `#mmDisconnect`, `#mmDeleteBlock` | Wire, unwire and remove blocks |
+| `#mmRun` | Runs the pipeline, or up to one block, and reports errors and leakage |
+| `#mmCheck` | Checks for holdout leakage and suspicious features, with each block's decision hints |
 | `#mmCompile` | Returns the compiled Python script |
+
+Copilot can start from nothing: ask agent mode to "create a project in
+`models/pd` and build a PD scorecard from `data/loans.csv`". It opens the
+canvas and you watch the model take shape.
 
 Every edit asks you first, lands in the canvas's undo history, and shows up
 on the canvas straight away. Copilot sees the same data the AI builder

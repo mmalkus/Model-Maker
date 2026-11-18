@@ -274,14 +274,25 @@ def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
     """{feature: IV} for every feature a fit_binning in the graph banded
     'suspicious' -- an IV that high usually means the column is partly the
     outcome (leakage)."""
+
+    def summary(bid: str) -> Any:
+        try:
+            return b.current_output(bid, "summary")[1]
+        except ToolError:
+            return None
+
+    return suspicious_in_graph(b.session.graph, summary)
+
+
+def suspicious_in_graph(graph, summary_of: Callable[[str], Any]) -> dict[str, float | None]:
+    """suspicious_features for any graph: `summary_of(block_id)` is that
+    fit_binning's last `summary` output, or None when it has none -- so the
+    VS Code chat tools (assistant_api) get the same check without a build."""
     out: dict[str, float | None] = {}
-    for bid, blk in b.session.graph.blocks.items():
+    for bid, blk in graph.blocks.items():
         if blk.definition is not None or blk.category != "fit_binning":
             continue
-        try:
-            _, value = b.current_output(bid, "summary")
-        except ToolError:
-            continue
+        value = summary_of(bid)
         if not isinstance(value, DataFramePacket) or not {"feature", "iv_band"} <= set(value.data.columns):
             continue
         for row in value.data.filter(pl.col("iv_band") == SUSPICIOUS_BAND).iter_rows(named=True):
@@ -698,6 +709,16 @@ def validate_steps(b: AgentBuild, steps: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
+def leak_graph(graph) -> tuple[dict[str, leakage.Node], list[leakage.Edge]]:
+    """A graph as leakage.find_leaks sees it: its blocks and wires."""
+    nodes = {
+        bid: leakage.Node(bid, blk.name, blk.category, {p.name: p.type for p in blk.inputs}, {p.name: p.type for p in blk.outputs})
+        for bid, blk in graph.blocks.items()
+    }
+    edges = [leakage.Edge(w.from_block, w.from_port, w.to_block, w.to_port) for w in graph.wires.values()]
+    return nodes, edges
+
+
 def _leak_graph(
     b: AgentBuild, steps: list[dict[str, Any]] | None = None, wire: tuple[str, str, str, str] | None = None
 ) -> tuple[dict[str, leakage.Node], list[leakage.Edge], dict[str, str]]:
@@ -705,12 +726,7 @@ def _leak_graph(
     stage's planned steps (each step's planned inputs replacing whatever
     its built block is wired to) or one wire about to be connected.
     Returns (nodes, edges, node id -> step ref)."""
-    graph = b.session.graph
-    nodes = {
-        bid: leakage.Node(bid, blk.name, blk.category, {p.name: p.type for p in blk.inputs}, {p.name: p.type for p in blk.outputs})
-        for bid, blk in graph.blocks.items()
-    }
-    edges = [leakage.Edge(w.from_block, w.from_port, w.to_block, w.to_port) for w in graph.wires.values()]
+    nodes, edges = leak_graph(b.session.graph)
     planned: dict[str, str] = {}
     if steps:
         built = _step_blocks(b)

@@ -38,26 +38,24 @@ export function resolveLane(graph: Graph, lane: string | undefined): string | nu
   throw new ToolInputError(`no lane "${lane}"; the lanes are: ${known}`)
 }
 
-// Roughly a block card's footprint on the canvas.
-const COLUMN_WIDTH = 220
-const ROW_HEIGHT = 160
-
-/** Where a new block goes: in its lane, right of that lane's rightmost
- * block, or below everything when the lane is empty or not given -- never
- * on top of an existing card. */
-export function placeNewBlock(graph: Graph, laneId: string | null): { x: number; y: number } {
-  const inLane = laneId ? graph.blocks.filter((b) => b.lane === laneId) : []
-  if (inLane.length) {
-    const rightmost = inLane.reduce((a, b) => (b.position.x > a.position.x ? b : a))
-    return { x: rightmost.position.x + COLUMN_WIDTH, y: rightmost.position.y }
-  }
-  const bottom = graph.blocks.reduce((y, b) => Math.max(y, b.position.y), -ROW_HEIGHT)
-  return { x: 100, y: bottom + ROW_HEIGHT }
-}
-
 export function findBlock(graph: Graph, block: string): BlockBrief {
   const match = graph.blocks.find((b) => b.id === block) ?? graph.blocks.find((b) => b.name.toLowerCase() === block.trim().toLowerCase())
   if (!match) throw new ToolInputError(`no block "${block}" -- get the graph for block ids`)
+  return match
+}
+
+/** The wire to remove: by id, or the one feeding an input port (an input
+ * takes a single wire). */
+export function findWire(graph: Graph, wire: { id?: string; to_block?: string; to_port?: string }): Graph['wires'][number] {
+  if (wire.id) {
+    const byId = graph.wires.find((w) => w.id === wire.id)
+    if (!byId) throw new ToolInputError(`no wire "${wire.id}" -- get the graph for wire ids`)
+    return byId
+  }
+  if (!wire.to_block || !wire.to_port) throw new ToolInputError('give the wire id, or to_block and to_port')
+  const to = `${findBlock(graph, wire.to_block).id}.${wire.to_port}`
+  const match = graph.wires.find((w) => w.to === to)
+  if (!match) throw new ToolInputError(`nothing is wired into ${to}`)
   return match
 }
 

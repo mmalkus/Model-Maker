@@ -262,3 +262,64 @@ def test_assistant_output_is_schema_not_rows(demo_client):
     body = demo_client.get("/api/assistant/output", params={"block": "b_load"}).json()
     assert body["type"] == "dataframe" and body["row_count"] > 0
     assert "rows" not in body and all("name" in c and "dtype" in c for c in body["columns"])
+
+
+def _run_all(c):
+    import time
+
+    assert c.post("/api/run_all").status_code == 200
+    for _ in range(600):
+        if not c.get("/api/assistant/graph").json()["running"]:
+            return
+        time.sleep(0.1)
+    raise AssertionError("run didn't finish")
+
+
+def test_assistant_check_on_the_demo(demo_client):
+    _run_all(demo_client)
+    body = demo_client.get("/api/assistant/check").json()
+    assert {"leaks", "suspicious_features", "hints", "ok"} <= set(body)
+    assert body["leaks"] == [] and body["ok"] is True
+    assert all(isinstance(v, list) and v for v in body["hints"].values())
+    one = demo_client.get("/api/assistant/check", params={"block": "b_gini"}).json()
+    assert set(one["hints"]) <= {"b_gini"}
+    assert demo_client.get("/api/assistant/check", params={"block": "nope"}).status_code == 404
+
+
+def test_assistant_check_flags_holdout_leakage(demo_client):
+    # woe_transform fits and applies in one go: on the test split, it learns from holdout rows.
+    added = demo_client.post("/api/blocks", json={"category": "woe_transform", "name": "WoE on test"}).json()
+    port = added["inputs"][0]["name"]
+    r = demo_client.post("/api/wires", json={"from_block": "b_split", "from_port": "test", "to_block": added["id"], "to_port": port})
+    assert r.status_code == 200, r.text
+    body = demo_client.get("/api/assistant/check").json()
+    assert [lk["block"] for lk in body["leaks"]] == [added["id"]] and body["ok"] is False
+
+
+def test_assistant_builds_from_an_empty_canvas(demo_client):
+    c = demo_client
+    c.post("/api/project/new")
+    tags = [t["tag"] for t in c.get("/api/assistant/block_types").json()["tags"]]
+    assert tags[0] == "data_sources"
+    sources = [b["category"] for b in c.get("/api/assistant/block_types", params={"tag": "data_sources"}).json()["blocks"]]
+    assert "read_csv" in sources and "demo_credit_data" in sources
+
+    lane = c.post("/api/assistant/lanes", json={"name": "Data"}).json()
+    assert c.post("/api/assistant/lanes", json={"name": "data"}).json() == {**lane, "existed": True}
+    est = c.post("/api/assistant/lanes", json={"name": "Estimation"}).json()
+
+    load = c.post("/api/assistant/blocks", json={"category": "demo_credit_data", "lane": "Data"}).json()
+    split = c.post("/api/assistant/blocks", json={"category": "train_test_split", "lane": est["id"], "params": {"seed": 3}}).json()
+    assert load["lane"] == lane["id"] and split["lane"] == est["id"]
+    # Inside its own lane's band, below the first lane's.
+    assert split["position"]["y"] > load["position"]["y"]
+
+    bad = c.post("/api/assistant/blocks", json={"category": "train_test_split", "params": {"nope": 1}})
+    assert bad.status_code == 400 and "its params are" in bad.json()["detail"]
+    assert c.post("/api/assistant/blocks", json={"category": "filter", "lane": "Nowhere"}).status_code == 400
+    assert c.post("/api/assistant/blocks", json={"category": "no_such"}).status_code == 400
+
+    r = c.post("/api/wires", json={"from_block": load["id"], "from_port": load["outputs"][0].split(":")[0], "to_block": split["id"], "to_port": "df"})
+    assert r.status_code == 200, r.text
+    _run_all(c)
+    assert {b["status"] for b in c.get("/api/assistant/graph").json()["blocks"]} == {"green"}

@@ -21,7 +21,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
   const backends = new BackendManager(log, relay)
   context.subscriptions.push(log, relay, backends)
   const editor = ModelEditorProvider.register(context, backends, log)
-  registerTools(context, backends, editor)
+  registerTools(context, backends, editor, (folder, create) => openProjectFolder(backends, folder, create))
 
   const command = (id: string, fn: (...args: never[]) => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, fn))
@@ -143,25 +143,45 @@ async function newProject(backends: BackendManager) {
     saveLabel: 'Create Project',
   })
   if (!target) return
-  const folder = target.fsPath
   if (await exists(vscode.Uri.joinPath(target, PROJECT_FILE))) {
-    return vscode.window.showErrorMessage(`${folder} already has a project; open it with Model-Maker: Open Project.`)
+    return vscode.window.showErrorMessage(`${target.fsPath} already has a project; open it with Model-Maker: Open Project.`)
   }
-  // The backend writes the project (model.json, files/, .gitignore, git init)
-  // exactly as the browser app's Save does.
   try {
-    await vscode.workspace.fs.createDirectory(target)
-    const backend = await backends.acquire(folder)
-    try {
-      await backend.json('/project/new', { method: 'POST' })
-      await backend.json('/project/save', { method: 'POST', body: { path: folder } })
-      await openCanvas(vscode.Uri.joinPath(target, PROJECT_FILE))
-    } finally {
-      backends.release(folder)
-    }
+    await createProject(backends, target)
+    await openCanvas(vscode.Uri.joinPath(target, PROJECT_FILE))
   } catch (e) {
     vscode.window.showErrorMessage(`Couldn't create the project: ${e instanceof Error ? e.message : e}`)
   }
+}
+
+/** Writes a new, empty project into `target` (model.json, files/,
+ * .gitignore, git init) exactly as the browser app's Save does. */
+async function createProject(backends: BackendManager, target: vscode.Uri) {
+  const folder = target.fsPath
+  await vscode.workspace.fs.createDirectory(target)
+  const backend = await backends.acquire(folder)
+  try {
+    await backend.json('/project/new', { method: 'POST' })
+    await backend.json('/project/save', { method: 'POST', body: { path: folder } })
+  } finally {
+    backends.release(folder)
+  }
+}
+
+/** The chat tools' modelmaker_open_project: a folder relative to the
+ * (first) workspace folder, or absolute; with `create`, a missing project
+ * is created first. Opens its canvas and returns the folder's path. */
+async function openProjectFolder(backends: BackendManager, folder: string, create: boolean): Promise<string> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri
+  const target = path.isAbsolute(folder) ? vscode.Uri.file(folder) : root ? vscode.Uri.joinPath(root, folder) : undefined
+  if (!target) throw new Error('open a workspace folder first, or give an absolute path')
+  const file = vscode.Uri.joinPath(target, PROJECT_FILE)
+  if (!(await exists(file))) {
+    if (!create) throw new Error(`${folder} isn't a Model-Maker project (no ${PROJECT_FILE}); pass create: true to make one there`)
+    await createProject(backends, target)
+  }
+  await openCanvas(file)
+  return target.fsPath
 }
 
 async function selectInterpreter() {

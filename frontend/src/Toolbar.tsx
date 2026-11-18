@@ -62,6 +62,7 @@ export function Toolbar({
   const [showGit, setShowGit] = useState(false)
   const [showSave, setShowSave] = useState(false)
   const [showLoad, setShowLoad] = useState(false)
+  const [showMore, setShowMore] = useState(false)
   const [defaultProjectsDir, setDefaultProjectsDir] = useState<string | null>(null)
 
   useEffect(() => {
@@ -100,9 +101,9 @@ export function Toolbar({
     }
   }
 
-  const doCompile = () =>
+  const doCompile = (streaming = compileStreaming && host.kind !== 'vscode') =>
     run(async () => {
-      const { source } = await api.compile(undefined, compileStreaming)
+      const { source } = await api.compile(undefined, streaming)
       // In VS Code the script opens as a real editor tab (save, diff, run).
       if (host.openText) host.openText(source, 'python')
       else setCompiled(source)
@@ -140,6 +141,9 @@ export function Toolbar({
   // project open yet they fall back to the server's default projects
   // subdirectory (see /api/project/default_dir), so Save always lands
   // somewhere sensible instead of the server's raw working directory.
+  // Inside VS Code: a compact bar -- the tab already names the project,
+  // VS Code saves it, and the rarer run modes sit under "More".
+  const lean = host.kind === 'vscode'
   const { dir: openDir, name: openName } = projectPath ? splitPath(projectPath) : { dir: '', name: '' }
   const browseStartPath = openDir || defaultProjectsDir
 
@@ -148,45 +152,52 @@ export function Toolbar({
       style={{
         display: 'flex',
         gap: 8,
-        padding: '8px 12px',
+        padding: lean ? '4px 8px' : '8px 12px',
         alignItems: 'center',
+        flexWrap: lean ? 'wrap' : undefined,
         background: 'var(--brand-light)',
         borderBottom: '1px solid rgba(11,35,64,0.1)',
       }}
     >
-      <a
-        href="https://www.quantology.nl/"
-        target="_blank"
-        rel="noreferrer"
-        title="Quantology"
-        style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12, textDecoration: 'none' }}
-      >
-        <img src={`${import.meta.env.BASE_URL}brand-quantology/icon-mark-light.svg`} alt="" width={24} height={24} style={{ display: 'block' }} />
-        <strong style={{ color: 'var(--brand-ink)', fontFamily: 'var(--font-heading)', fontSize: 16, fontWeight: 600 }}>
-          Quantology
-        </strong>
-        <span style={{ color: 'var(--brand-border)' }}>|</span>
-        <span style={{ color: 'var(--brand-charcoal)', fontWeight: 500 }}>Model Maker</span>
-      </a>
+      {!lean && (
+        <a
+          href="https://www.quantology.nl/"
+          target="_blank"
+          rel="noreferrer"
+          title="Quantology"
+          style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginRight: 12, textDecoration: 'none' }}
+        >
+          <img src={`${import.meta.env.BASE_URL}brand-quantology/icon-mark-light.svg`} alt="" width={24} height={24} style={{ display: 'block' }} />
+          <strong style={{ color: 'var(--brand-ink)', fontFamily: 'var(--font-heading)', fontSize: 16, fontWeight: 600 }}>
+            Quantology
+          </strong>
+          <span style={{ color: 'var(--brand-border)' }}>|</span>
+          <span style={{ color: 'var(--brand-charcoal)', fontWeight: 500 }}>Model Maker</span>
+        </a>
+      )}
       <button className="brand-primary" disabled={busy || running} onClick={() => run(() => api.runAll())}>
         Run all
       </button>
-      <button disabled={busy || running} onClick={() => run(() => api.forceRunAll())}>
-        Force run all
-      </button>
-      <button
-        disabled={busy || running}
-        title="Fuse compatible blocks (filter/select/group-by/join, read from source) into one streaming query per group, so a source larger than memory doesn't fully load at every step. Fused mid-chain blocks won't individually turn green -- only the block ending each fused stretch does. For a full, production-scale run; use sample mode instead for cheap interactive iteration."
-        onClick={() => run(() => api.runAllStreaming())}
-      >
-        Run all (streaming)
-      </button>
-      <button disabled={busy || running} onClick={() => run(() => api.refreshAll())}>
-        Refresh sources
-      </button>
-      <button disabled={busy || running} onClick={() => run(() => api.checkAllSources())}>
-        Check all sources
-      </button>
+      {!lean && (
+        <>
+          <button disabled={busy || running} onClick={() => run(() => api.forceRunAll())}>
+            Force run all
+          </button>
+          <button
+            disabled={busy || running}
+            title="Fuse compatible blocks (filter/select/group-by/join, read from source) into one streaming query per group, so a source larger than memory doesn't fully load at every step. Fused mid-chain blocks won't individually turn green -- only the block ending each fused stretch does. For a full, production-scale run; use sample mode instead for cheap interactive iteration."
+            onClick={() => run(() => api.runAllStreaming())}
+          >
+            Run all (streaming)
+          </button>
+          <button disabled={busy || running} onClick={() => run(() => api.refreshAll())}>
+            Refresh sources
+          </button>
+          <button disabled={busy || running} onClick={() => run(() => api.checkAllSources())}>
+            Check all sources
+          </button>
+        </>
+      )}
       {running && (
         <button
           onClick={() => run(() => api.cancelRun())}
@@ -206,21 +217,41 @@ export function Toolbar({
           Stop
         </button>
       )}
-      <button disabled={busy} onClick={doCompile}>
+      <button disabled={busy} onClick={() => doCompile()} title={lean ? 'Compile the pipeline to one Python script, opened in an editor tab' : undefined}>
         Compile
       </button>
-      <label
-        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--brand-charcoal)' }}
-        title="Compile fusable stretches (filter/select/group-by/join, read from source) into a single streaming polars query each, the same way 'Run all (streaming)' does for the live engine -- for a compiled script meant to run on data larger than memory."
-      >
-        <input
-          type="checkbox"
-          checked={compileStreaming}
-          disabled={busy}
-          onChange={(e) => setCompileStreaming(e.target.checked)}
-        />
-        Streaming
-      </label>
+      {lean ? (
+        <div style={{ position: 'relative' }}>
+          <button disabled={busy} onClick={() => setShowMore((m) => !m)} title="More run and compile options">
+            More ▾
+          </button>
+          {showMore && (
+            <MoreMenu
+              onClose={() => setShowMore(false)}
+              items={[
+                { label: 'Force run all', disabled: running, onClick: () => run(() => api.forceRunAll()) },
+                { label: 'Run all (streaming)', disabled: running, onClick: () => run(() => api.runAllStreaming()) },
+                { label: 'Refresh sources', disabled: running, onClick: () => run(() => api.refreshAll()) },
+                { label: 'Check all sources', disabled: running, onClick: () => run(() => api.checkAllSources()) },
+                { label: 'Compile (streaming)', onClick: () => doCompile(true) },
+              ]}
+            />
+          )}
+        </div>
+      ) : (
+        <label
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--brand-charcoal)' }}
+          title="Compile fusable stretches (filter/select/group-by/join, read from source) into a single streaming polars query each, the same way 'Run all (streaming)' does for the live engine -- for a compiled script meant to run on data larger than memory."
+        >
+          <input
+            type="checkbox"
+            checked={compileStreaming}
+            disabled={busy}
+            onChange={(e) => setCompileStreaming(e.target.checked)}
+          />
+          Streaming
+        </label>
+      )}
 
       <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(11,35,64,0.15)', margin: '0 2px' }} />
       <button disabled={busy || !canUndo} onClick={onUndo} title="Undo the last graph edit (Ctrl/Cmd-Z)">
@@ -257,12 +288,18 @@ export function Toolbar({
       </label>
 
       <span style={{ flex: 1 }} />
-      {host.kind === 'vscode' ? (
-        // The editor tab is one project: Save writes it in place, and other
-        // projects open from VS Code (Model-Maker: Open Project...).
-        <button disabled={busy || !projectPath} onClick={() => run(() => api.save())} title="Save (Ctrl/Cmd-S)">
-          Save{dirty ? ' •' : ''}
-        </button>
+      {lean ? (
+        // The editor tab is the project: Ctrl/Cmd-S saves it and edits
+        // autosave, so only say when something needs attention.
+        <span style={{ fontSize: 12, color: autosave.state === 'error' ? 'var(--mm-error)' : 'var(--mm-muted)' }}>
+          {autosave.state === 'error' ? (
+            <span title={autosave.message}>autosave failed</span>
+          ) : dirty ? (
+            <span title="Edits not yet written to model.json (Ctrl/Cmd-S saves now; autosaves shortly)">
+              {autosave.state === 'saving' ? 'saving…' : '● unsaved'}
+            </span>
+          ) : null}
+        </span>
       ) : (
         <>
           <button disabled={busy} onClick={doNew} title="Start a new, empty project">
@@ -274,29 +311,29 @@ export function Toolbar({
           <button disabled={busy} onClick={openLoad}>
             Load
           </button>
+          <span style={{ fontSize: 12, color: dirty ? 'var(--mm-warn)' : 'var(--mm-muted)' }}>
+            {projectPath ?? '(unsaved)'}
+            {dirty && (
+              <span title="Edits not yet written to the project file (always snapshotted for crash recovery; autosaves shortly if the project has a save location)">
+                {' '}
+                · unsaved changes{autosave.state === 'saving' ? ' — autosaving…' : ''}
+              </span>
+            )}
+            {!dirty && autosave.state === 'saved' && (
+              <span title="Automatically written to the project file after your last edit" style={{ color: 'var(--mm-muted)' }}>
+                {' '}
+                · autosaved {new Date(autosave.at).toLocaleTimeString()}
+              </span>
+            )}
+            {autosave.state === 'error' && (
+              <span title={autosave.message} style={{ color: 'var(--mm-error)' }}>
+                {' '}
+                · autosave failed
+              </span>
+            )}
+          </span>
         </>
       )}
-      <span style={{ fontSize: 12, color: dirty ? 'var(--mm-warn)' : 'var(--mm-muted)' }}>
-        {projectPath ?? '(unsaved)'}
-        {dirty && (
-          <span title="Edits not yet written to the project file (always snapshotted for crash recovery; autosaves shortly if the project has a save location)">
-            {' '}
-            · unsaved changes{autosave.state === 'saving' ? ' — autosaving…' : ''}
-          </span>
-        )}
-        {!dirty && autosave.state === 'saved' && (
-          <span title="Automatically written to the project file after your last edit" style={{ color: 'var(--mm-muted)' }}>
-            {' '}
-            · autosaved {new Date(autosave.at).toLocaleTimeString()}
-          </span>
-        )}
-        {autosave.state === 'error' && (
-          <span title={autosave.message} style={{ color: 'var(--mm-error)' }}>
-            {' '}
-            · autosave failed
-          </span>
-        )}
-      </span>
 
       {/* VS Code's own Source Control covers git there. */}
       {host.kind !== 'vscode' && has('git') && (
@@ -361,5 +398,50 @@ export function Toolbar({
         <FileBrowser folders startPath={browseStartPath} onPick={doLoadPick} onClose={() => setShowLoad(false)} />
       )}
     </div>
+  )
+}
+
+type MenuItem = { label: string; onClick: () => void; disabled?: boolean }
+
+function MoreMenu({ items, onClose }: { items: MenuItem[]; onClose: () => void }) {
+  return (
+    <>
+      {/* Click anywhere else to close. */}
+      <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={onClose} />
+      <div
+        role="menu"
+        style={{
+          position: 'absolute',
+          top: '100%',
+          left: 0,
+          marginTop: 4,
+          zIndex: 41,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+          minWidth: 180,
+          padding: 4,
+          background: 'var(--mm-bg)',
+          border: '1px solid var(--mm-border-strong)',
+          borderRadius: 6,
+          boxShadow: '0 6px 18px rgba(0,0,0,0.2)',
+        }}
+      >
+        {items.map((item) => (
+          <button
+            key={item.label}
+            role="menuitem"
+            disabled={item.disabled}
+            onClick={() => {
+              onClose()
+              item.onClick()
+            }}
+            style={{ textAlign: 'left', border: 'none', background: 'transparent' }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </>
   )
 }

@@ -18,5 +18,11 @@ switches the extension uses.
 - Native dialogs for saving, picking paths, confirmations and downloads.
   Compiled scripts open in an editor tab.
 - The canvas follows the VS Code colour theme (light, dark, high contrast).
-- Copilot Chat tools: read the graph, the block catalogue and output
-  summaries, and add, configure, wire, run and compile blocks.
+- Copilot Chat tools that can build a model from an empty canvas: open or
+  create a project, find data files, add lanes, add, configure, rename,
+  wire, unwire and delete blocks, tag column roles, run, check for holdout
+  leakage and suspicious features (with the AI builder's decision hints),
+  and compile.
+- A compact canvas inside VS Code: one toolbar row with the rarer run modes
+  under **More**, a palette that folds to a rail, and an inspector that
+  appears only for a selected block.
