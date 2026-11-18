@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { findBlock, type Graph, placeNewBlock, resolveLane, runOutcome, ToolInputError } from './assistant'
+import { findBlock, findWire, type Graph, resolveLane, runOutcome, ToolInputError } from './assistant'
 import { type Backend, type BackendManager, BackendError } from './backend'
 import type { ModelEditorProvider } from './editor'
 
@@ -8,6 +8,10 @@ import type { ModelEditorProvider } from './editor'
 // statistics, never a dataframe's rows -- and edit through the canvas's own
 // endpoints, so every change is in its undo history. Each edit asks first
 // (VS Code's tool confirmation), and the canvas refreshes after it.
+//
+// Together they cover a whole build from an empty canvas: open or create a
+// project, find the data, lay out lanes, add and wire blocks, tag column
+// roles, run, check the result for leakage, fix, and compile.
 
 const RUN_TIMEOUT_MS = 10 * 60_000
 const SCRIPT_CHARS = 30_000
@@ -21,13 +25,17 @@ type ToolSpec<T> = {
   run(ctx: Ctx, input: T, token: vscode.CancellationToken): Promise<unknown>
 }
 
-export function registerTools(context: vscode.ExtensionContext, backends: BackendManager, editor: ModelEditorProvider) {
-  const register = <T>(name: string, spec: ToolSpec<T>) =>
+/** Opens (and with `create`, first creates) a project folder's canvas;
+ * returns the folder's absolute path. Supplied by extension.ts. */
+export type ProjectOpener = (folder: string, create: boolean) => Promise<string>
+
+export function registerTools(context: vscode.ExtensionContext, backends: BackendManager, editor: ModelEditorProvider, openProject?: ProjectOpener) {
+  const register = <T>(name: string, spec: ToolSpec<T> & { folder?: (input: T) => Promise<string> }) =>
     context.subscriptions.push(
       vscode.lm.registerTool<T>(name, {
         prepareInvocation: (options) => {
           const what = spec.describe(options.input)
-          const project = editor.activeProject()
+          const project = spec.folder ? undefined : editor.activeProject()
           return {
             invocationMessage: what,
             confirmationMessages: spec.edits
@@ -36,8 +44,17 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           }
         },
         invoke: async (options, token) => {
-          const folder = editor.activeProject()
-          if (!folder) throw new Error('No Model-Maker canvas is open -- open a project\'s model.json in the canvas first.')
+          let folder: string | undefined
+          try {
+            folder = spec.folder ? await spec.folder(options.input) : editor.activeProject()
+          } catch (e) {
+            throw new Error(e instanceof Error ? e.message : String(e))
+          }
+          if (!folder) {
+            throw new Error(
+              'No Model-Maker canvas is open -- call modelmaker_open_project (with create: true for a new project), or open a project\'s model.json in the canvas.',
+            )
+          }
           const backend = await backends.acquire(folder)
           try {
             const result = await spec.run({ backend, folder }, options.input, token)
@@ -55,12 +72,46 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     )
 
   const graph = (ctx: Ctx) => ctx.backend.json<Graph>('/assistant/graph')
+  const brief = (ctx: Ctx, id: string) => ctx.backend.json(`/assistant/blocks/${encodeURIComponent(id)}`)
+
+  // ---- the project ----------------------------------------------------------
+
+  if (openProject) {
+    register<{ folder: string; create?: boolean }>('modelmaker_open_project', {
+      describe: (i) => `${i.create ? 'Creating and opening' : 'Opening'} the Model-Maker project ${i.folder}`,
+      edits: true,
+      folder: (i) => openProject(i.folder, !!i.create),
+      run: async (ctx) => ({ folder: ctx.folder, ...(await graph(ctx)) }),
+    })
+  }
 
   register<Record<string, never>>('modelmaker_get_graph', {
     describe: () => 'Reading the Model-Maker graph',
     edits: false,
     run: (ctx) => graph(ctx),
   })
+
+  register<{ path?: string; ext?: string }>('modelmaker_list_files', {
+    describe: (i) => `Listing data files${i.path ? ` in ${i.path}` : ''}`,
+    edits: false,
+    run: async (ctx, i) => {
+      const q = new URLSearchParams({ ...(i.path ? { path: i.path } : {}), ...(i.ext ? { ext: i.ext } : {}) })
+      const [files, datasets, sources] = await Promise.all([
+        ctx.backend.json<{ path: string; parent: string | null; entries: Array<{ name: string; path: string; is_dir: boolean }> }>(`/browse?${q}`),
+        ctx.backend.json<unknown[]>('/datasets').catch(() => []),
+        ctx.backend.json<unknown[]>('/sources').catch(() => []),
+      ])
+      return {
+        ...files,
+        entries: files.entries.map(({ name, path, is_dir }) => ({ name, path, ...(is_dir ? { dir: true } : {}) })),
+        // What the workspace offers instead of files, when it does (read_dataset / read_source blocks).
+        ...(datasets.length ? { datasets } : {}),
+        ...(sources.length ? { sources } : {}),
+      }
+    },
+  })
+
+  // ---- the catalogue --------------------------------------------------------
 
   register<{ tag?: string }>('modelmaker_list_block_types', {
     describe: (i) => (i.tag ? `Listing ${i.tag} blocks` : 'Listing block tags'),
@@ -74,6 +125,8 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     run: (ctx, i) => ctx.backend.json(`/assistant/block_types/${encodeURIComponent(i.category)}`),
   })
 
+  // ---- reading results ------------------------------------------------------
+
   register<{ block: string; port?: string }>('modelmaker_get_output_summary', {
     describe: (i) => `Summarizing ${i.block}'s output`,
     edits: false,
@@ -84,29 +137,73 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     },
   })
 
-  register<{ category: string; name?: string; lane?: string; params?: Record<string, unknown> }>('modelmaker_add_block', {
-    describe: (i) => `Adding a ${i.category} block${i.name ? ` "${i.name}"` : ''}`,
-    edits: true,
+  register<{ block: string }>('modelmaker_get_input_columns', {
+    describe: (i) => `Reading the columns ${i.block} gets`,
+    edits: false,
     run: async (ctx, i) => {
-      const g = await graph(ctx)
-      const lane = resolveLane(g, i.lane)
-      const at = placeNewBlock(g, lane)
-      const block = await ctx.backend.json<{ id: string }>('/blocks', {
-        method: 'POST',
-        body: { category: i.category, name: i.name, lane, params: i.params ?? {}, ...at },
-      })
-      return ctx.backend.json(`/assistant/blocks/${block.id}`)
+      const block = findBlock(await graph(ctx), i.block)
+      const ports = await ctx.backend.json<Record<string, Array<{ name: string; dtype: string; role?: string | null }>>>(
+        `/blocks/${block.id}/input_schema`,
+      )
+      const out: Record<string, unknown> = { block: block.id, ports }
+      if (Object.values(ports).every((cols) => cols.length === 0)) {
+        out.note = 'no columns yet: the blocks upstream have to run first (modelmaker_run)'
+      }
+      return out
     },
   })
 
-  register<{ block: string; params: Record<string, unknown> }>('modelmaker_set_params', {
-    describe: (i) => `Setting ${Object.keys(i.params ?? {}).join(', ') || 'params'} on ${i.block}`,
+  register<{ block?: string }>('modelmaker_check', {
+    describe: (i) => (i.block ? `Checking ${i.block}` : 'Checking the pipeline for leakage'),
+    edits: false,
+    run: async (ctx, i) => {
+      const target = i.block ? findBlock(await graph(ctx), i.block).id : null
+      return ctx.backend.json(`/assistant/check${target ? `?block=${encodeURIComponent(target)}` : ''}`)
+    },
+  })
+
+  // ---- editing --------------------------------------------------------------
+
+  register<{ name: string }>('modelmaker_add_lane', {
+    describe: (i) => `Adding the lane "${i.name}"`,
+    edits: true,
+    run: (ctx, i) => ctx.backend.json('/assistant/lanes', { method: 'POST', body: { name: i.name } }),
+  })
+
+  register<{ category: string; name?: string; lane?: string; params?: Record<string, unknown> }>('modelmaker_add_block', {
+    describe: (i) => `Adding a ${i.category} block${i.name ? ` "${i.name}"` : ''}`,
+    edits: true,
+    run: (ctx, i) =>
+      ctx.backend.json('/assistant/blocks', { method: 'POST', body: { category: i.category, name: i.name, lane: i.lane, params: i.params ?? {} } }),
+  })
+
+  register<{ block: string; params?: Record<string, unknown>; name?: string; lane?: string }>('modelmaker_set_params', {
+    describe: (i) => {
+      const what = [...Object.keys(i.params ?? {}), ...(i.name ? ['name'] : []), ...(i.lane ? ['lane'] : [])]
+      return `Setting ${what.join(', ') || 'params'} on ${i.block}`
+    },
+    edits: true,
+    run: async (ctx, i) => {
+      const g = await graph(ctx)
+      const block = findBlock(g, i.block)
+      const body: Record<string, unknown> = {}
+      // Merged, so the model can send just what changes.
+      if (i.params) body.params = { ...block.params, ...i.params }
+      if (i.name) body.name = i.name
+      if (i.lane) body.lane = resolveLane(g, i.lane)
+      if (Object.keys(body).length === 0) throw new ToolInputError('nothing to change: give params, name or lane')
+      await ctx.backend.json(`/blocks/${block.id}`, { method: 'PATCH', body })
+      return brief(ctx, block.id)
+    },
+  })
+
+  register<{ block: string; column: string; role: string }>('modelmaker_set_column_role', {
+    describe: (i) => `Tagging ${i.column} as ${i.role} on ${i.block}`,
     edits: true,
     run: async (ctx, i) => {
       const block = findBlock(await graph(ctx), i.block)
-      // Merged, so the model can send just what changes.
-      await ctx.backend.json(`/blocks/${block.id}`, { method: 'PATCH', body: { params: { ...block.params, ...i.params } } })
-      return ctx.backend.json(`/assistant/blocks/${block.id}`)
+      await ctx.backend.json(`/blocks/${block.id}/column_role`, { method: 'POST', body: { column: i.column, role: i.role } })
+      return brief(ctx, block.id)
     },
   })
 
@@ -124,18 +221,52 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     },
   })
 
+  register<{ wire?: string; to_block?: string; to_port?: string }>('modelmaker_disconnect', {
+    describe: (i) => (i.wire ? `Removing wire ${i.wire}` : `Removing the wire into ${i.to_block}.${i.to_port}`),
+    edits: true,
+    run: async (ctx, i) => {
+      const wire = findWire(await graph(ctx), { id: i.wire, to_block: i.to_block, to_port: i.to_port })
+      await ctx.backend.json(`/wires/${wire.id}`, { method: 'DELETE' })
+      return { removed: wire }
+    },
+  })
+
+  register<{ block: string }>('modelmaker_delete_block', {
+    describe: (i) => `Deleting ${i.block}`,
+    edits: true,
+    run: async (ctx, i) => {
+      const block = findBlock(await graph(ctx), i.block)
+      await ctx.backend.json(`/blocks/${block.id}`, { method: 'DELETE' })
+      return { deleted: block.id, name: block.name }
+    },
+  })
+
+  // ---- running ----------------------------------------------------------------
+
   register<{ block?: string }>('modelmaker_run', {
     describe: (i) => (i.block ? `Running up to ${i.block}` : 'Running the whole pipeline'),
     edits: true,
     run: async (ctx, i, token) => {
-      const target = i.block ? findBlock(await graph(ctx), i.block).id : null
+      const before = await graph(ctx)
+      const target = i.block ? findBlock(before, i.block).id : null
+      const deadline = Date.now() + RUN_TIMEOUT_MS
+      const refreshed: string[] = []
+      if (!target) {
+        // Run all reads a data source only the first time; one whose settings
+        // changed since (a param, a column role) stays stale and everything
+        // after it fails. An assistant's whole-pipeline run re-reads those.
+        for (const b of before.blocks.filter((b) => b.data_source && b.status === 'orange')) {
+          await ctx.backend.json(`/blocks/${b.id}/refresh`, { method: 'POST' })
+          await waitIdle(ctx, deadline, token)
+          refreshed.push(b.name)
+        }
+      }
       await ctx.backend.json(target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
       // The canvas polls while it sees a run: let it see this one.
       setTimeout(() => editor.refresh(ctx.folder), 300)
-      const deadline = Date.now() + RUN_TIMEOUT_MS
       for (;;) {
         const g = await graph(ctx)
-        if (!g.running) return runOutcome(g, target)
+        if (!g.running) return withChecks(ctx, { ...runOutcome(g, target), ...(refreshed.length ? { refreshed_sources: refreshed } : {}) }, target)
         if (token.isCancellationRequested) {
           await ctx.backend.json('/run/cancel', { method: 'POST' }).catch(() => {})
           throw new Error('cancelled -- the run was stopped')
@@ -154,4 +285,27 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       return source.length > SCRIPT_CHARS ? { source: source.slice(0, SCRIPT_CHARS), truncated: true } : { source }
     },
   })
+}
+
+async function waitIdle(ctx: Ctx, deadline: number, token: vscode.CancellationToken) {
+  while (Date.now() < deadline && !token.isCancellationRequested) {
+    if (!(await ctx.backend.json<Graph>('/assistant/graph')).running) return
+    await new Promise((r) => setTimeout(r, 500))
+  }
+}
+
+type Check = { leaks: unknown[]; suspicious_features: unknown[]; hints: Record<string, string[]>; ok: boolean }
+
+/** A run's outcome plus what the AI builder would say about it: leakage
+ * and suspicious features whenever there are any, and the target block's
+ * decision hints. */
+async function withChecks(ctx: Ctx, outcome: object, target: string | null): Promise<object> {
+  const check = await ctx.backend.json<Check>(`/assistant/check${target ? `?block=${encodeURIComponent(target)}` : ''}`).catch(() => null)
+  if (!check) return outcome
+  const out: Record<string, unknown> = { ...outcome }
+  if (check.leaks.length) out.leaks = check.leaks
+  if (check.suspicious_features.length) out.suspicious_features = check.suspicious_features
+  if (target && check.hints[target]) out.hints = check.hints[target]
+  else if (!target && Object.keys(check.hints).length) out.next_check = 'modelmaker_check gives each block\'s decision hints'
+  return out
 }

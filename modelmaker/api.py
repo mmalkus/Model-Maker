@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -716,6 +717,19 @@ def registry_tags() -> list[dict[str, str]]:
 @app.get("/api/graph")
 def get_graph() -> dict[str, Any]:
     return _graph_out()
+
+
+@app.get("/api/graph/stamp")
+def graph_stamp() -> dict[str, Any]:
+    """A cheap marker that changes whenever the graph or a block's status
+    does, so an open canvas can notice edits made from elsewhere -- an
+    assistant over MCP (see assistant_mcp.py), another tab -- by polling
+    this instead of the whole graph."""
+    session = _session()
+    runner = session.runner
+    statuses = ",".join(f"{bid}:{runner.status(bid)}" for bid in session.graph.blocks)
+    raw = f"{session.project_path}|{id(session.graph)}|{session.revision}|{runner.sample_rows}|{statuses}"
+    return {"stamp": hashlib.sha1(raw.encode()).hexdigest()[:16]}
 
 
 @app.get("/api/browse")

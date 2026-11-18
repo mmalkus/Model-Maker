@@ -73,6 +73,8 @@ function unplaceableReason(b: LibraryFile['blocks'][number], file: LibraryFile):
 }
 
 export function Palette({
+  collapsed = false,
+  onToggle,
   onAdd,
   onAddLibrary,
   onOpenLibrary,
@@ -80,6 +82,9 @@ export function Palette({
   onAddLane,
   libraryVersion,
 }: {
+  // Folded to a narrow rail (VS Code); onToggle shows the fold button.
+  collapsed?: boolean
+  onToggle?: () => void
   onAdd: (category: string) => void
   onAddLibrary: (file: string, id: string) => void
   onOpenLibrary: () => void
@@ -136,9 +141,31 @@ export function Palette({
     borderRadius: 6,
   }
 
+  if (collapsed) {
+    return (
+      <div style={{ width: 28, borderRight: '1px solid var(--mm-border)', display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 6 }}>
+        <button
+          onClick={onToggle}
+          title="Show the blocks palette"
+          aria-label="Show the blocks palette"
+          style={{ writingMode: 'vertical-rl', padding: '8px 2px', fontSize: 12, border: 'none', background: 'transparent' }}
+        >
+          Blocks ›
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div style={{ width: 200, borderRight: '1px solid var(--mm-border)', padding: 12, overflowY: 'auto' }}>
-      <h3 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--brand-ink)' }}>Blocks</h3>
+      <h3 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--brand-ink)', display: 'flex', alignItems: 'center' }}>
+        <span style={{ flex: 1 }}>Blocks</span>
+        {onToggle && (
+          <button onClick={onToggle} title="Fold the palette away" aria-label="Fold the palette away" style={{ padding: '0 6px', fontSize: 12 }}>
+            ‹
+          </button>
+        )}
+      </h3>
 
       {tags.length > 0 && (
         <select

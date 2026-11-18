@@ -49,6 +49,7 @@ export const api = {
   capabilities: () => request<{ capabilities: string[]; features?: string[] }>('/capabilities'),
   sources: () => request<SourceEntry[]>('/sources'),
   graph: () => request<GraphOut>('/graph'),
+  graphStamp: () => request<{ stamp: string }>('/graph/stamp'),
 
   createBlock: (body: {
     category?: string

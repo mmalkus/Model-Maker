@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { findBlock, type Graph, placeNewBlock, resolveLane, runOutcome, ToolInputError } from '../../src/assistant'
+import { findBlock, findWire, type Graph, resolveLane, runOutcome, ToolInputError } from '../../src/assistant'
 
 const block = (id: string, lane: string | null, x: number, y: number, status: any = 'green', error?: string) => ({
   id, name: `Block ${id}`, category: 'filter', lane, status, params: {}, inputs: [], outputs: [], position: { x, y }, ...(error ? { error } : {}),
@@ -21,10 +21,13 @@ test('lanes resolve by id or by name, any case', () => {
   assert.throws(() => resolveLane(graph, 'Estimation'), (e: Error) => e instanceof ToolInputError && /Data Prep \(lane_prep\)/.test(e.message))
 })
 
-test('a new block goes right of its lane, or below everything', () => {
-  assert.deepEqual(placeNewBlock(graph, 'lane_prep'), { x: 540, y: 50 })
-  assert.deepEqual(placeNewBlock(graph, 'lane_val'), { x: 100, y: 760 })
-  assert.deepEqual(placeNewBlock({ ...graph, blocks: [] }, null), { x: 100, y: 0 })
+test('a wire is found by id or by the input it feeds', () => {
+  const g = { ...graph, wires: [{ id: 'w1', from: 'a.out', to: 'b.df', valid: true }] }
+  assert.equal(findWire(g, { id: 'w1' }).id, 'w1')
+  assert.equal(findWire(g, { to_block: 'Block b', to_port: 'df' }).id, 'w1')
+  assert.throws(() => findWire(g, { id: 'w9' }), ToolInputError)
+  assert.throws(() => findWire(g, { to_block: 'a', to_port: 'df' }), /nothing is wired into a.df/)
+  assert.throws(() => findWire(g, {}), ToolInputError)
 })
 
 test('blocks are found by id or name', () => {

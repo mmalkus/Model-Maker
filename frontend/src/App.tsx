@@ -29,6 +29,8 @@ import type { BlockOut, BuildOut, GraphOut, LaneOut, LLMSettingsOut, PortType, R
 import { host } from './host'
 import { has } from './features'
 
+const STAMP_POLL_MS = 1500
+
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
 
@@ -106,6 +108,17 @@ function AppInner() {
   const [recovery, setRecovery] = useState<RecoveryInfo | null>(null)
   const [autosave, setAutosave] = useState<AutosaveStatus>({ state: 'idle' })
   const [buildOpen, setBuildOpen] = useState(false)
+  // Inside VS Code the editor tab is narrow, so the palette can fold to a
+  // rail (folded to start with; the choice is remembered), the inspector
+  // shows only for a selection, and the footer links go.
+  const lean = host.kind === 'vscode'
+  const [paletteOpen, setPaletteOpen] = useState(() => !lean || host.getState('paletteOpen') === '1')
+  const togglePalette = useCallback(() => {
+    setPaletteOpen((open) => {
+      host.setState('paletteOpen', open ? '0' : '1')
+      return !open
+    })
+  }, [])
   const [build, setBuild] = useState<BuildOut | null>(null)
   // The AI build whose full report is open (see BuildReport.ReportModal).
   const [reportBuildId, setReportBuildId] = useState<string | null>(null)
@@ -303,6 +316,30 @@ function AppInner() {
     // from all-grey to done between two 700ms-apart polls.
     const id = setInterval(reload, 200)
     return () => clearInterval(id)
+  }, [anyRunning, reload])
+
+  // Edits made elsewhere -- an assistant such as Claude Code over MCP,
+  // another tab -- show up within a couple of seconds: poll a cheap stamp
+  // and reload the graph only when it changes. (Runs poll faster, above.)
+  const stampRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (anyRunning) return
+    let stopped = false
+    const id = setInterval(() => {
+      if (document.hidden) return
+      api
+        .graphStamp()
+        .then(({ stamp }) => {
+          if (stopped) return
+          if (stampRef.current !== null && stamp !== stampRef.current) reload()
+          stampRef.current = stamp
+        })
+        .catch(() => {})
+    }, STAMP_POLL_MS)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
   }, [anyRunning, reload])
 
   useEffect(() => {
@@ -718,6 +755,8 @@ function AppInner() {
       )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <Palette
+          collapsed={lean && !paletteOpen}
+          onToggle={lean ? togglePalette : undefined}
           onAdd={addBlock}
           onAddLibrary={(file, id) => addLibraryBlock(file, id).catch((e) => host.notify(e.message))}
           onOpenLibrary={() => setLibraryView({ kind: 'browse' })}
@@ -776,28 +815,30 @@ function AppInner() {
                 </button>
               )}
             </Panel>
-            <Panel
-              position="bottom-right"
-              style={{
-                display: 'flex',
-                gap: 10,
-                fontSize: 11,
-                color: 'var(--brand-charcoal, var(--mm-muted))',
-                background: 'var(--mm-overlay)',
-                padding: '3px 8px',
-                borderRadius: 4,
-              }}
-            >
-              <a href="https://www.quantology.nl/" target="_blank" rel="noreferrer">
-                Quantology
-              </a>
-              <a href="https://github.com/mmalkus/Model-Maker" target="_blank" rel="noreferrer">
-                GitHub
-              </a>
-              <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noreferrer">
-                Apache 2.0 License
-              </a>
-            </Panel>
+            {!lean && (
+              <Panel
+                position="bottom-right"
+                style={{
+                  display: 'flex',
+                  gap: 10,
+                  fontSize: 11,
+                  color: 'var(--brand-charcoal, var(--mm-muted))',
+                  background: 'var(--mm-overlay)',
+                  padding: '3px 8px',
+                  borderRadius: 4,
+                }}
+              >
+                <a href="https://www.quantology.nl/" target="_blank" rel="noreferrer">
+                  Quantology
+                </a>
+                <a href="https://github.com/mmalkus/Model-Maker" target="_blank" rel="noreferrer">
+                  GitHub
+                </a>
+                <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noreferrer">
+                  Apache 2.0 License
+                </a>
+              </Panel>
+            )}
           </ReactFlow>
         </div>
         {graph && has('ai_builder') && (buildOpen || buildLive) && (
@@ -824,7 +865,7 @@ function AppInner() {
             onClose={() => setSelectedPort(null)}
             onChanged={reload}
           />
-        ) : (
+        ) : lean && !selectedBlock ? null : (
           <Inspector
             block={selectedBlock}
             onChanged={reload}

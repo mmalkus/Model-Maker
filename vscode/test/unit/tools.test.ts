@@ -15,6 +15,7 @@ const python = process.env.MODELMAKER_TEST_PYTHON
 const opts = { skip: python ? false : 'set MODELMAKER_TEST_PYTHON to run' }
 
 let backend: Backend
+const opened: Array<[string, boolean]> = []
 const token = { isCancellationRequested: false }
 
 async function call(name: string, input: object): Promise<any> {
@@ -42,7 +43,11 @@ before(async () => {
   const refreshed: string[] = []
   const editor = { activeProject: () => folder, refresh: (f: string) => refreshed.push(f) }
   const manager = { acquire: async () => backend, release: () => {} }
-  registerTools({ subscriptions: [] } as never, manager as never, editor as never)
+  const opener = async (f: string, create: boolean) => {
+    opened.push([f, create])
+    return folder
+  }
+  registerTools({ subscriptions: [] } as never, manager as never, editor as never, opener)
 })
 
 after(() => backend?.stop())
@@ -88,4 +93,44 @@ test('bad input comes back as a message the model can act on', opts, async () =>
   await assert.rejects(call('modelmaker_add_block', { category: 'filter', lane: 'Nowhere' }), /no lane "Nowhere"; the lanes are/)
   await assert.rejects(call('modelmaker_set_params', { block: 'nope', params: {} }), /no block "nope"/)
   await assert.rejects(call('modelmaker_add_block', { category: 'no_such_block' }))
+})
+
+test('builds a model from an empty canvas', opts, async () => {
+  const start = await call('modelmaker_open_project', { folder: 'demo', create: true })
+  assert.deepEqual(opened.at(-1), ['demo', true])
+  assert.ok(start.folder && Array.isArray(start.blocks))
+  await backend.json('/project/new', { method: 'POST' })
+
+  const files = await call('modelmaker_list_files', {})
+  assert.ok(Array.isArray(files.entries) && files.path)
+  const tags = (await call('modelmaker_list_block_types', {})).tags.map((t: any) => t.tag)
+  assert.equal(tags[0], 'data_sources')
+
+  const data = await call('modelmaker_add_lane', { name: 'Data' })
+  await call('modelmaker_add_lane', { name: 'Estimation' })
+  const load = await call('modelmaker_add_block', { category: 'demo_credit_data', name: 'Loans', lane: 'Data' })
+  assert.equal(load.lane, data.id)
+  const split = await call('modelmaker_add_block', { category: 'train_test_split', lane: 'Estimation' })
+  const extra = await call('modelmaker_add_block', { category: 'filter', lane: 'Estimation' })
+  await call('modelmaker_delete_block', { block: extra.id })
+  await call('modelmaker_connect', { from_block: 'Loans', from_port: load.outputs[0].split(':')[0], to_block: split.id, to_port: 'df' })
+  await call('modelmaker_disconnect', { to_block: split.id, to_port: 'df' })
+  assert.equal((await call('modelmaker_get_graph', {})).wires.length, 0)
+  await call('modelmaker_connect', { from_block: load.id, from_port: load.outputs[0].split(':')[0], to_block: split.id, to_port: 'df' })
+
+  const run = await call('modelmaker_run', {})
+  assert.deepEqual(run.statuses, { green: 2 }, JSON.stringify(run))
+  const cols = await call('modelmaker_get_input_columns', { block: split.id })
+  const names = cols.ports.df.map((c: any) => c.name)
+  assert.ok(names.length > 3)
+  const roled = await call('modelmaker_set_column_role', { block: load.id, column: names[0], role: 'excluded' })
+  assert.deepEqual(roled.column_roles, { [names[0]]: 'excluded' })
+  // The role made the source stale: a whole run re-reads it.
+  const rerun = await call('modelmaker_run', {})
+  assert.deepEqual([rerun.statuses, rerun.refreshed_sources], [{ green: 2 }, ['Loans']], JSON.stringify(rerun))
+  const renamed = await call('modelmaker_set_params', { block: split.id, name: 'Holdout split', params: { seed: 11 } })
+  assert.deepEqual([renamed.name, renamed.params.seed], ['Holdout split', 11])
+  const check = await call('modelmaker_check', {})
+  assert.equal(check.ok, true)
+  await assert.rejects(call('modelmaker_set_params', { block: split.id }), /nothing to change/)
 })

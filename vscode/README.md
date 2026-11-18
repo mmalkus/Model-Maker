@@ -32,10 +32,14 @@ and **Ctrl/Cmd+S** saves straight away. Git works through VS Code's
 Source Control. **Compile** opens the generated script in a new editor
 tab.
 
-## Theme
+## Theme and layout
 
 Inside VS Code the canvas uses your colour theme, whether light, dark or
-high contrast, and switches when you switch theme.
+high contrast, and switches when you switch theme. It's laid out for an
+editor tab: one toolbar row (the rarer run modes are under **More**), a
+block palette that folds to a rail (**Blocks ›** opens it), and an inspector
+that appears when you select a block. Saving is VS Code's: Ctrl/Cmd+S, and
+edits autosave.
 
 ## How it works
 
@@ -58,16 +62,46 @@ them:
 
 | Tool | Does |
 |---|---|
+| `#mmOpenProject` | Opens a project's canvas, or creates a new project |
 | `#mmGraph` | Reads the blocks, wires, statuses and errors |
-| `#mmBlockTypes`, `#mmDescribeBlock` | Browse and read the block catalogue, including your library |
-| `#mmOutput` | Summarizes a block's output: schema and statistics, never rows |
-| `#mmAddBlock`, `#mmSetParams`, `#mmConnect` | Edit the pipeline |
-| `#mmRun` | Runs the pipeline, or up to one block, and reports errors |
+| `#mmFiles` | Finds data files (and the workspace's datasets, if any) |
+| `#mmBlockTypes`, `#mmDescribeBlock` | Browse and read the block catalogue, including data sources and your library |
+| `#mmOutput`, `#mmColumns` | Summarize a block's output, or list the columns it receives: schema and statistics, never rows |
+| `#mmAddLane`, `#mmAddBlock`, `#mmSetParams`, `#mmColumnRole` | Lay out and configure the pipeline |
+| `#mmConnect`, `#mmDisconnect`, `#mmDeleteBlock` | Wire, unwire and remove blocks |
+| `#mmRun` | Runs the pipeline, or up to one block, and reports errors and leakage |
+| `#mmCheck` | Checks for holdout leakage and suspicious features, with each block's decision hints |
 | `#mmCompile` | Returns the compiled Python script |
+
+Copilot can start from nothing: ask agent mode to "create a project in
+`models/pd` and build a PD scorecard from `data/loans.csv`". It opens the
+canvas and you watch the model take shape.
 
 Every edit asks you first, lands in the canvas's undo history, and shows up
 on the canvas straight away. Copilot sees the same data the AI builder
 does: column names, types, roles and summary statistics, never your rows.
+
+## Claude Code
+
+Claude Code can use the same tools through a small MCP server in the
+Python package, `modelmaker-mcp`, on the canvas you used last. Set it up
+once per workspace:
+
+1. Run **Model-Maker: Set Up Claude Code**. It adds a `modelmaker` entry
+   to the workspace's `.mcp.json`, using the selected Python interpreter.
+2. Start (or restart) Claude Code in that folder, in the panel or the
+   terminal, and approve the `modelmaker` server.
+3. Open a canvas, or ask Claude to create a project. Its edits show up on
+   the canvas as it works.
+
+The `.mcp.json` entry holds your interpreter's path. Before committing it
+for others, change `command` to a path that works for them. The server
+finds the canvases through small files in `~/.modelmaker/vscode-backends/`
+(each backend's local address and access token, readable by you only).
+Turn this off with `modelmaker.mcp.discovery`.
+
+The same server works with the browser app: `modelmaker-mcp --url
+http://127.0.0.1:8001`.
 
 ## Commands
 
@@ -75,6 +109,7 @@ does: column names, types, roles and summary statistics, never your rows.
 |---|---|
 | Model-Maker: Open Project… | Open a project folder's canvas |
 | Model-Maker: New Project… | Create a project folder (model.json, files/, git) |
+| Model-Maker: Set Up Claude Code | Add the Model-Maker tools to the workspace's `.mcp.json` |
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |
 | Model-Maker: Show Backend Log | Backend output, pip installs, relay errors |
@@ -90,6 +125,7 @@ does: column names, types, roles and summary statistics, never your rows.
 | `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.0` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
 | `modelmaker.llm.useCopilot` | `true` | Offer Copilot to the backend and make it the default provider |
 | `modelmaker.backend.extraEnv` | `{}` | Extra environment variables for the backend, e.g. API keys |
+| `modelmaker.mcp.discovery` | `true` | Let `modelmaker-mcp` (Claude Code) find the open canvases |
 
 ## License
 
