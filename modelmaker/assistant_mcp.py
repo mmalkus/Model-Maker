@@ -556,26 +556,13 @@ def delete_block(r: Resolver, a: dict[str, Any]) -> Any:
 )
 def run(r: Resolver, a: dict[str, Any]) -> Any:
     t = r.target()
-    g = _graph(t)
-    target = find_block(g, a["block"])["id"] if a.get("block") else None
+    target = find_block(_graph(t), a["block"])["id"] if a.get("block") else None
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
-    refreshed = []
-    if target is None:
-        # Run all reads a data source only the first time; one whose settings
-        # changed since (a param, a column role) stays stale and everything
-        # after it fails. An assistant's whole-pipeline run re-reads those.
-        for b in g["blocks"]:
-            if b.get("data_source") and b["status"] == "orange":
-                t.post(f"/blocks/{b['id']}/refresh", timeout=120)
-                g = _wait_idle(t, deadline)
-                refreshed.append(b["name"])
     t.post(f"/blocks/{target}/run_to_here" if target else "/run_all", timeout=120)
     g = _wait_idle(t, deadline)
     if g["running"]:
         return {"still_running": True, "note": "the run is still going; check the graph later", **run_outcome(g, target)}
     out = run_outcome(g, target)
-    if refreshed:
-        out["refreshed_sources"] = refreshed
     try:
         found = t.get("/assistant/check", block=target)
     except BackendError:

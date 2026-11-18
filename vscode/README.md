@@ -122,7 +122,7 @@ http://127.0.0.1:8001`.
 |---|---|---|
 | `modelmaker.pythonPath` | (empty) | Interpreter for the backend; empty uses the Python extension's selection |
 | `modelmaker.autoInstall` | `ask` | `ask`, `always` or `never` install the package when missing or too old |
-| `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.0` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
+| `modelmaker.packageSpec` | `quantology-modelmaker>=0.3.1` | What gets installed, e.g. `quantology-modelmaker[anthropic]` or `-e /path/to/checkout` |
 | `modelmaker.llm.useCopilot` | `true` | Offer Copilot to the backend and make it the default provider |
 | `modelmaker.backend.extraEnv` | `{}` | Extra environment variables for the backend, e.g. API keys |
 | `modelmaker.mcp.discovery` | `true` | Let `modelmaker-mcp` (Claude Code) find the open canvases |

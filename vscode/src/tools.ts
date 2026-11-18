@@ -252,9 +252,9 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       const deadline = Date.now() + RUN_TIMEOUT_MS
       const refreshed: string[] = []
       if (!target) {
-        // Run all reads a data source only the first time; one whose settings
-        // changed since (a param, a column role) stays stale and everything
-        // after it fails. An assistant's whole-pipeline run re-reads those.
+        // A data source whose settings changed since it was read (a param, a
+        // column role) is stale. Backends from 0.3.1 re-read it in Run all;
+        // re-reading it here first keeps a 0.3.0 backend from failing on it.
         for (const b of before.blocks.filter((b) => b.data_source && b.status === 'orange')) {
           await ctx.backend.json(`/blocks/${b.id}/refresh`, { method: 'POST' })
           await waitIdle(ctx, deadline, token)

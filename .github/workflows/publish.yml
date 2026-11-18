@@ -99,12 +99,12 @@ jobs:
             test "${tag#v}" = "$ext" || { echo "release tag $tag doesn't match version $ext"; exit 1; }
           fi
 
-      # Marketplace convention: odd minor versions are pre-releases.
+      # Stable, unless the GitHub release is marked "Set as a pre-release".
+      # (A version can't move between channels once published, and the
+      # Marketplace never takes the same version twice.)
       - name: Pick the release channel
         id: channel
-        run: |
-          minor=$(node -p "require('./vscode/package.json').version.split('.')[1]")
-          echo "pre-release=$([ $((minor % 2)) -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: echo "pre-release=${{ github.event.release.prerelease == true && 'true' || 'false' }}" >> "$GITHUB_OUTPUT"
 
       - run: npm ci
         working-directory: frontend
@@ -130,6 +130,10 @@ jobs:
       url: https://marketplace.visualstudio.com/items?itemName=quantology.modelmaker
     permissions:
       contents: write # attach the .vsix to the GitHub release
+    # At the job level, so each step's `if` can see whether its token is set.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -139,22 +143,29 @@ jobs:
         with:
           node-version: "22"
 
-      # The .vsix already carries the pre-release flag (vsce package
-      # --pre-release above); both marketplaces read it from there.
-      - name: Publish to the Visual Studio Marketplace
-        run: npx --yes @vscode/vsce publish --packagePath modelmaker.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
-      - name: Publish to Open VSX
-        run: npx --yes ovsx publish modelmaker.vsix
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-
-      # For machines that can't reach either marketplace:
-      # code --install-extension modelmaker.vsix
+      # For machines that can't reach either marketplace (and while one isn't
+      # set up): code --install-extension modelmaker.vsix. First, so a
+      # marketplace failure can't hold it back.
       - name: Attach the .vsix to the release
         if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" modelmaker.vsix --repo "${{ github.repository }}"
+        run: gh release upload "${{ github.event.release.tag_name }}" modelmaker.vsix --clobber --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # Each marketplace only once its token is set (see docs/releasing.md),
+      # so a release can ship to one before the other exists. The .vsix
+      # already carries the pre-release flag (vsce package --pre-release
+      # above); both read it from there.
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != ''
+        run: npx --yes ovsx publish modelmaker.vsix
+
+      - name: Publish to the Visual Studio Marketplace
+        if: env.VSCE_PAT != ''
+        run: npx --yes @vscode/vsce publish --packagePath modelmaker.vsix
+
+      - name: Say which marketplaces were skipped
+        if: env.VSCE_PAT == '' || env.OVSX_PAT == ''
+        run: |
+          [ -n "$VSCE_PAT" ] || echo "::warning::VSCE_PAT isn't set: skipped the Visual Studio Marketplace"
+          [ -n "$OVSX_PAT" ] || echo "::warning::OVSX_PAT isn't set: skipped Open VSX"

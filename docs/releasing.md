@@ -9,6 +9,13 @@ is in [`vscode-extension-plan.md`](../vscode-extension-plan.md) §8.
 ## One-time setup (repository owner)
 
 The PyPI side (the `pypi` environment and trusted publishing) already exists.
+Every release attaches the `.vsix` to the GitHub release. Each marketplace is
+optional: the workflow publishes to one only once its token is set, and says
+in a warning which ones it skipped. Open VSX needs only a GitHub sign-in. The
+Visual Studio Marketplace token comes from Azure DevOps, and a new Azure
+DevOps organization has to be linked to an Azure subscription (pay-as-you-go
+is enough; Azure DevOps itself is free for small teams).
+
 The extension needs:
 
 1. **Marketplace publisher.** Sign in at
@@ -28,8 +35,11 @@ The extension needs:
    ```
 
 4. **GitHub environment.** Under *Settings → Environments*, add
-   `vscode-marketplace` with secrets `VSCE_PAT` and `OVSX_PAT`, plus yourself
-   as a required reviewer, so every extension publish waits for approval.
+   `vscode-marketplace` with secrets `VSCE_PAT` and/or `OVSX_PAT`, plus
+   yourself as a required reviewer, so every extension publish waits for
+   approval. After adding a token, **Re-run failed jobs** (or re-run the
+   `publish-vscode` job) on the last release's run publishes that release's
+   extension, with no new release.
 
 ## Each release
 
@@ -37,9 +47,11 @@ The extension needs:
    `vscode/package.json`. In `vscode/`, `npm version X.Y.Z
    --no-git-tag-version` updates the lockfile too. Add a `vscode/CHANGELOG.md`
    entry. CI fails if the two versions differ.
-   - An **odd minor** (0.3, 0.5, …) goes to the Marketplace's pre-release
-     channel, and an even one to stable. The workflow picks the channel from
-     the version.
+   - The extension is published as **stable**. To publish one to the
+     Marketplace's pre-release channel instead, tick **Set as a
+     pre-release** when creating the GitHub release. PyPI gets the version
+     either way. A version can't move between channels later, so a fix for a
+     pre-release ships as a new version.
    - If the release changes the HTTP API in a way older clients can't
      handle, bump `API_COMPAT_LEVEL` in `modelmaker/api.py` and `API_COMPAT`
      in `vscode/src/backend.ts` together. Also raise the minimum version in
@@ -55,7 +67,8 @@ The extension needs:
    --install-extension modelmaker.vsix`).
 5. **Smoke test** in a clean profile:
    1. Run `code --profile release-check`, and in it install Model-Maker from
-      the Marketplace (switch to the pre-release version for an odd minor).
+      the Marketplace (switch to the pre-release version if the release was
+      one).
    2. Open an empty folder, create a virtual environment, and select it as
       the interpreter.
    3. Run `pip install quantology-modelmaker && modelmaker-demo .` in that
@@ -66,7 +79,21 @@ The extension needs:
    5. If Copilot is signed in, ask agent mode to "describe this pipeline"
       (it should call `#mmGraph`).
 
-## v0.3.0 release notes (draft)
+## v0.3.1 release notes (draft)
+
+> **Model-Maker 0.3.1**
+>
+> - **Run all** re-reads a data source whose settings changed since it was
+>   read: an edited param, a tagged column role, sample mode toggled.
+>   Before, it left the source stale, and the blocks after it failed with
+>   "input block is not green". A source whose settings are unchanged is
+>   still re-read only by **Refresh sources**. The streaming Run all does
+>   the same.
+> - The VS Code extension needs this version, and is now published as
+>   **stable**: install it from the Marketplace without opting in to
+>   pre-releases.
+
+## v0.3.0 release notes
 
 Paste the PyPI part into the GitHub release; the extension's own notes are in
 [`vscode/CHANGELOG.md`](../vscode/CHANGELOG.md).
@@ -125,7 +152,7 @@ Paste the PyPI part into the GitHub release; the extension's own notes are in
 > - Join offers polars' join strategies.
 >
 > **Execution.**
->
+
 > - Block code never runs in the API process. Runs happen in worker
 >   processes with a cleaned-up environment, and the result cache holds
 >   data only.

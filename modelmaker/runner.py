@@ -1444,17 +1444,13 @@ class Runner:
                     continue
                 block = plan.graph.blocks[bid]
                 if block.block_type == "input":
-                    # A source that's *never* been read blocks every downstream
-                    # block anyway (see _blocked_on_unread_input) -- reporting
-                    # the whole rest of the pipeline as permanently "blocked"
-                    # instead of just reading it isn't useful to anyone, so the
-                    # first read happens here automatically. A source that has
-                    # been read before but is merely stale (an edited param,
-                    # sample mode toggled, ...) is left alone: re-reading it is
-                    # a deliberate, sometimes expensive action (Refresh sources),
-                    # not something a plain Run all should decide to do on its
-                    # own once data has already been pulled in once.
-                    if self._st(bid).last_successful_key is None:
+                    # A source is read when it never has been, or when its own
+                    # settings changed since (an edited param, a column role
+                    # tagged, sample mode toggled, an upgraded block): left
+                    # stale, everything downstream would fail on it. A source
+                    # that's current isn't re-read just in case its data
+                    # changed -- that's what Refresh sources is for.
+                    if self._st(bid).last_successful_key is None or not self._is_current(bid, plan):
                         self.run_block(bid, plan)
                     continue
                 if self._blocked_on_unread_input(bid, plan):
@@ -1472,10 +1468,10 @@ class Runner:
 
     def run_all(self) -> dict[str, str]:
         """Topological order; skips blocks already current under this run's
-        pinned graph. Input blocks are read here too, but only the first
-        time -- an input block that's already been read at least once stays
-        untouched by Run all, however stale; re-reading it is what Refresh
-        sources is for (see refresh()/refresh_all())."""
+        pinned graph. Input blocks are read here too: the first time, and
+        again when their settings changed since (they're stale). A current
+        input block isn't re-read to pick up new data in its source -- that's
+        what Refresh sources is for (see refresh()/refresh_all())."""
         self._cancel_requested.clear()
         return self._sweep(self.pin(), force=False)
 
@@ -1490,12 +1486,13 @@ class Runner:
         never blocks, even if it's never been explicitly refreshed: forcing
         an eager refresh() first would defeat the point of streaming for
         exactly the large-source case it exists for. A non-fusable input
-        ancestor still needs a prior refresh(), same as an ordinary run."""
+        ancestor needs to have been read once (a stale one is re-read
+        first, see _streaming_to_run)."""
         preds = plan.graph.ancestors([block_id]) - {block_id}
         return any(
             plan.graph.blocks[p].block_type == "input"
             and self._fusable_spec(plan.graph.blocks[p]) is None
-            and not self._is_current(p, plan)
+            and self._st(p).last_successful_key is None
             for p in preds
         )
 
@@ -1513,9 +1510,11 @@ class Runner:
             if block.block_type == "input":
                 if self._is_current(bid, plan):
                     continue  # already cached and valid -- read from cache like any checkpoint
-                if self._fusable_spec(block) is None:
+                if self._fusable_spec(block) is None and self._st(bid).last_successful_key is None:
                     report[bid] = "blocked: upstream input block has never been read"
                     continue
+                # Fusable: a group head, scanned live. Read before but stale
+                # (its settings changed): re-read, as run_all does.
                 to_run.append(bid)
                 continue
             if self._streaming_blocked(bid, plan):
