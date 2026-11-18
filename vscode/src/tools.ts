@@ -253,7 +253,7 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       const refreshed: string[] = []
       if (!target) {
         // A data source whose settings changed since it was read (a param, a
-        // column role) is stale. Backends from 0.3.1 re-read it in Run all;
+        // column role) is stale. Backends from 0.3.2 re-read it in Run all;
         // re-reading it here first keeps a 0.3.0 backend from failing on it.
         for (const b of before.blocks.filter((b) => b.data_source && b.status === 'orange')) {
           await ctx.backend.json(`/blocks/${b.id}/refresh`, { method: 'POST' })

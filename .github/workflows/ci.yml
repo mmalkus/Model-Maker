@@ -114,6 +114,12 @@ jobs:
 
       - run: npm ci
         working-directory: vscode
+      # Model-Maker ships inside the extension (vscode/python/).
+      - name: Bundle the Python package into the extension
+        working-directory: vscode
+        run: |
+          python -m pip install build
+          python scripts/bundle-python.py
       - run: npm run lint
         working-directory: vscode
       - run: npm run typecheck
@@ -134,7 +140,9 @@ jobs:
           ws="$RUNNER_TEMP/workspace"
           mkdir -p "$ws/.vscode"
           (cd "$ws" && modelmaker-demo .)
-          printf '{"modelmaker.pythonPath": "%s", "modelmaker.autoInstall": "never"}\n' "$(command -v python)" > "$ws/.vscode/settings.json"
+          # This Python, with the Model-Maker bundled in the extension (the
+          # "interpreter" environment): it has the requirements already.
+          printf '{"modelmaker.python.environment": "interpreter", "modelmaker.pythonPath": "%s", "modelmaker.autoInstall": "never"}\n' "$(command -v python)" > "$ws/.vscode/settings.json"
           MODELMAKER_TEST_WORKSPACE="$ws" xvfb-run -a npm test
 
       - uses: actions/upload-artifact@v4

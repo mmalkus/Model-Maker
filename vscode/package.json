@@ -2,7 +2,7 @@
   "name": "modelmaker",
   "displayName": "Model-Maker",
   "description": "Visual pipeline builder for financial model development: the Model-Maker canvas inside VS Code, with GitHub Copilot as its AI.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "quantology",
   "license": "Apache-2.0",
   "icon": "icon.png",
@@ -97,8 +97,13 @@
         "category": "Model-Maker"
       },
       {
+        "command": "modelmaker.repairEnvironment",
+        "title": "Repair Python Environment",
+        "category": "Model-Maker"
+      },
+      {
         "command": "modelmaker.installPackage",
-        "title": "Install / Upgrade Python Package",
+        "title": "Install / Upgrade Python Package (installed-package mode)",
         "category": "Model-Maker"
       }
     ],
@@ -132,11 +137,31 @@
     "configuration": {
       "title": "Model-Maker",
       "properties": {
+        "modelmaker.python.environment": {
+          "type": "string",
+          "enum": [
+            "managed",
+            "interpreter",
+            "installedPackage"
+          ],
+          "default": "managed",
+          "enumDescriptions": [
+            "The extension's own Python environment, with Model-Maker shipped in the extension. Made once from any Python 3.11+; holds only Model-Maker's open-source requirements.",
+            "The interpreter you selected, with Model-Maker shipped in the extension. Missing requirements are offered for install into it.",
+            "The interpreter you selected, with the quantology-modelmaker package installed in it (e.g. pip install -e of a checkout, to develop Model-Maker)."
+          ],
+          "markdownDescription": "Which Python runs Model-Maker. The first two never install a Model-Maker package: it ships inside the extension, and only its open-source requirements (polars, scikit-learn, …) are installed, from the package index pip is configured for (PyPI or your company mirror)."
+        },
+        "modelmaker.basePython": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The Python (3.11 or newer) the managed environment is made from. Empty: `modelmaker.pythonPath`, then `py -3` (Windows), `python3` or `python` on PATH."
+        },
         "modelmaker.pythonPath": {
           "type": "string",
           "default": "",
           "scope": "resource",
-          "markdownDescription": "Python interpreter that runs the Model-Maker backend. Empty: the interpreter selected in the Python extension, else `python3`/`python` on PATH."
+          "markdownDescription": "The interpreter for the `interpreter` and `installedPackage` environments. Empty uses the Python extension's selection."
         },
         "modelmaker.autoInstall": {
           "type": "string",
@@ -146,12 +171,12 @@
             "never"
           ],
           "default": "ask",
-          "markdownDescription": "Whether to `pip install` the Model-Maker package into that interpreter when it's missing or too old."
+          "markdownDescription": "Whether to `pip install` what's missing into a selected interpreter: Model-Maker's requirements (`interpreter` environment) or the package itself (`installedPackage`). The managed environment always installs its requirements."
         },
         "modelmaker.packageSpec": {
           "type": "string",
-          "default": "quantology-modelmaker>=0.3.1",
-          "markdownDescription": "What `pip install -U` installs: a PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
+          "default": "quantology-modelmaker>=0.3.2",
+          "markdownDescription": "For the `installedPackage` environment: what `pip install -U` installs. A PyPI requirement (e.g. `quantology-modelmaker[anthropic]`), or a local path for development (e.g. `-e /path/to/Model-Maker`)."
         },
         "modelmaker.llm.useCopilot": {
           "type": "boolean",
@@ -640,7 +665,8 @@
     "test:unit": "node esbuild.mjs --tests && node --test \"out/unit/**/*.test.js\"",
     "test": "npm run build && node esbuild.mjs --tests && vscode-test",
     "package": "vsce package --no-dependencies",
-    "vscode:prepublish": "node esbuild.mjs --production"
+    "vscode:prepublish": "node esbuild.mjs --production",
+    "bundle-python": "python3 scripts/bundle-python.py"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

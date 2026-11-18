@@ -52,6 +52,9 @@ The extension needs:
      pre-release** when creating the GitHub release. PyPI gets the version
      either way. A version can't move between channels later, so a fix for a
      pre-release ships as a new version.
+   - The `.vsix` carries the package's own code (`vscode/python/`, made by
+     `vscode/scripts/bundle-python.py` in CI from the same commit), so the
+     extension never depends on the PyPI upload.
    - If the release changes the HTTP API in a way older clients can't
      handle, bump `API_COMPAT_LEVEL` in `modelmaker/api.py` and `API_COMPAT`
      in `vscode/src/backend.ts` together. Also raise the minimum version in
@@ -79,19 +82,30 @@ The extension needs:
    5. If Copilot is signed in, ask agent mode to "describe this pipeline"
       (it should call `#mmGraph`).
 
-## v0.3.1 release notes (draft)
+## v0.3.2 release notes (draft)
 
-> **Model-Maker 0.3.1**
+0.3.1 was never released: everything prepared for it ships here.
+
+> **Model-Maker 0.3.2**
 >
-> - **Run all** re-reads a data source whose settings changed since it was
->   read: an edited param, a tagged column role, sample mode toggled.
->   Before, it left the source stale, and the blocks after it failed with
->   "input block is not green". A source whose settings are unchanged is
->   still re-read only by **Refresh sources**. The streaming Run all does
->   the same.
-> - The VS Code extension needs this version, and is now published as
->   **stable**: install it from the Marketplace without opting in to
->   pre-releases.
+> **VS Code: nothing to install but Python.** Model-Maker now ships inside
+> the extension, which runs it in a Python environment of its own. That
+> environment is made from any Python 3.11+ on the machine, and holds only
+> Model-Maker's open-source requirements (polars, scikit-learn, scipy,
+> numpy, matplotlib, fastapi and a few more), installed from PyPI or the
+> company mirror pip is configured for. No `quantology-modelmaker` package
+> is installed, and other Python environments aren't touched. The setting
+> `modelmaker.python.environment` can switch to your own interpreter
+> instead.
+>
+> **The extension is now stable.** Install it from the Marketplace without
+> opting in to pre-releases.
+>
+> **Run all re-reads a data source whose settings changed** since it was
+> read: an edited param, a tagged column role, sample mode toggled. Before,
+> it left the source stale, and the blocks after it failed with "input block
+> is not green". A source whose settings are unchanged is still re-read only
+> by **Refresh sources**. The streaming Run all does the same.
 
 ## v0.3.0 release notes
 
