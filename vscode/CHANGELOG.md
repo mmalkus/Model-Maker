@@ -3,7 +3,7 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
-## Unreleased
+## 0.3.4
 
 - **Claude Code finds the open canvas again.** When VS Code started, the
   Python extension's interpreter report restarted Model-Maker's backend
