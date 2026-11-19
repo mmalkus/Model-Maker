@@ -34,12 +34,21 @@ The extension needs:
    npx ovsx create-namespace quantology -p <open-vsx-token>
    ```
 
+   Because `quantology` is also a Visual Studio Marketplace publisher, Open
+   VSX keeps published versions inactive (not listed or installable) until
+   the namespace's ownership is verified. Use **Claim Ownership** on the
+   extension's page in your Open VSX settings, which opens an issue on
+   `EclipseFdn/open-vsx.org`. Versions published before the approval become
+   active once it's granted, with no new upload.
+
 4. **GitHub environment.** Under *Settings → Environments*, add
    `vscode-marketplace` with secrets `VSCE_PAT` and/or `OVSX_PAT`, plus
    yourself as a required reviewer, so every extension publish waits for
    approval. After adding a token, **Re-run failed jobs** (or re-run the
    `publish-vscode` job) on the last release's run publishes that release's
-   extension, with no new release.
+   extension, with no new release. Both publish steps pass
+   `--skip-duplicate`, so a marketplace that already has the version is
+   left alone instead of failing the job.
 
 ## Each release
 
