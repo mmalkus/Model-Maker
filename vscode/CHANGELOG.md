@@ -3,7 +3,7 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
-## Unreleased
+## 0.3.5
 
 - **Cursor and Windsurf.** **Model-Maker: Set Up AI Agent Tools** registers
   the Model-Maker tools (`modelmaker-mcp`) with Cursor's or Windsurf's agent,
