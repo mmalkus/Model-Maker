@@ -280,12 +280,6 @@ CLAUDE_CLI_KNOWN_MODELS = [
 # ---- schemas -----------------------------------------------------------
 
 
-class PortSpecOut(BaseModel):
-    name: str
-    type: str
-    required: bool = True
-
-
 class BlockCreate(BaseModel):
     # A built-in's id; ignored when `library` is given.
     category: str = ""

@@ -254,12 +254,6 @@ class ModelMakerClient:
         body = {"active_provider": active_provider, "include_reference": include_reference, "settings": settings}
         return await self._put("/api/llm/settings", json=body)
 
-    async def llm_models(self, provider: str, base_url: str | None = None) -> dict[str, list[str]]:
-        params = {"provider": provider}
-        if base_url is not None:
-            params["base_url"] = base_url
-        return await self._get("/api/llm/models", params=params)
-
     async def draft(self, block_id: str, instruction: str, provider: str | None = None) -> dict[str, Any]:
         return await self._post(f"/api/blocks/{block_id}/draft", json={"instruction": instruction, "provider": provider})
 

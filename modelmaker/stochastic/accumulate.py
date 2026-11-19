@@ -68,24 +68,6 @@ def running_estimate(losses_in_arrival_order: np.ndarray, alpha: float, n_checkp
     return out
 
 
-def quantile_standard_error(losses_sorted: np.ndarray, alpha: float) -> float:
-    """Order-statistic-based SE of the quantile estimator: se ~ sqrt(alpha *
-    (1-alpha) / n) / f(quantile), with a local density estimate from a small
-    window of neighbouring order statistics (a lightweight Maritz-Jarrett-
-    style approximation, not the full weighted-order-statistic version)."""
-    n = len(losses_sorted)
-    if n < 3:
-        return 0.0
-    idx = max(1, min(n - 2, int(round(alpha * n))))
-    window = max(1, int(0.005 * n))
-    lo, hi = max(0, idx - window), min(n - 1, idx + window)
-    spread = losses_sorted[hi] - losses_sorted[lo]
-    if hi == lo or spread <= 0:
-        return 0.0
-    density = (hi - lo) / n / spread
-    return float(np.sqrt(alpha * (1 - alpha) / n) / density)
-
-
 def bootstrap_quantile_ci(
     losses: np.ndarray, alpha: float, rng: np.random.Generator, n_boot: int = 200, ci: float = 0.9
 ) -> tuple[float, float]:
