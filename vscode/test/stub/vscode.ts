@@ -41,8 +41,19 @@ export const lm = {
 // Settings the tests set, read through getConfiguration('modelmaker').
 export const settings = new Map<string, unknown>()
 
+export class RelativePattern {
+  constructor(
+    readonly base: unknown,
+    readonly pattern: string,
+  ) {}
+}
+
 export const workspace = {
   asRelativePath: (p: string) => p,
+  // For src/editor.ts: a watcher that never fires, and the canvas bundle's
+  // index.html.
+  createFileSystemWatcher: () => ({ onDidChange: () => new Disposable(), dispose: () => {} }),
+  fs: { readFile: async () => Buffer.from('<html><head></head><body></body></html>') },
   getConfiguration: (section?: string) => ({
     get: <T>(key: string, fallback?: T): T | undefined => {
       const full = section ? `${section}.${key}` : key
@@ -65,4 +76,7 @@ export const window = {
   showInformationMessage: async () => answers.shift(),
 }
 
-export const Uri = { file: (fsPath: string) => ({ fsPath }) }
+export const Uri = {
+  file: (fsPath: string) => ({ fsPath }),
+  joinPath: (base: { fsPath: string }, ...parts: string[]) => ({ fsPath: [base.fsPath, ...parts].join('/') }),
+}
