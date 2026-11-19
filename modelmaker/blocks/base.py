@@ -233,3 +233,18 @@ class BlockDefinition:
 # Built-in blocks by id, filled by block_library.load_builtin() at package
 # import (see modelmaker/__init__.py).
 BLOCK_REGISTRY: dict[str, BlockDefinition] = {}
+
+
+def streaming_note(d: BlockDefinition) -> str | None:
+    """How a block takes part in a streaming run, from its port flags (see
+    runner._fusable_block / _sink_block), or None when it doesn't: it then
+    holds its whole input and output tables in memory."""
+    df_inputs = [p for p in d.inputs if p.type == "dataframe"]
+    single_df_out = len(d.outputs) == 1 and d.outputs[0].type == "dataframe"
+    if d.block_type == "input" and single_df_out and d.outputs[0].lazy:
+        return "fuses: its lazy scan streams into the blocks after it"
+    if single_df_out and df_inputs and len(df_inputs) == len(d.inputs) and all(p.lazy for p in df_inputs):
+        return "fuses with neighbouring lazy blocks in a streaming run"
+    if d.block_type == "output" and not d.outputs and len(d.inputs) == 1 and d.inputs[0].lazy:
+        return "streams its input straight to its destination (a sink)"
+    return None

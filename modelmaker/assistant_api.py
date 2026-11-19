@@ -106,7 +106,7 @@ IO_TAGS = {
     "exports": ("Write results out to a file or the workspace's exports.", "output"),
 }
 IO_BLOCKS = {"input": ("read_csv", "read_parquet", "read_json", "read_excel", "read_sql", "read_dataset", "read_source", "demo_credit_data"),
-             "output": ("write_csv", "export")}
+             "output": ("write_csv", "write_parquet", "export")}
 
 
 def _io_blocks(kind: str) -> list[dict[str, Any]]:

@@ -10,7 +10,7 @@ from typing import Any
 
 from .. import capabilities
 from ..block_library import INJECTED_PARAMS, load_builtin
-from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
+from ..blocks.base import BLOCK_REGISTRY, BlockDefinition, streaming_note
 from ..signature import ParamSpec
 from ..util import ROLE_PARAM_NAMES, find_role_param
 
@@ -31,6 +31,7 @@ AGENT_DISALLOWED: dict[str, str] = {
     "read_dataset": "input blocks are prepared by the user, not the AI build",
     "read_source": "input blocks are prepared by the user, not the AI build",
     "write_csv": "writing files is left to the user",
+    "write_parquet": "writing files is left to the user",
     "export": "exporting results is left to the user",
     "iterate": "fan-out (iterate/collect) isn't supported in AI builds yet",
     "collect": "fan-out (iterate/collect) isn't supported in AI builds yet",
@@ -246,6 +247,9 @@ def catalogue_entry(spec: BlockDefinition, detail: bool = False) -> dict[str, An
     if detail:
         entry["doc"] = doc
         entry["params"] = block_params(spec)
+        # What it costs on large data: a block that doesn't stream holds its
+        # whole input and output tables in memory on the full run.
+        entry["streaming"] = streaming_note(spec) or "no: holds its whole input and output tables in memory"
     return entry
 
 

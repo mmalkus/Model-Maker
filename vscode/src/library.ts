@@ -73,6 +73,8 @@ export class LibraryPanels implements vscode.Disposable {
 
   private async render(panel: vscode.WebviewPanel, folder: string, view: unknown) {
     const backend = await this.backends.acquire(folder).finally(() => this.backends.release(folder))
+    // Restarted while this waited: the restart renders the new one.
+    if (backend.stopped) return
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'webview')
     panel.webview.options = {
       enableScripts: true,

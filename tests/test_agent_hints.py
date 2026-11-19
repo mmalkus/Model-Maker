@@ -360,3 +360,35 @@ def test_plan_stage_steps_and_the_next_stage_prompt_carry_hints(prepared):  # no
     b.options.decision_hints = False
     assert "  next: " not in prompts.built_so_far(b)
     assert "## Hints" not in prompts.build_system(b)
+
+
+def test_random_split_of_a_panel_is_flagged():
+    import polars as pl
+
+    from modelmaker.packet import ColumnMeta, ColumnRole, DataFramePacket
+
+    def packet(ids):
+        df = pl.DataFrame({"loan": ids, "y": [0, 1] * (len(ids) // 2)})
+        meta = {"loan": ColumnMeta(dtype="i64", role=ColumnRole.ID), "y": ColumnMeta(dtype="i64", role=ColumnRole.TARGET)}
+        return DataFramePacket(data=df, schema_meta=meta)
+
+    hints = decision_hints("train_test_split", {"train": packet([1, 1, 2, 2]), "test": packet([2, 3])})
+    assert any("1 loan values have rows in both train and test" in h for h in hints)
+    clean = decision_hints("train_test_split", {"train": packet([1, 1, 2, 2]), "test": packet([3, 4])})
+    assert not any("both train and test" in h for h in clean)
+    # An out-of-time split is meant to see the same ids again.
+    oot = decision_hints("time_split", {"development": packet([1, 2]), "out_of_time": packet([1, 2])})
+    assert not any("both train and test" in h for h in oot)
+
+
+def test_size_hints_scale_a_sample_up():
+    import polars as pl
+
+    from modelmaker.agent.hints import size_hints
+    from modelmaker.packet import DataFramePacket
+
+    out = {"out": DataFramePacket(data=pl.DataFrame({"x": list(range(1000))}), schema_meta={})}
+    assert size_hints(out, 1.0) == []
+    hints = size_hints(out, 50_000.0)  # a 1,000-row sample of 50M rows
+    assert len(hints) == 1 and "on the full data, about 50,000,000 rows" in hints[0]
+    assert "select only the columns" in hints[0]

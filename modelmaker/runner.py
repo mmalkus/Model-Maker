@@ -121,6 +121,12 @@ class RunPlan:
             # turning sample mode on and back off returns to those same keys.
             if self.sample_rows is not None:
                 basis["sample_rows"] = self.sample_rows
+                # Sampling by whole IDs (see sample_key) gives different
+                # rows than the first-N cut, so it's its own key; absent
+                # otherwise, leaving every other sampled key unchanged.
+                sample_by = sample_key(block)
+                if sample_by is not None:
+                    basis["sample_by"] = sample_by
             # Only for a block that reads datasets, so every other key stays
             # exactly what it was.
             if definition is not None:
@@ -217,6 +223,17 @@ def _dataset_names(graph: Graph) -> set[str]:
     return names
 
 
+def sample_key(block: BlockInstance) -> str | None:
+    """The column an input block's sample mode keeps whole IDs of: the one
+    tagged with the ID role on the block itself (a role tagged further
+    downstream isn't known when the source is read). None: sample mode
+    takes the first N rows instead."""
+    for name, role in (block.column_role_overrides or {}).items():
+        if role == ColumnRole.ID.value:
+            return name
+    return None
+
+
 def _reads_app_data(definition: BlockDefinition) -> bool:
     """Whether the engine resolves one of the block's params to a file
     before it runs (a `dataset` or `source` field; see Runner._resolve_data)."""
@@ -237,7 +254,10 @@ def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
     output whose every dataframe input is `lazy` (its function also works
     on a LazyFrame). Never a grouped block (grouping needs materialized
     data to partition), and never one that needs role/output_dir/block_id
-    auto-fill, which _run_fused_group doesn't resolve.
+    auto-fill, which _run_fused_group doesn't resolve. A block reading a
+    workspace dataset or source (read_dataset, read_source) does fuse:
+    _run_fused_group resolves its file in this process first, exactly as
+    run_block does (see Runner._resolve_data).
 
     A module-level function (not a Runner method) because it needs no
     instance state -- compiler.py's streaming-mode compile imports it
@@ -255,10 +275,6 @@ def _fusable_block(block: BlockInstance) -> BlockDefinition | None:
     elif not df_inputs or not all(p.lazy for p in df_inputs) or len(df_inputs) != len(definition.inputs):
         return None
     if _accepts(definition, "output_dir") or _accepts(definition, "block_id"):
-        return None
-    # Its dataset or source is resolved by run_block, which a fused group
-    # bypasses.
-    if _reads_app_data(definition):
         return None
     try:
         sig = definition.signature
@@ -810,7 +826,13 @@ class Runner:
             # worker applies it (see run_worker_entry): a LazyFrame output
             # gets .head(n) before it's collected, which polars pushes down
             # into the scan.
-            sample_rows = plan.sample_rows if block.block_type == "input" else None
+            # With an ID column tagged on the block, whole IDs are kept
+            # instead of the first N rows (see run_worker._sample_by_key),
+            # so a panel's histories stay complete.
+            sample_rows: int | dict[str, Any] | None = None
+            if block.block_type == "input" and plan.sample_rows is not None:
+                sample_by = sample_key(block)
+                sample_rows = plan.sample_rows if sample_by is None else {"rows": plan.sample_rows, "key": sample_by}
 
             group_col = block.group_by
             if group_col:
@@ -916,7 +938,7 @@ class Runner:
         block: BlockInstance,
         tasks: dict[Any, dict[str, Any]],
         max_workers: int,
-        sample_rows: int | None = None,
+        sample_rows: int | dict[str, Any] | None = None,
     ) -> dict[Any, Any]:
         """Run each of `tasks` (an arbitrary key -> call kwargs) in its own
         subprocess, up to `max_workers` at a time, and return {key: result}.
@@ -1334,6 +1356,18 @@ class Runner:
         if refused:
             _fail_group(f"CapabilityError: {'; '.join(refused)}")
             return
+        # A dataset or source member's name becomes the file it reads, here
+        # in this process (a source's query runs here too), only once the
+        # capability check has passed -- the same order run_block uses.
+        for step in steps:
+            block = plan.graph.blocks[step["id"]]
+            definition = block.resolve()
+            if not step["is_sink"] and _reads_app_data(definition):
+                try:
+                    self._resolve_data(block, definition, plan, step["kwargs"])
+                except Exception as e:  # noqa: BLE001 -- same contract as run_block
+                    _fail_group(f"{type(e).__name__}: {e}")
+                    return
         try:
             schemas, results = self._dispatch_fused_group(sorted(group.exits), steps)
         except Exception as e:  # noqa: BLE001 -- captured as block state, same contract as run_block
@@ -1541,7 +1575,7 @@ class Runner:
         consumer at all (a leaf the user actually wants materialized).
         Every other member is purely interior, reported as "fused".
 
-        A trailing sink-capable block (write_csv today -- see
+        A trailing sink-capable block (write_csv, write_parquet -- see
         _sink_block) is folded onto a group as a terminal
         write, replacing what would otherwise be its predecessor's
         collected exit, whenever that predecessor's *only* dataframe
