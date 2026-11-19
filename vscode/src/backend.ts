@@ -210,7 +210,11 @@ export class BackendManager implements vscode.Disposable {
     if (config.get<boolean>('llm.useCopilot', true)) {
       env.MODELMAKER_COPILOT_BASE_URL = await this.relay.url()
       env.MODELMAKER_COPILOT_TOKEN = this.relay.token
-      const hasCopilot = (await vscode.lm.selectChatModels({ vendor: 'copilot' }).then((m) => m.length > 0, () => false))
+      // Editors without Copilot (Cursor, Windsurf) may lack vscode.lm, or
+      // return no models: the backend keeps its own default provider.
+      const hasCopilot = await Promise.resolve()
+        .then(() => vscode.lm.selectChatModels({ vendor: 'copilot' }))
+        .then((m) => m.length > 0, () => false)
       if (hasCopilot && !env.MODELMAKER_LLM_PROVIDER) env.MODELMAKER_LLM_PROVIDER = 'copilot'
     }
     Object.assign(env, config.get<Record<string, string>>('backend.extraEnv', {}))

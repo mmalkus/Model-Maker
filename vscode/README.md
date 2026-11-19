@@ -124,6 +124,23 @@ token, readable by you only). Turn this off with `modelmaker.mcp.discovery`.
 The same server works with the browser app: `modelmaker-mcp --url
 http://127.0.0.1:8001`.
 
+## Cursor and Windsurf
+
+The extension installs from Open VSX in Cursor, Windsurf and other VS
+Code-compatible editors. Copilot isn't there, so:
+
+- **Canvas AI** (Create with AI, Fix with AI) uses a provider from the
+  canvas's Settings: an Anthropic or OpenAI key, a gateway, or the Claude
+  Code CLI.
+- **The editor's agent** gets the Model-Maker tools through `modelmaker-mcp`.
+  Run **Model-Maker: Set Up AI Agent Tools (Cursor, Windsurf)** and pick the
+  editor: it adds a `modelmaker` server to `~/.cursor/mcp.json` (or the
+  workspace's `.cursor/mcp.json`), or to Windsurf's
+  `~/.codeium/windsurf/mcp_config.json`, leaving the other servers there
+  alone. Then switch it on in Cursor Settings → MCP, or refresh Cascade's
+  MCP servers panel. When the agent opens or creates a project, the canvas
+  opens in that editor.
+
 ## Commands
 
 | Command | |
@@ -131,6 +148,7 @@ http://127.0.0.1:8001`.
 | Model-Maker: Open Project… | Open a project folder's canvas |
 | Model-Maker: New Project… | Create a project folder (model.json, files/, git) |
 | Model-Maker: Set Up Claude Code | Register the Model-Maker tools with Claude Code (all projects, or this workspace) |
+| Model-Maker: Set Up AI Agent Tools (Cursor, Windsurf) | Register the Model-Maker tools with Cursor's or Windsurf's agent (MCP) |
 | Model-Maker: Open Block Library | The block library, in a tab beside the canvas |
 | Model-Maker: Save Project | Save the active canvas (Ctrl/Cmd+S) |
 | Model-Maker: Restart Backend | Restart every running backend |

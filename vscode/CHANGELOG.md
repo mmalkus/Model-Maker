@@ -3,6 +3,15 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## Unreleased
+
+- **Cursor and Windsurf.** **Model-Maker: Set Up AI Agent Tools** registers
+  the Model-Maker tools (`modelmaker-mcp`) with Cursor's or Windsurf's agent,
+  which can't use the Copilot Chat tools. When an assistant opens or creates
+  a project, the canvas now opens in the editor it works for, not always in
+  VS Code. The extension also starts cleanly in editors without VS Code's
+  language model API; the canvas's AI then uses a provider from its Settings.
+
 ## 0.3.4
 
 - **Claude Code finds the open canvas again.** When VS Code started, the

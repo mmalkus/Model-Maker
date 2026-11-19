@@ -166,3 +166,24 @@ def test_an_assistant_writes_and_checks_a_library_block(backend, tmp_path, monke
     block = call(r, "add_block", category="monthly_panel", params={"path": str(csv)})
     assert call(r, "run")["statuses"] == {"green": 1}
     assert [c["name"] for c in call(r, "get_output_summary", block=block["id"])["columns"]] == ["loan_id", "period", "dpd"]
+
+
+def test_opens_canvases_in_the_editor_the_tools_run_for(backend, tmp_path, monkeypatch):
+    discovery = tmp_path / "vscode-backends"
+    monkeypatch.delenv("MODELMAKER_EDITOR_URI_SCHEME", raising=False)
+    assert mm.editor_uri_scheme(discovery) == "vscode"
+    discovery.mkdir()
+    (discovery / "1-1.json").write_text(json.dumps({"folder": "/a", "url": backend, "token": None, "active_at": 1, "uri_scheme": "cursor"}))
+    assert mm.editor_uri_scheme(discovery) == "cursor"
+    # The MCP setup's choice wins; a malformed one is ignored.
+    monkeypatch.setenv("MODELMAKER_EDITOR_URI_SCHEME", "windsurf")
+    assert mm.editor_uri_scheme(discovery) == "windsurf"
+    monkeypatch.setenv("MODELMAKER_EDITOR_URI_SCHEME", "not a scheme://")
+    assert mm.editor_uri_scheme(discovery) == "cursor"
+
+    launched = []
+    monkeypatch.setattr(mm, "_launch_uri", lambda uri, scheme="vscode": launched.append((uri, scheme)) or False)
+    r = mm.Resolver(None, None, discovery=discovery)
+    with pytest.raises(mm.ToolInputError, match="couldn't ask Cursor"):
+        mm._open_in_vscode(r, str(tmp_path / "elsewhere"), True)
+    assert launched and launched[0][0].startswith("cursor://quantology.modelmaker/open?") and launched[0][1] == "cursor"
