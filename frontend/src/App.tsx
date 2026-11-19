@@ -128,7 +128,7 @@ function AppInner() {
   const [build, setBuild] = useState<BuildOut | null>(null)
   // The AI build whose full report is open (see BuildReport.ReportModal).
   const [reportBuildId, setReportBuildId] = useState<string | null>(null)
-  const { fitView, screenToFlowPosition } = useReactFlow()
+  const { fitView, screenToFlowPosition, getNodesBounds, getZoom } = useReactFlow()
   const didInitialFit = useRef(false)
 
   const reloadLlmSettings = useCallback(() => {
@@ -571,6 +571,53 @@ function AppInner() {
   const buildLive = build != null && !BUILD_TERMINAL.has(build.phase)
   const canvasLocked = build != null && BUILD_LOCKING.has(build.phase)
 
+  // ---- Follow the AI: keep where it's working in view --------------------
+  // While a build holds the canvas, pan (and zoom out if it has to) so the
+  // blocks it's running -- or else the block it last touched plus the
+  // stage's still-to-build ghosts -- stay on screen. Only moves when they
+  // aren't already fully visible, so it doesn't jitter on every step.
+  // Panning or zooming by hand turns it off until "Follow AI" is clicked
+  // again (or the next build starts).
+  const [followAi, setFollowAi] = useState(true)
+  useEffect(() => setFollowAi(true), [buildId])
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const aiFocusIds = useMemo(() => {
+    if (!canvasLocked || !graph) return []
+    const visible = new Set(blockNodes.map((n) => n.id))
+    const running = Object.values(graph.blocks)
+      .filter((b) => b.status === 'running' && visible.has(b.id))
+      .map((b) => b.id)
+    if (running.length > 0) return running
+    const ids = ghostSteps.map((s) => `ghost_${s.ref}`)
+    if (aiActiveBlock && visible.has(aiActiveBlock)) ids.unshift(aiActiveBlock)
+    return ids
+  }, [canvasLocked, graph, blockNodes, ghostSteps, aiActiveBlock])
+  const aiFocusKey = aiFocusIds.join('|')
+  useEffect(() => {
+    if (!followAi || aiFocusIds.length === 0) return
+    // A frame later, so a block that just appeared has been measured.
+    const raf = requestAnimationFrame(() => {
+      const el = canvasRef.current
+      if (!el) return
+      const target = getNodesBounds(aiFocusIds)
+      if (target.width === 0 && target.height === 0) return
+      const r = el.getBoundingClientRect()
+      const margin = 40
+      const tl = screenToFlowPosition({ x: r.left + margin, y: r.top + margin })
+      const br = screenToFlowPosition({ x: r.right - margin, y: r.bottom - margin })
+      const inView =
+        target.x >= tl.x && target.y >= tl.y && target.x + target.width <= br.x && target.y + target.height <= br.y
+      if (inView) return
+      // Keep the user's zoom where the target fits at it; zoom out only as
+      // far as needed, and back in to a readable level if they were far out.
+      const maxZoom = Math.min(Math.max(getZoom(), 0.75), 1.25)
+      fitView({ nodes: aiFocusIds.map((id) => ({ id })), padding: 0.25, maxZoom, minZoom: 0.2, duration: 400 })
+    })
+    return () => cancelAnimationFrame(raf)
+    // aiFocusKey stands in for aiFocusIds: re-follow when the focus changes, not on every poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followAi, aiFocusKey, getNodesBounds, getZoom, fitView, screenToFlowPosition])
+
   const laneForY = useCallback(
     (y: number): string | null => {
       const hit = laneLayout.find((l) => y >= l.top && y < l.top + l.height)
@@ -791,7 +838,7 @@ function AppInner() {
           onAddLane={addLane}
           libraryVersion={libraryVersion}
         />
-        <div style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
+        <div ref={canvasRef} style={{ flex: 1 }} onDragOver={onDragOver} onDrop={onDrop}>
           <ReactFlow
             nodes={nodes}
             edges={graph ? [...toEdges(graph), ...(ghostEdges as unknown as DataWireEdgeType[])] : []}
@@ -809,6 +856,11 @@ function AppInner() {
             onPaneClick={() => {
               setSelectedId(null)
               setSelectedPort(null)
+            }}
+            onMoveStart={(event) => {
+              // event is null for programmatic moves (our own fitView); only a
+              // hand pan/zoom during a build hands the camera back to the user.
+              if (event && canvasLocked) setFollowAi(false)
             }}
             proOptions={{ hideAttribution: true }}
           >
@@ -831,6 +883,19 @@ function AppInner() {
                 >
                   AI is editing -- canvas read-only
                 </span>
+              )}
+              {canvasLocked && (
+                <button
+                  className={followAi ? 'brand-primary' : undefined}
+                  onClick={() => setFollowAi((f) => !f)}
+                  title={
+                    followAi
+                      ? 'The view follows what the AI is working on -- pan or zoom yourself, or click, to stop'
+                      : 'Keep what the AI is working on in view'
+                  }
+                >
+                  {followAi ? 'Following AI' : 'Follow AI'}
+                </button>
               )}
               {/* In VS Code the assistant beside the canvas (Copilot, Claude Code) builds. */}
               {has('ai_builder') && !lean && (
