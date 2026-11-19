@@ -2,7 +2,7 @@
   "name": "modelmaker",
   "displayName": "Model-Maker",
   "description": "Visual pipeline builder for financial model development: the Model-Maker canvas inside VS Code, with GitHub Copilot as its AI.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "quantology",
   "license": "Apache-2.0",
   "icon": "icon.png",
