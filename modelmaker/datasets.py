@@ -47,10 +47,6 @@ from .capabilities import DATASETS, EXPORTS, LOCAL, SOURCES
 if TYPE_CHECKING:
     import polars as pl
 
-# File formats a dataset can be in; the block reading it parses it.
-FORMATS = ("csv", "parquet", "json", "ndjson", "xlsx", "arrow")
-
-
 class DatasetError(LookupError):
     """A dataset or source can't be used: unknown, refused, failed."""
 

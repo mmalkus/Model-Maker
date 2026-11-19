@@ -39,13 +39,6 @@ def accepts_param(fn: SignatureLike, name: str) -> bool:
         return False
 
 
-def find_target_param(fn: SignatureLike) -> str | None:
-    """Which of TARGET_PARAM_NAMES this function's signature accepts, if
-    any -- the name to auto-fill (see packet.resolve_target_column) when the
-    block's own params don't already set it."""
-    return find_role_param(fn, ColumnRole.TARGET)
-
-
 def find_role_param(fn: SignatureLike, role: ColumnRole) -> str | None:
     """Which of ROLE_PARAM_NAMES[role] this function's signature accepts, if
     any -- the name to auto-fill (see packet.resolve_role_column) when the

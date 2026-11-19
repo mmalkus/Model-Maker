@@ -11,7 +11,6 @@ from typing import Any
 from .. import capabilities
 from ..block_library import INJECTED_PARAMS, load_builtin
 from ..blocks.base import BLOCK_REGISTRY, BlockDefinition
-from ..packet import ColumnRole
 from ..signature import ParamSpec
 from ..util import ROLE_PARAM_NAMES, find_role_param
 
@@ -286,10 +285,3 @@ def describe_block_type(category: str, include_library: bool = True) -> dict[str
     if spec is None:
         raise KeyError(f"unknown block category {category!r}")
     return catalogue_entry(spec, detail=True)
-
-
-ROLE_NOTES = {
-    ColumnRole.TARGET.value: "the modelling target; params named target/target_col auto-fill from it",
-    ColumnRole.PREDICTED.value: "set automatically on model outputs; params named score_col/predicted_col auto-fill from it",
-    ColumnRole.EXCLUDED.value: "must never be used as a model feature",
-}

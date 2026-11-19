@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
