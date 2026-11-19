@@ -145,7 +145,10 @@ then run `modelmaker-api` (or `modelmaker-tui`) from inside that folder.
 A few things worth knowing beyond the canvas itself.
 
 - **Sample mode** — the `Sample` toggle in the top bar caps *every* source at
-  the first N rows, so a whole pipeline stays fast to iterate on. It changes
+  N rows, so a whole pipeline stays fast to iterate on. A source with a
+  column tagged as the ID (on the input block itself) keeps whole IDs
+  instead of the first N rows: about N rows, every row of each kept ID, so
+  a panel's histories stay complete and the sample spans the whole file. It changes
   every block's cache key, so sampled and full results never mix; a banner
   keeps it obvious that what you're looking at isn't the full population.
   Switching back off needs the sources re-read.

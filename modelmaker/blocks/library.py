@@ -19,7 +19,21 @@ BLOCKS = {
         "block_type": "input",
         "inputs": [],
         "outputs": [{"name": "out", "lazy": True}],
-        "form": [{"key": "path", "label": "File path", "kind": "path", "options": [".csv"]}],
+        "form": [
+            {"key": "path", "label": "File path", "kind": "path", "options": [".csv", ".txt"]},
+            {"key": "separator", "label": "Separator (e.g. , or | or \\t)", "kind": "text", "placeholder": ","},
+            {"key": "has_header", "label": "First row is a header", "kind": "checkbox"},
+            {
+                "key": "column_names",
+                "label": "Column names (comma-separated; optional, replaces the header or column_1, column_2, ...)",
+                "kind": "text",
+            },
+            {
+                "key": "infer_schema_rows",
+                "label": "Rows to infer dtypes from (0 = read every column as text)",
+                "kind": "number",
+            },
+        ],
         "meta": {"inherit": "none"},
     },
     "demo_credit_data": {
@@ -249,6 +263,30 @@ BLOCKS = {
         ],
         "meta": {"inherit": "none"},
     },
+    "write_parquet": {
+        "capabilities": ["filesystem"],
+        "use_instead": "export",
+        "display_name": "Write Parquet",
+        "version": 1,
+        "block_type": "output",
+        "inputs": [{"name": "df", "lazy": True}],
+        "outputs": [],
+        "form": [
+            {
+                "key": "filename",
+                "label": "Output filename",
+                "kind": "text",
+                "placeholder": "output.parquet",
+            },
+            {
+                "key": "compression",
+                "label": "Compression",
+                "kind": "select",
+                "options": ["zstd", "snappy", "lz4", "gzip", "uncompressed"],
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
     "export": {
         "display_name": "Export",
         "version": 1,
@@ -340,15 +378,39 @@ BLOCKS = {
 }
 
 
-def read_csv(path: str) -> pl.LazyFrame:
-    """Reads a CSV file into a dataframe on the `out` port; no inputs.
-    `path` is the file path (relative to the working directory the engine
-    runs in). Column dtypes are inferred by polars; column roles start
-    untagged."""
+def read_csv(
+    path: str,
+    separator: str = ",",
+    has_header: bool = True,
+    column_names: str = "",
+    infer_schema_rows: int = 100,
+) -> pl.LazyFrame:
+    """Reads a delimited text file into a dataframe on the `out` port; no
+    inputs. `path` is the file path (relative to the working directory the
+    engine runs in). `separator` is one character ("," by default; "|" for
+    pipe-delimited files, "\\t" or "tab" for tab). `has_header` says whether
+    the first row holds column names; without one the columns are named
+    column_1, column_2, ... unless `column_names` (comma-separated) names
+    them -- given with a header, it replaces the header's names.
+    `infer_schema_rows` is how many rows polars reads to infer dtypes
+    (default 100); 0 reads every column as text, the safe choice for a
+    large file whose first rows aren't representative (cast afterwards).
+    Column roles start untagged."""
+    if separator in ("\\t", "tab", "TAB"):
+        separator = "\t"
+    if len(separator) != 1:
+        raise ValueError(f"separator must be a single character, got {separator!r}")
+    names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
     # A lazy scan: the engine collects it, pushing sample mode's row cap
     # down into the scan first, and a streaming run fuses it with whatever
     # follows (see the output port's "lazy" flag).
-    return pl.scan_csv(path)
+    return pl.scan_csv(
+        path,
+        separator=separator,
+        has_header=has_header,
+        new_columns=names,
+        infer_schema_length=infer_schema_rows,
+    )
 
 
 def demo_credit_data(n_rows: int = 5000, seed: int = 42) -> pl.DataFrame:
@@ -620,6 +682,28 @@ def write_csv(df: pl.DataFrame, filename: str, output_dir: str = ".") -> None:
     # .lazy() is a no-op on a LazyFrame: in a streaming run this block is
     # handed its upstream's uncollected plan and writes it straight to disk.
     df.lazy().sink_csv(os.path.join(output_dir, filename))
+
+
+PARQUET_COMPRESSIONS = ("zstd", "snappy", "lz4", "gzip", "uncompressed")
+
+
+def write_parquet(df: pl.DataFrame, filename: str, compression: str = "zstd", output_dir: str = ".") -> None:
+    """Writes the `df` input to a Parquet file; no output ports. `filename`
+    is the file name (e.g. "loans.parquet"), written inside `output_dir`,
+    which the engine injects as the run's output directory -- leave it
+    unset. `compression` is "zstd" (default), "snappy", "lz4", "gzip" or
+    "uncompressed". Overwrites any existing file of the same name. In a
+    streaming run (Run all (streaming)) the data goes straight from its
+    source to disk without ever being held in memory whole -- the way to
+    convert a large CSV to Parquet once, so later runs read only the
+    columns they use."""
+    import os
+
+    if compression not in PARQUET_COMPRESSIONS:
+        raise ValueError(f"compression must be one of {', '.join(PARQUET_COMPRESSIONS)}, got {compression!r}")
+    # As write_csv: .lazy() is a no-op on a LazyFrame, so a streaming run
+    # hands this its upstream's uncollected plan and it sinks to disk.
+    df.lazy().sink_parquet(os.path.join(output_dir, filename), compression=compression)
 
 
 EXPORT_FORMATS = ("csv", "parquet")

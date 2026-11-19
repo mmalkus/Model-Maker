@@ -65,6 +65,13 @@ stratify_col for a low default rate, derive_columns for ratios/flags and \
 one_hot_encode for categorical regressors rather than custom code.
 - For a PD target from a monthly account panel with no outcome flag yet, \
 use forward_default_flag (tags the flag as the target) rather than derive_columns.
+- Panel data (several rows per id, e.g. one per loan per month): derive \
+anything that looks ahead or back per id (forward_default_flag, lags) on the \
+complete monthly history first, then keep one observation per id per outcome \
+window (every 12th month for a 12-month default flag -- overlapping windows \
+repeat the same outcome and add rows, not information). Split it by time \
+(time_split): train_test_split splits rows, so one id lands in both train \
+and test.
 - For LGD: discount_recoveries -> compute_lgd (tags lgd as the target); for \
 CCF: compute_ccf -> lgd_regression -> compute_ead. Report compare_samples \
 (train/test/OOT side by side) and, for a rating scale, grade_backtest."""
@@ -83,7 +90,12 @@ expressions (select/filter/with_columns/group_by/join), select only the \
 columns it needs, and reduce early (to one row per account, snapshot date or \
 period); if it must collect a LazyFrame, do so only after reducing, with \
 .collect(engine="streaming"). Never .to_pandas(), .iter_rows(), \
-.map_elements() or Python loops over rows.
+.map_elements() or Python loops over rows. If the block is only polars \
+expressions, mark its dataframe inputs "lazy": true so it streams with its \
+neighbours. Per-id logic on a panel uses .over(id) or a group_by on the id \
+joined back -- never a sort-and-loop. Downcast wide numeric outputs \
+(Float64 -> Float32, Int64 -> Int32) and use Categorical for repeated text \
+when a table stays large.
 - Never hardcode an existing input column's name in the body: take it as a \
 `<descriptive>_col` str parameter defaulted to the real column name (or \
 `<descriptive>_cols` for a list) and use pl.col(param). New columns you \
@@ -192,8 +204,52 @@ If the goal needs something no registry block does, say so -- in \
 `questions` while planning, with ask_user while building. """
 
 
+LARGE_DATA = """## Large data
+The data is large ({size}). You build on a sample; the finished graph runs \
+on all of it, and there every block that doesn't stream (describe_block_type \
+shows `streaming`) holds its whole input and output tables in memory. Design \
+for that:
+- Reduce first, straight after the anchors, with blocks that stream \
+(select, filter, derive_columns, groupby_agg, join): only the columns the \
+model needs, only the population in scope, and down to the grain the model \
+needs (one row per id, per snapshot, or per cell) -- before any split, fit, \
+binning or custom block. A run_to result whose `next` says a table is large \
+is the signal to reduce before going on.
+- Don't fan a full-size table out to several branches; reduce once, then \
+branch.
+- If the model needs the full panel (e.g. a lifetime PD on loan-years) and \
+it would still be too big, say so and ask_user: the options are a sample of \
+ids (whole histories, weighted back if stratified), or aggregating to cells \
+of banded drivers with event and exposure counts.
+- In your report, say which block holds the largest table on the full data."""
+
+
+def _large_data_note(build: AgentBuild) -> str | None:
+    """The large-data section, for a build whose data is big enough to
+    run on a sample (see controller._maybe_sample), else None."""
+    from ..cache import memory_budget_bytes
+    from .controller import AUTO_SAMPLE_THRESHOLD_ROWS
+    from .hints import human_bytes
+
+    rows = build.full_rows
+    if not (rows and rows > AUTO_SAMPLE_THRESHOLD_ROWS) and not build.sample_rows_used:
+        return None
+    if rows:
+        size = f"{rows:,} rows at the anchors"
+        if build.full_bytes:
+            size += f", {human_bytes(build.full_bytes)} in memory"
+    else:
+        size = "its full size isn't known: the build started on the user's sample"
+    budget = memory_budget_bytes()
+    if budget:
+        size += f"; the app keeps up to {human_bytes(budget)} of results in memory"
+    return LARGE_DATA.format(size=size)
+
+
 def _common(build: AgentBuild) -> str:
-    return COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_new_blocks else CUSTOM_OFF)
+    common = COMMON.replace("{custom_rule}", CUSTOM_ON if build.options.allow_new_blocks else CUSTOM_OFF)
+    note = _large_data_note(build)
+    return common if note is None else f"{common}\n\n{note}"
 
 
 def _custom_contract(build: AgentBuild) -> list[str]:
@@ -292,6 +348,8 @@ def build_system(build: AgentBuild, compact: bool = False) -> str:
     outline)."""
     if build.sample_rows_used:
         sample_note = f"a {build.sample_rows_used:,}-row sample of the data"
+        if build.full_rows:
+            sample_note += f" (the full data has {build.full_rows:,} rows)"
     else:
         sample_note = "the full data"
     return "\n\n".join(

@@ -362,7 +362,9 @@ def test_build_on_a_sample_then_full_run(tmp_path, prepared):
     controller.approve()
     controller.join(180)
     assert b.phase == DONE, (b.phase, b.pending_question, b.error)
-    assert seen["run"]["outputs"]["out"]["row_count"] == 200
+    # The source tags an ID column, so sample mode keeps whole IDs: about
+    # 200 rows, not exactly (see run_worker._sample_by_key).
+    assert 150 <= seen["run"]["outputs"]["out"]["row_count"] <= 250
     assert session.runner.sample_rows is None  # restored
     assert b.results[0]["row_count"] == 5000  # key output refreshed on the full data
     assert session.runner.status(anchor) == "green"
@@ -1325,3 +1327,31 @@ def test_library_blocks_can_be_turned_off_for_a_build(prepared):
     from modelmaker.agent import prompts
 
     assert "loan_to_income" not in prompts.plan_system(b)
+
+
+def test_preflight_asks_for_the_id_when_building_on_a_sample(tmp_path):
+    session = ProjectSession(recovery_path=tmp_path / "r.json")
+    with session.edit():
+        load = session.add_block("read_csv", params={"path": str(DATA)})
+    assert session.runner.run_block(load.id) == "green"
+    controller = make_controller(session, {"plan": []})
+    b = start(controller, load.id, sample_rows=200)
+    assert b.phase == PREFLIGHT
+    warning = next(w for w in b.preflight["warnings"] if w["code"] == "sample_without_id")
+    assert warning["blocks"] == [load.id] and "complete histories" in warning["message"]
+    # The full size is known from before the sample.
+    assert b.full_rows == 5000 and b.full_bytes > 0
+    controller.stop()
+
+
+def test_large_data_section_only_for_large_data(prepared):
+    from modelmaker.agent import prompts
+
+    session, anchor = prepared
+    controller = make_controller(session, {"plan": []})
+    b = start(controller, anchor)
+    assert "## Large data" not in prompts.plan_system(b)
+    b.full_rows, b.full_bytes = 40_000_000, 12 * 1024**3
+    text = prompts.plan_system(b)
+    assert "## Large data" in text and "40,000,000 rows" in text and "12.0 GB" in text
+    controller.stop()

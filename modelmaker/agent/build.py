@@ -200,6 +200,14 @@ class AgentBuild:
         self.owned_lanes: set[str] = set()
         self.lane_map: dict[str, str] = {}  # plan lane key / name asked for -> lane id
         self.sample_rows_used: int | None = None
+        # The anchors' size on the full data (rows, estimated bytes) when
+        # known -- preflight reads it before the build turns sample mode on
+        # -- and how much bigger the full data is than the sample the build
+        # runs on (full rows / sampled rows at the anchors; 1.0 on the full
+        # data, None when unknown). For large-data guidance and size hints.
+        self.full_rows: int | None = None
+        self.full_bytes: int | None = None
+        self.sample_scale: float | None = 1.0
         self.changed_sample_mode = False  # the build turned sample mode on (and must turn it off)
         self.finished = False  # the model called finish
         # Set by a successful terminal tool (submit_plan, ask_user,
@@ -323,6 +331,9 @@ class AgentBuild:
             "owned_lanes": sorted(self.owned_lanes),
             "lane_map": self.lane_map,
             "sample_rows_used": self.sample_rows_used,
+            "full_rows": self.full_rows,
+            "full_bytes": self.full_bytes,
+            "sample_scale": self.sample_scale,
             "counters": self.counters,
             "usage": self.usage,
             "error": self.error,
@@ -380,6 +391,9 @@ class AgentBuild:
             done = [i for i, st in enumerate(b.stages) if st["status"] in (STAGE_DONE, STAGE_SKIPPED)]
             b.stage_index = min(max(done, default=-1) + 1, max(len(b.stages) - 1, 0))
         b.sample_rows_used = record.get("sample_rows_used")
+        b.full_rows = record.get("full_rows")
+        b.full_bytes = record.get("full_bytes")
+        b.sample_scale = record.get("sample_scale", 1.0 if not b.sample_rows_used else None)
         b.counters.update({k: v for k, v in (record.get("counters") or {}).items() if k in b.counters})
         b.usage.update(record.get("usage") or {})
         b._events = list(record.get("events") or [])

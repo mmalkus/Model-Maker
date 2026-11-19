@@ -36,6 +36,11 @@ MIN_EVENTS = 50  # defaults a sample needs for a stable validation
 SPLIT_RATE_GAP = 0.2  # relative event-rate gap between two samples
 MAX_NULL_SHARE = 0.0  # computed LGD/CCF nulls tolerated before a fit
 
+# Large data. A table past either size, on the full data, is worth reducing
+# before the next block that doesn't stream (it holds the whole table).
+LARGE_TABLE_ROWS = 10_000_000
+LARGE_TABLE_BYTES = 2 * 1024**3
+
 # Feature screens. fit_binning/iv_table IV bands (see binning._iv_band):
 # below USELESS_IV a feature carries no signal; at or above SUSPICIOUS_IV
 # it usually leaks the target.
@@ -106,6 +111,46 @@ def target_column(packet: Any) -> str | None:
     return next(
         (n for n, m in packet.schema_meta.items() if m.role == ColumnRole.TARGET and n in packet.data.columns), None
     )
+
+
+def id_column(packet: Any) -> str | None:
+    """The column tagged as the ID, when the packet has one."""
+    if not isinstance(packet, DataFramePacket):
+        return None
+    return next(
+        (n for n, m in packet.schema_meta.items() if m.role == ColumnRole.ID and n in packet.data.columns), None
+    )
+
+
+def human_bytes(n: float) -> str:
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
+        n /= 1024
+    return f"{n:,.1f} GB"
+
+
+def size_hints(outputs: dict[str, Any], scale: float | None) -> list[str]:
+    """Any block's dataframe outputs that are large on the full data.
+    `scale` turns a size seen on a sample into the full data's (full rows /
+    sampled rows at the source); 1 on the full data; None when the build
+    runs on a sample whose full size isn't known -- then only what's seen."""
+    hints = []
+    for port, packet in outputs.items():
+        if not isinstance(packet, DataFramePacket):
+            continue
+        rows, size = packet.data.height, packet.data.estimated_size()
+        k = scale or 1.0
+        if rows * k < LARGE_TABLE_ROWS and size * k < LARGE_TABLE_BYTES:
+            continue
+        where = "on the full data, about " if scale and scale > 1 else ""
+        hints.append(
+            f"{port} is {where}{rows * k:,.0f} rows, {human_bytes(size * k)} in memory -- every block after it that "
+            "doesn't stream (describe_block_type: streaming) holds that whole table. Reduce it next with "
+            "streaming blocks: select only the columns the model needs, filter to the population, and "
+            "group_by/join down to one row per id, snapshot or cell -- before splitting or fitting."
+        )
+    return hints
 
 
 def iv_rows(rows: list[dict[str, Any]], keep_monotonic: bool) -> list[str]:
