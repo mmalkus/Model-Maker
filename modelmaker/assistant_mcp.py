@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -289,11 +290,13 @@ def _open_in_vscode(r: Resolver, folder: str, create: bool) -> Any:
         if _same_folder(c["folder"], folder):
             r.pinned = c["folder"]
             return {"folder": c["folder"], **_graph(r.target())}
+    scheme = editor_uri_scheme(r.discovery)
+    editor = EDITOR_NAMES.get(scheme, "VS Code")
     query = urllib.parse.urlencode({"folder": folder, **({"create": "1"} if create else {})})
-    uri = f"vscode://{EXTENSION_ID}/open?{query}"
-    if not _launch_uri(uri):
+    uri = f"{scheme}://{EXTENSION_ID}/open?{query}"
+    if not _launch_uri(uri, scheme):
         raise ToolInputError(
-            f"couldn't ask VS Code to open {folder}. Ask the user to run 'Model-Maker: "
+            f"couldn't ask {editor} to open {folder}. Ask the user to run 'Model-Maker: "
             f"{'New Project' if create else 'Open Project'}' for it, then call open_project again."
         )
     deadline = time.monotonic() + OPEN_TIMEOUT_SECONDS
@@ -304,19 +307,35 @@ def _open_in_vscode(r: Resolver, folder: str, create: bool) -> Any:
                 return {"folder": c["folder"], **_graph(r.target())}
         time.sleep(1)
     raise ToolInputError(
-        f"VS Code didn't open the canvas for {folder} within {OPEN_TIMEOUT_SECONDS}s -- the user may need to confirm "
-        "it in VS Code, or open it with 'Model-Maker: Open Project'; then call open_project again."
+        f"{editor} didn't open the canvas for {folder} within {OPEN_TIMEOUT_SECONDS}s -- the user may need to confirm "
+        f"it in {editor}, or open it with 'Model-Maker: Open Project'; then call open_project again."
     )
 
 
-def _launch_uri(uri: str) -> bool:
-    """Hands a vscode:// URI to VS Code: its `code` CLI when on PATH, else the OS."""
-    code = shutil.which("code") or shutil.which("code-insiders")
+# URI scheme -> the editor's name and its command-line launcher. Any other
+# VS Code-compatible editor's scheme is also its CLI's name (cursor, windsurf).
+EDITOR_NAMES = {"vscode": "VS Code", "vscode-insiders": "VS Code Insiders", "cursor": "Cursor", "windsurf": "Windsurf"}
+EDITOR_CLIS = {"vscode": ("code",), "vscode-insiders": ("code-insiders",)}
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
+
+
+def editor_uri_scheme(directory: Path = DISCOVERY_DIR) -> str:
+    """The URI scheme of the editor to open canvases in: MODELMAKER_EDITOR_URI_SCHEME
+    (set by the extension's MCP setup in Cursor or Windsurf), else the editor of
+    the canvas used last, else VS Code's."""
+    candidates = [os.environ.get("MODELMAKER_EDITOR_URI_SCHEME", "")]
+    candidates += [str(c.get("uri_scheme", "")) for c in vscode_canvases(directory)[:1]]
+    return next((c for c in (c.strip().lower() for c in candidates) if _SCHEME.match(c)), "vscode")
+
+
+def _launch_uri(uri: str, scheme: str = "vscode") -> bool:
+    """Hands the URI to its editor: the editor's CLI when on PATH, else the OS."""
+    cli = next(filter(None, map(shutil.which, EDITOR_CLIS.get(scheme, (scheme,)))), None)
     try:
-        if code and not sys.platform.startswith("win"):
-            return subprocess.run([code, "--open-url", uri], timeout=30, capture_output=True).returncode == 0
+        if cli and not sys.platform.startswith("win"):
+            return subprocess.run([cli, "--open-url", uri], timeout=30, capture_output=True).returncode == 0
         if sys.platform.startswith("win"):
-            os.startfile(uri)  # type: ignore[attr-defined]  # noqa: S606 -- the OS routes vscode:// to VS Code
+            os.startfile(uri)  # type: ignore[attr-defined]  # noqa: S606 -- the OS routes the scheme to its editor
             return True
         opener = "open" if sys.platform == "darwin" else shutil.which("xdg-open")
         return bool(opener) and subprocess.run([opener, uri], timeout=30, capture_output=True).returncode == 0

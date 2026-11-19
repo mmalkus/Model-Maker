@@ -10,14 +10,14 @@ import { Discovery } from '../../src/discovery'
 test('publishes, touches and withdraws a canvas', () => {
   const dir = path.join(mkdtempSync(path.join(tmpdir(), 'mm-disc-')), 'vscode-backends')
   let enabled = true
-  const d = new Discovery(() => enabled, dir)
+  const d = new Discovery(() => enabled, dir, 'cursor')
 
   d.publish('/p/a', 'http://127.0.0.1:41001', 'tok-a', true)
   d.publish('/p/b', 'http://127.0.0.1:41002', 'tok-b', false)
   const files = readdirSync(dir)
   assert.equal(files.length, 2)
   const a = JSON.parse(readFileSync(path.join(dir, `${process.pid}-41001.json`), 'utf8'))
-  assert.deepEqual([a.folder, a.url, a.token], ['/p/a', 'http://127.0.0.1:41001', 'tok-a'])
+  assert.deepEqual([a.folder, a.url, a.token, a.uri_scheme], ['/p/a', 'http://127.0.0.1:41001', 'tok-a', 'cursor'])
   assert.ok(a.active_at > 0)
   if (process.platform !== 'win32') assert.equal(statSync(path.join(dir, files[0])).mode & 0o077, 0)
 

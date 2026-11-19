@@ -30,6 +30,9 @@ type ToolSpec<T> = {
 export type ProjectOpener = (folder: string, create: boolean) => Promise<string>
 
 export function registerTools(context: vscode.ExtensionContext, backends: BackendManager, editor: ModelEditorProvider, openProject?: ProjectOpener) {
+  // Only Copilot's agent mode uses these; an editor without vscode.lm's
+  // tools API (Cursor, Windsurf: their agents use modelmaker-mcp) skips them.
+  if (typeof vscode.lm?.registerTool !== 'function') return
   const register = <T>(name: string, spec: ToolSpec<T> & { folder?: (input: T) => Promise<string> }) =>
     context.subscriptions.push(
       vscode.lm.registerTool<T>(name, {

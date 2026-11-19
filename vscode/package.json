@@ -71,6 +71,11 @@
         "category": "Model-Maker"
       },
       {
+        "command": "modelmaker.setUpMcp",
+        "title": "Set Up AI Agent Tools (Cursor, Windsurf)",
+        "category": "Model-Maker"
+      },
+      {
         "command": "modelmaker.openCanvas",
         "title": "Open in Model-Maker Canvas",
         "category": "Model-Maker",
