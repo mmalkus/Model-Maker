@@ -169,11 +169,11 @@ jobs:
       # above); both read it from there.
       - name: Publish to Open VSX
         if: env.OVSX_PAT != ''
-        run: npx --yes ovsx publish modelmaker.vsix
+        run: npx --yes ovsx publish modelmaker.vsix --skip-duplicate
 
       - name: Publish to the Visual Studio Marketplace
         if: env.VSCE_PAT != ''
-        run: npx --yes @vscode/vsce publish --packagePath modelmaker.vsix
+        run: npx --yes @vscode/vsce publish --packagePath modelmaker.vsix --skip-duplicate
 
       - name: Say which marketplaces were skipped
         if: env.VSCE_PAT == '' || env.OVSX_PAT == ''
