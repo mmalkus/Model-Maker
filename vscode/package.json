@@ -24,6 +24,8 @@
     "Machine Learning"
   ],
   "keywords": [
+    "modelmaker",
+    "model maker",
     "model",
     "pipeline",
     "credit risk",
@@ -68,6 +70,11 @@
       {
         "command": "modelmaker.setUpClaudeCode",
         "title": "Set Up Claude Code",
+        "category": "Model-Maker"
+      },
+      {
+        "command": "modelmaker.setUpMcp",
+        "title": "Set Up AI Agent Tools (Cursor, Windsurf)",
         "category": "Model-Maker"
       },
       {

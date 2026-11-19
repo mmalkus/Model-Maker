@@ -11,7 +11,8 @@ import * as path from 'node:path'
 
 export const DISCOVERY_DIR = path.join(homedir(), '.modelmaker', 'vscode-backends')
 
-export type DiscoveryEntry = { folder: string; url: string; token: string; pid: number; active_at: number }
+// uri_scheme: the editor's (vscode, cursor, windsurf), for open_project's links.
+export type DiscoveryEntry = { folder: string; url: string; token: string; pid: number; active_at: number; uri_scheme: string }
 
 export class Discovery {
   // folder -> its file and what's in it
@@ -20,6 +21,7 @@ export class Discovery {
   constructor(
     private readonly enabled: () => boolean,
     private readonly dir = DISCOVERY_DIR,
+    private readonly uriScheme = 'vscode',
   ) {}
 
   /** Records (or, after a restart, replaces) a folder's backend. */
@@ -28,7 +30,7 @@ export class Discovery {
     const file = path.join(this.dir, `${process.pid}-${new URL(url).port}.json`)
     const previous = this.entries.get(folder)
     if (previous && previous.file !== file) rmSync(previous.file, { force: true })
-    this.write(folder, file, { folder, url, token, pid: process.pid, active_at: active ? Date.now() : (previous?.entry.active_at ?? 0) })
+    this.write(folder, file, { folder, url, token, pid: process.pid, active_at: active ? Date.now() : (previous?.entry.active_at ?? 0), uri_scheme: this.uriScheme })
   }
 
   /** The folder's canvas is the one in use now. */
