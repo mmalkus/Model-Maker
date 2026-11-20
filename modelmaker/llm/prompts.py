@@ -41,7 +41,13 @@ LARGE_DATA_RULES = (
     "a table can have tens of millions of rows and not fit in memory. An input block that reads a file "
     "returns a lazy scan (`pl.scan_csv(path)` / `pl.scan_parquet(path)`, never `pl.read_*`), takes the file "
     'from a `path` parameter (a "path" form field, with "capabilities": ["filesystem"]) and marks its output '
-    '"lazy": true; select only the columns needed and filter as early as possible. A block that reduces a big '
+    '"lazy": true; select only the columns needed and filter as early as possible. A large text source (CSV/TXT, '
+    "zipped or gzipped) is staged to Parquet once rather than re-parsed every run: point the user to the built-in "
+    "Stage CSV as Parquet block (stage_csv_parquet), which also unpacks .zip/.gz and skips the conversion while the "
+    "source's hash is unchanged; a custom input block that must read such a file itself converts it with "
+    "`pl.scan_csv(...).sink_parquet(...)` (unpacking a zip/gz member to a temporary file first -- never "
+    "`pl.read_csv` on a compressed file, which loads it whole), skips that when the Parquet is newer than the "
+    "source, and returns `pl.scan_parquet(...)`. A block that reduces a big "
     "table (to one row per account, per snapshot date or per period) does it in polars expressions; if it must "
     'collect, it collects only after selecting, filtering and aggregating, with `.collect(engine="streaming")`. '
     "Never `.to_pandas()`, `.iter_rows()`, `.map_elements()` or Python loops over rows. A block that is only "

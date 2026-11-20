@@ -265,7 +265,7 @@
         "name": "modelmaker_list_files",
         "toolReferenceName": "mmFiles",
         "displayName": "Model-Maker: List Data Files",
-        "modelDescription": "Lists a folder on the machine the backend runs on, to find data files for a read_csv/read_parquet/read_excel/read_json block's path param (use the path exactly as returned). Without a path: the project's folder. Also lists the workspace's datasets and sources when it offers them (for read_dataset/read_source blocks).",
+        "modelDescription": "Lists a folder on the machine the backend runs on, to find data files for a read_csv/stage_csv_parquet/read_parquet/read_excel/read_json block's path param (use the path exactly as returned). Without a path: the project's folder. Also lists the workspace's datasets and sources when it offers them (for read_dataset/read_source blocks).",
         "userDescription": "Find data files for the pipeline",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",

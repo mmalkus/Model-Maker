@@ -36,6 +36,42 @@ BLOCKS = {
         ],
         "meta": {"inherit": "none"},
     },
+    "stage_csv_parquet": {
+        "capabilities": ["filesystem"],
+        "use_instead": "read_dataset",
+        "display_name": "Stage CSV as Parquet",
+        "version": 1,
+        "block_type": "input",
+        "inputs": [],
+        "outputs": [{"name": "out", "lazy": True}],
+        "form": [
+            {"key": "path", "label": "File path (.csv/.txt, or zipped/gzipped)", "kind": "path", "options": [".csv", ".txt", ".zip", ".gz"]},
+            {"key": "separator", "label": "Separator (e.g. , or | or \\t)", "kind": "text", "placeholder": ","},
+            {"key": "has_header", "label": "First row is a header", "kind": "checkbox"},
+            {
+                "key": "column_names",
+                "label": "Column names (comma-separated; optional, replaces the header or column_1, column_2, ...)",
+                "kind": "text",
+            },
+            {
+                "key": "infer_schema_rows",
+                "label": "Rows to infer dtypes from (0 = read every column as text)",
+                "kind": "number",
+            },
+            {
+                "key": "compression",
+                "label": "Compression",
+                "kind": "select",
+                "options": ["zstd", "snappy", "lz4", "gzip", "uncompressed"],
+            },
+            {
+                "key": "parquet_dir",
+                "label": "Parquet folder (optional; default: <file name>_parquet next to the file)",
+                "kind": "text",
+            },
+        ],
+        "meta": {"inherit": "none"},
+    },
     "demo_credit_data": {
         "display_name": "Demo credit data (PD/LGD/CCF)",
         "version": 1,
@@ -411,6 +447,224 @@ def read_csv(
         new_columns=names,
         infer_schema_length=infer_schema_rows,
     )
+
+
+# Bumped when the staged files' layout changes, so older staged folders are
+# rebuilt rather than misread.
+_STAGE_FORMAT = 1
+_STAGE_MANIFEST = "_manifest.json"
+_STAGE_TEXT_EXTS = (".csv", ".txt", ".dat", ".psv", ".tsv")
+
+
+def stage_csv_parquet(
+    path: str,
+    separator: str = ",",
+    has_header: bool = True,
+    column_names: str = "",
+    infer_schema_rows: int = 10000,
+    compression: str = "zstd",
+    parquet_dir: str = "",
+) -> pl.LazyFrame:
+    """Converts a large delimited text file to Parquet once, then reads the
+    Parquet on the `out` port; no inputs. `path` is a .csv/.txt file, a
+    .gz of one, or a .zip holding one or more of them (each member becomes
+    its own Parquet part; a member is unpacked to a temporary file next to
+    the Parquet, converted with polars' streaming engine and deleted, so
+    neither the file nor the zip is ever held in memory). `separator`,
+    `has_header`, `column_names` and `infer_schema_rows` work as in Read
+    CSV; dtypes are inferred from the first part converted and every other
+    part is read with that schema, so all parts line up -- use 0 (all
+    text, cast afterwards) when early rows aren't representative, or when
+    codes with leading zeros (e.g. MMYYYY dates) must survive.
+    `compression` is the Parquet codec. The Parquet goes into
+    `parquet_dir` (default: a "<file name>_parquet" folder next to the
+    file) with a _manifest.json recording each part's source hash (the
+    zip's CRC-32 per member; SHA-256 for a plain or gzipped file, skipped
+    while its size and modification time are unchanged) and the read
+    options: a part is rebuilt only when its source or the options
+    changed, so later runs go straight to the Parquet."""
+    import os
+
+    if separator in ("\\t", "tab", "TAB"):
+        separator = "\t"
+    if len(separator) != 1:
+        raise ValueError(f"separator must be a single character, got {separator!r}")
+    if compression not in PARQUET_COMPRESSIONS:
+        raise ValueError(f"compression must be one of {', '.join(PARQUET_COMPRESSIONS)}, got {compression!r}")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"no file at {path!r}")
+    names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
+    options = {
+        "separator": separator,
+        "has_header": bool(has_header),
+        "column_names": names,
+        "infer_schema_rows": int(infer_schema_rows),
+        "compression": compression,
+    }
+    target = parquet_dir or _stage_default_dir(path)
+    os.makedirs(target, exist_ok=True)
+    manifest_path = os.path.join(target, _STAGE_MANIFEST)
+    manifest = _stage_read_manifest(manifest_path)
+    previous = set(manifest.get("parts", {}))  # every part on disk, for the clean-up at the end
+    if manifest.get("format") != _STAGE_FORMAT or manifest.get("options") != options:
+        manifest = {"format": _STAGE_FORMAT, "options": options, "parts": {}}
+    old_parts = manifest["parts"]
+    units = _stage_units(path, old_parts)
+    if not units:
+        raise ValueError(f"{path!r} holds no delimited text file to stage")
+
+    current = [
+        u["part"]
+        for u in units
+        if old_parts.get(u["part"], {}).get("hash") == u["hash"] and os.path.isfile(os.path.join(target, u["part"]))
+    ]
+    # Every part shares one schema: an up-to-date part's, else the first
+    # part built infers it.
+    schema = pl.read_parquet_schema(os.path.join(target, current[0])) if current else None
+    parts: dict[str, dict] = {}
+    for u in units:
+        entry = {k: u[k] for k in ("source", "hash", "size", "mtime_ns") if k in u}
+        if u["part"] in current:
+            parts[u["part"]] = entry
+            continue
+        out = os.path.join(target, u["part"])
+        _stage_build(path, u, out, options, schema)
+        if schema is None:
+            schema = pl.read_parquet_schema(out)
+        parts[u["part"]] = entry
+        # Saved after every part, so an interrupted run keeps what it did.
+        manifest["parts"] = {**{p: e for p, e in old_parts.items() if p in current}, **parts}
+        _stage_write_manifest(manifest_path, manifest)
+    for stale in previous - set(parts):
+        try:
+            os.remove(os.path.join(target, stale))
+        except OSError:
+            pass
+    manifest["parts"] = parts
+    _stage_write_manifest(manifest_path, manifest)
+    return pl.scan_parquet([os.path.join(target, u["part"]) for u in units])
+
+
+def _stage_default_dir(path: str) -> str:
+    import os
+
+    base = os.path.basename(path)
+    for ext in (".gz", ".zip", *_STAGE_TEXT_EXTS):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+    return os.path.join(os.path.dirname(os.path.abspath(path)), f"{base}_parquet")
+
+
+def _stage_part_name(name: str) -> str:
+    import re
+
+    stem = name
+    for ext in (".gz", *_STAGE_TEXT_EXTS):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem.replace("/", "__")).strip("_") + ".parquet"
+
+
+def _stage_units(path: str, old_parts: dict) -> list[dict]:
+    """The text files `path` holds, one per Parquet part, each with a hash
+    of its content: a zip member's CRC-32 and size from the zip's own
+    directory (no decompressing), else the file's SHA-256 -- reused from
+    the manifest while the file's size and mtime are unchanged."""
+    import hashlib
+    import os
+    import zipfile
+
+    if path.lower().endswith(".zip"):
+        with zipfile.ZipFile(path) as zf:
+            members = [i for i in zf.infolist() if not i.is_dir() and not i.filename.startswith("__MACOSX/")]
+            text = [i for i in members if i.filename.lower().endswith(_STAGE_TEXT_EXTS)]
+            return [
+                {
+                    "part": _stage_part_name(i.filename),
+                    "member": i.filename,
+                    "source": f"{os.path.basename(path)}:{i.filename}",
+                    "hash": f"crc32:{i.CRC:08x}:{i.file_size}",
+                }
+                for i in (text or members)
+            ]
+    st = os.stat(path)
+    part = _stage_part_name(os.path.basename(path))
+    old = old_parts.get(part, {})
+    if old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns and old.get("hash"):
+        digest = old["hash"]
+    else:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(16 * 1024 * 1024), b""):
+                h.update(chunk)
+        digest = f"sha256:{h.hexdigest()}"
+    return [
+        {"part": part, "source": os.path.basename(path), "hash": digest, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    ]
+
+
+def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None:
+    """Converts one unit to `out` with the streaming engine, via `out`.tmp
+    so a half-written part is never taken for a finished one. A zipped or
+    gzipped source is unpacked to a temporary file first (polars can't
+    scan a compressed stream lazily) and deleted afterwards."""
+    import gzip
+    import os
+    import shutil
+    import zipfile
+
+    src, unpacked = path, None
+    try:
+        if "member" in unit:
+            unpacked = out + ".csv.tmp"
+            with zipfile.ZipFile(path) as zf, zf.open(unit["member"]) as fin, open(unpacked, "wb") as fout:
+                shutil.copyfileobj(fin, fout, 16 * 1024 * 1024)
+            src = unpacked
+        elif path.lower().endswith(".gz"):
+            unpacked = out + ".csv.tmp"
+            with gzip.open(path, "rb") as fin, open(unpacked, "wb") as fout:
+                shutil.copyfileobj(fin, fout, 16 * 1024 * 1024)
+            src = unpacked
+        kwargs: dict = {"separator": options["separator"], "has_header": options["has_header"]}
+        if schema is not None:
+            kwargs["schema"] = schema
+        else:
+            kwargs["new_columns"] = options["column_names"]
+            kwargs["infer_schema_length"] = options["infer_schema_rows"]
+        try:
+            pl.scan_csv(src, **kwargs).sink_parquet(out + ".tmp", compression=options["compression"])
+        except pl.exceptions.PolarsError as e:
+            hint = (
+                " -- it is read with the schema of the first part; set infer_schema_rows to 0 to stage every column as text"
+                if schema is not None
+                else ""
+            )
+            raise ValueError(f"staging {unit['source']} failed: {e}{hint}") from e
+        os.replace(out + ".tmp", out)
+    finally:
+        for leftover in (unpacked, out + ".tmp"):
+            if leftover and os.path.exists(leftover):
+                os.remove(leftover)
+
+
+def _stage_read_manifest(manifest_path: str) -> dict:
+    import json
+
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and isinstance(data.get("parts"), dict) else {}
+
+
+def _stage_write_manifest(manifest_path: str, manifest: dict) -> None:
+    import json
+    import os
+
+    with open(manifest_path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    os.replace(manifest_path + ".tmp", manifest_path)
 
 
 def demo_credit_data(n_rows: int = 5000, seed: int = 42) -> pl.DataFrame:

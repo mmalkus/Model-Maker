@@ -221,6 +221,10 @@ branch.
 it would still be too big, say so and ask_user: the options are a sample of \
 ids (whole histories, weighted back if stratified), or aggregating to cells \
 of banded drivers with event and exposure counts.
+- If the data comes in through Read CSV (a text file re-parsed on every \
+run, the slowest way to read it), say in your report that the user should \
+replace it with Stage CSV as Parquet, which converts the file (zipped or \
+not) to Parquet once and reads only the columns used from then on.
 - In your report, say which block holds the largest table on the full data."""
 
 

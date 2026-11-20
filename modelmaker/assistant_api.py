@@ -105,7 +105,7 @@ IO_TAGS = {
     "data_sources": ("Read the data in: files, the workspace's datasets and sources, the demo data. Start here.", "input"),
     "exports": ("Write results out to a file or the workspace's exports.", "output"),
 }
-IO_BLOCKS = {"input": ("read_csv", "read_parquet", "read_json", "read_excel", "read_sql", "read_dataset", "read_source", "demo_credit_data"),
+IO_BLOCKS = {"input": ("read_csv", "stage_csv_parquet", "read_parquet", "read_json", "read_excel", "read_sql", "read_dataset", "read_source", "demo_credit_data"),
              "output": ("write_csv", "write_parquet", "export")}
 
 
