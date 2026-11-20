@@ -70,6 +70,9 @@ def _block_brief(bid: str) -> dict[str, Any]:
         out["error"] = st.last_error[-ERROR_CHARS:]
     if status == "orange":
         out["stale_reason"] = runner.stale_reason(bid)
+    if status == "running":
+        # How long its current dispatch has gone on (see Runner.running_elapsed).
+        out["running_seconds"] = runner.running_elapsed(bid)
     return out
 
 

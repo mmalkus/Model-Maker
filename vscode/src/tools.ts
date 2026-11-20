@@ -265,9 +265,13 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     edits: true,
     run: async (ctx, i, token) => {
       if (i.streaming && i.block) throw new Error('a streaming run runs the whole pipeline: leave out block')
+      const deadline = Date.now() + RUN_TIMEOUT_MS
+      // A run already going (the canvas's, or an earlier call's that timed
+      // out): queue behind it rather than fail with "already in progress".
+      await waitIdle(ctx, deadline, token)
       const before = await graph(ctx)
       const target = i.block ? findBlock(before, i.block).id : null
-      const deadline = Date.now() + RUN_TIMEOUT_MS
+      if (before.running) return stillRunning(before, target, "another run is still going, so this one hasn't started")
       const refreshed: string[] = []
       if (!target) {
         // A data source whose settings changed since it was read (a param, a
@@ -289,9 +293,22 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           await ctx.backend.json('/run/cancel', { method: 'POST' }).catch(() => {})
           throw new Error('cancelled -- the run was stopped')
         }
-        if (Date.now() > deadline) return { still_running: true, note: 'the run is still going; check the graph later', ...runOutcome(g, target) }
+        if (Date.now() > deadline) return stillRunning(g, target, 'the run is still going')
         await new Promise((r) => setTimeout(r, 1000))
       }
+    },
+  })
+
+  register<{ seconds?: number }>('modelmaker_wait_for_run', {
+    describe: () => 'Waiting for the run in progress',
+    edits: false,
+    run: async (ctx, i, token) => {
+      const asked = i.seconds == null ? RUN_TIMEOUT_MS / 1000 : Number(i.seconds)
+      const seconds = Math.min(Math.max(Number.isFinite(asked) ? asked : RUN_TIMEOUT_MS / 1000, 0), WAIT_MAX_SECONDS)
+      // Cancelling stops the waiting, not the run.
+      await waitIdle(ctx, Date.now() + seconds * 1000, token)
+      const g = await graph(ctx)
+      return g.running ? stillRunning(g, null, 'the run is still going') : withChecks(ctx, runOutcome(g, null), null)
     },
   })
 
@@ -303,6 +320,12 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       return source.length > SCRIPT_CHARS ? { source: source.slice(0, SCRIPT_CHARS), truncated: true } : { source }
     },
   })
+}
+
+const WAIT_MAX_SECONDS = 60 * 60
+
+function stillRunning(g: Graph, target: string | null, note: string): object {
+  return { still_running: true, note: `${note}; modelmaker_wait_for_run keeps waiting and returns the outcome`, ...runOutcome(g, target) }
 }
 
 async function waitIdle(ctx: Ctx, deadline: number, token: vscode.CancellationToken) {

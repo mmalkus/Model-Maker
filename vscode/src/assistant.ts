@@ -15,6 +15,7 @@ export type BlockBrief = {
   error?: string
   stale_reason?: string | null
   data_source?: boolean
+  running_seconds?: number | null
 }
 
 export type Graph = {
@@ -70,7 +71,13 @@ export function runOutcome(graph: Graph, target: string | null): object {
     statuses: counts,
     blocks: blocks
       .filter((b) => (target ? true : b.status !== 'green'))
-      .map((b) => ({ id: b.id, name: b.name, status: b.status, ...(b.error ? { error: b.error } : {}) })),
+      .map((b) => ({
+        id: b.id,
+        name: b.name,
+        status: b.status,
+        ...(b.error ? { error: b.error } : {}),
+        ...(b.running_seconds != null ? { running_seconds: b.running_seconds } : {}),
+      })),
   }
   // A cascade doesn't (re)read data sources -- like the AI builder, that's
   // left to the user's Run all / Refresh sources.
