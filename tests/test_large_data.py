@@ -359,3 +359,89 @@ def test_cache_memory_budget_from_the_environment(monkeypatch):
     monkeypatch.delenv("MODELMAKER_CACHE_MEMORY_MB")
     default = memory_budget_bytes()
     assert default is None or default >= 256 * 1024**2
+
+
+# ---- staging a folder or glob, a slim stage ------------------------------------
+
+
+def test_stage_a_folder_of_zips_with_only_some_columns(tmp_path):
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _zip(raw / "2016Q1.zip", {"2016Q1.csv": "1|012016|0|x\n2|012016|1|y\n"})
+    _zip(raw / "2016Q2.zip", {"2016Q2.csv": "3|042016|0|z\n"})
+    (raw / "notes.pdf").write_text("not data")
+    df = stage_csv_parquet(
+        str(raw), separator="|", has_header=False, column_names="id,period,dlq,junk", infer_schema_rows=0, columns="id, dlq"
+    ).collect()
+    assert df.columns == ["id", "dlq"] and df["id"].to_list() == ["1", "2", "3"]
+    staged = tmp_path / "raw_parquet"
+    assert set(_part_mtimes(staged)) == {"2016Q1.parquet", "2016Q2.parquet"}  # named like the zips, no prefix
+
+    # A glob, and a zip whose member is named differently: prefixed with the zip.
+    _zip(raw / "2016Q3.zip", {"perf.csv": "4|072016|0|w\n"})
+    out = stage_csv_parquet(str(raw / "2016Q*.zip"), separator="|", has_header=False, column_names="id,period,dlq,junk", infer_schema_rows=0)
+    assert out.collect().height == 4
+    assert "2016Q3__perf.parquet" in _part_mtimes(tmp_path / "raw" / "staged_parquet")
+
+
+def test_stage_later_parts_never_fail_on_columns_not_staged(tmp_path):
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    # `b` would infer as an integer from the first file and break on the
+    # second -- but it isn't staged, so it's never parsed as one.
+    (raw / "1.csv").write_text("a,b\n1,2\n")
+    (raw / "2.csv").write_text("a,b\n3,oops\n")
+    df = stage_csv_parquet(str(raw), columns="a").collect()
+    assert df.schema == {"a": pl.Int64} and df["a"].to_list() == [1, 3]
+
+
+# ---- the collect guard ------------------------------------------------------------
+
+
+def test_guarded_collect_matches_a_plain_collect(monkeypatch):
+    from modelmaker import run_worker
+
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "512")
+    lf = pl.LazyFrame({"a": range(2_500_000)}).with_columns(b=pl.col("a") % 7)
+    assert run_worker._collect_lazy(lf).equals(lf.collect())
+    empty = run_worker._collect_lazy(lf.filter(pl.col("a") < 0))
+    assert empty.height == 0 and empty.schema == lf.collect_schema()
+
+
+def test_guarded_collect_stops_an_output_too_big_for_memory(monkeypatch):
+    from modelmaker import run_worker
+
+    lf = pl.LazyFrame({"a": range(3_000_000)}).with_columns(b=pl.col("a").cast(pl.String))
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "5")
+    with pytest.raises(run_worker.OutputTooBig, match="too big to hold in memory"):
+        run_worker._collect_lazy(lf)
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "0")  # turned off
+    assert run_worker.collect_limit_bytes() is None
+    assert run_worker._collect_lazy(lf).height == 3_000_000
+
+
+def test_a_too_big_input_block_ends_red_not_in_a_crash(tmp_path, monkeypatch):
+    from modelmaker import run_worker
+
+    path = tmp_path / "big.parquet"
+    pl.DataFrame({"a": range(3_000_000)}).with_columns(b=pl.col("a").cast(pl.String)).write_parquet(path)
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "5")
+    graph = Graph(blocks={"r": make_block("r", "read_parquet", params={"path": str(path)})}, wires={})
+    runner = Runner(graph, CacheStore())
+    assert runner.refresh("r") == "red"
+    assert "too big to hold in memory" in runner.state["r"].last_error
+
+
+def test_run_outcome_points_an_out_of_memory_block_at_reducing():
+    from modelmaker.assistant_mcp import OUT_OF_MEMORY_NEXT, run_outcome
+
+    for error in (
+        "OutputTooBig: this block's output is too big to hold in memory: ...",
+        "RuntimeError: worker process exited unexpectedly (code 3221226505) -- likely out of memory or a crash",
+    ):
+        graph = {"blocks": [{"id": "b", "name": "B", "status": "red", "error": error}]}
+        assert run_outcome(graph, None)["next"] == OUT_OF_MEMORY_NEXT

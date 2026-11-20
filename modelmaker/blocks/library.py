@@ -45,7 +45,12 @@ BLOCKS = {
         "inputs": [],
         "outputs": [{"name": "out", "lazy": True}],
         "form": [
-            {"key": "path", "label": "File path (.csv/.txt, or zipped/gzipped)", "kind": "path", "options": [".csv", ".txt", ".zip", ".gz"]},
+            {
+                "key": "path",
+                "label": "File, folder or glob (.csv/.txt, or zipped/gzipped; a folder takes every such file in it)",
+                "kind": "path",
+                "options": [".csv", ".txt", ".zip", ".gz"],
+            },
             {"key": "separator", "label": "Separator (e.g. , or | or \\t)", "kind": "text", "placeholder": ","},
             {"key": "has_header", "label": "First row is a header", "kind": "checkbox"},
             {
@@ -59,6 +64,11 @@ BLOCKS = {
                 "kind": "number",
             },
             {
+                "key": "columns",
+                "label": "Columns to keep (comma-separated; optional, default all -- a slim stage of a wide file)",
+                "kind": "text",
+            },
+            {
                 "key": "compression",
                 "label": "Compression",
                 "kind": "select",
@@ -66,7 +76,7 @@ BLOCKS = {
             },
             {
                 "key": "parquet_dir",
-                "label": "Parquet folder (optional; default: <file name>_parquet next to the file)",
+                "label": "Parquet folder (optional; default: <file or folder name>_parquet next to it)",
                 "kind": "text",
             },
         ],
@@ -464,11 +474,16 @@ def stage_csv_parquet(
     infer_schema_rows: int = 10000,
     compression: str = "zstd",
     parquet_dir: str = "",
+    columns: str = "",
 ) -> pl.LazyFrame:
-    """Converts a large delimited text file to Parquet once, then reads the
-    Parquet on the `out` port; no inputs. `path` is a .csv/.txt file, a
-    .gz of one, or a .zip holding one or more of them (each member becomes
-    its own Parquet part). A zip member or gzipped file is decompressed
+    """Converts large delimited text files to Parquet once, then reads the
+    Parquet on the `out` port; no inputs. The way to bring a big CSV source
+    in -- never a staging script of your own. `path` is a .csv/.txt file,
+    a .gz of one, a .zip holding one or more of them, a folder (every such
+    file in it, e.g. a set of quarterly zips) or a glob ("data/*.zip");
+    each file, and each member of a zip, becomes its own Parquet part.
+    `columns` (comma-separated, after `column_names` naming) keeps only
+    those columns -- stage a slim table of a wide file. A zip member or gzipped file is decompressed
     straight from the archive in blocks of about 8 MB, each parsed and
     streamed into the Parquet: nothing is unpacked to disk and neither the
     file nor the archive is ever held in memory whole. `separator`,
@@ -492,9 +507,9 @@ def stage_csv_parquet(
         raise ValueError(f"separator must be a single character, got {separator!r}")
     if compression not in PARQUET_COMPRESSIONS:
         raise ValueError(f"compression must be one of {', '.join(PARQUET_COMPRESSIONS)}, got {compression!r}")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"no file at {path!r}")
+    files = _stage_files(path)
     names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
+    keep = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
     options = {
         "separator": separator,
         "has_header": bool(has_header),
@@ -502,6 +517,8 @@ def stage_csv_parquet(
         "infer_schema_rows": int(infer_schema_rows),
         "compression": compression,
     }
+    if keep:
+        options["columns"] = keep  # only when set, so stages made before it existed stay current
     target = parquet_dir or _stage_default_dir(path)
     os.makedirs(target, exist_ok=True)
     manifest_path = os.path.join(target, _STAGE_MANIFEST)
@@ -510,9 +527,11 @@ def stage_csv_parquet(
     if manifest.get("format") != _STAGE_FORMAT or manifest.get("options") != options:
         manifest = {"format": _STAGE_FORMAT, "options": options, "parts": {}}
     old_parts = manifest["parts"]
-    units = _stage_units(path, old_parts)
+    units = [u for file in files for u in _stage_units(file, old_parts, prefix=len(files) > 1)]
     if not units:
         raise ValueError(f"{path!r} holds no delimited text file to stage")
+    if len({u["part"] for u in units}) != len(units):
+        raise ValueError(f"two of the files in {path!r} would stage to the same part name -- stage them separately")
 
     current = [
         u["part"]
@@ -529,7 +548,7 @@ def stage_csv_parquet(
             parts[u["part"]] = entry
             continue
         out = os.path.join(target, u["part"])
-        _stage_build(path, u, out, options, schema)
+        _stage_build(u["file"], u, out, options, schema)
         if schema is None:
             schema = pl.read_parquet_schema(out)
         parts[u["part"]] = entry
@@ -546,9 +565,35 @@ def stage_csv_parquet(
     return pl.scan_parquet([os.path.join(target, u["part"]) for u in units])
 
 
+def _stage_files(path: str) -> list[str]:
+    """The files `path` names: itself, every stageable file in a folder,
+    or a glob's matches -- sorted, so parts keep a stable order."""
+    import glob
+    import os
+
+    exts = (".zip", ".gz", *_STAGE_TEXT_EXTS)
+    if os.path.isdir(path):
+        found = [os.path.join(path, n) for n in os.listdir(path) if n.lower().endswith(exts)]
+        files = sorted(f for f in found if os.path.isfile(f))
+        if not files:
+            raise FileNotFoundError(f"no .csv/.txt/.zip/.gz files in the folder {path!r}")
+        return files
+    if any(c in path for c in "*?["):
+        files = sorted(f for f in glob.glob(path) if os.path.isfile(f))
+        if not files:
+            raise FileNotFoundError(f"nothing matches {path!r}")
+        return files
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"no file at {path!r}")
+    return [path]
+
+
 def _stage_default_dir(path: str) -> str:
     import os
 
+    if any(c in path for c in "*?["):
+        return os.path.join(os.path.dirname(os.path.abspath(path)), "staged_parquet")
+    path = path.rstrip("/\\")
     base = os.path.basename(path)
     for ext in (".gz", ".zip", *_STAGE_TEXT_EXTS):
         if base.lower().endswith(ext):
@@ -566,22 +611,32 @@ def _stage_part_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", stem.replace("/", "__")).strip("_") + ".parquet"
 
 
-def _stage_units(path: str, old_parts: dict) -> list[dict]:
+def _stage_units(path: str, old_parts: dict, prefix: bool = False) -> list[dict]:
     """The text files `path` holds, one per Parquet part, each with a hash
     of its content: a zip member's CRC-32 and size from the zip's own
     directory (no decompressing), else the file's SHA-256 -- reused from
-    the manifest while the file's size and mtime are unchanged."""
+    the manifest while the file's size and mtime are unchanged. With
+    `prefix` (one of several files), a zip member's part is named after
+    the zip too, unless the member is named like it (2016Q1.zip holding
+    2016Q1.csv stages to 2016Q1.parquet)."""
     import hashlib
     import os
     import zipfile
 
     if path.lower().endswith(".zip"):
+        zip_stem = _stage_part_name(os.path.basename(path)[:-4])[: -len(".parquet")]
+
+        def _part(member: str) -> str:
+            name = _stage_part_name(member)
+            return name if not prefix or name == f"{zip_stem}.parquet" else f"{zip_stem}__{name}"
+
         with zipfile.ZipFile(path) as zf:
             members = [i for i in zf.infolist() if not i.is_dir() and not i.filename.startswith("__MACOSX/")]
             text = [i for i in members if i.filename.lower().endswith(_STAGE_TEXT_EXTS)]
             return [
                 {
-                    "part": _stage_part_name(i.filename),
+                    "part": _part(i.filename),
+                    "file": path,
                     "member": i.filename,
                     "source": f"{os.path.basename(path)}:{i.filename}",
                     "hash": f"crc32:{i.CRC:08x}:{i.file_size}",
@@ -600,7 +655,14 @@ def _stage_units(path: str, old_parts: dict) -> list[dict]:
                 h.update(chunk)
         digest = f"sha256:{h.hexdigest()}"
     return [
-        {"part": part, "source": os.path.basename(path), "hash": digest, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        {
+            "part": part,
+            "file": path,
+            "source": os.path.basename(path),
+            "hash": digest,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+        }
     ]
 
 
@@ -627,13 +689,9 @@ def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None
         if compressed:
             lf = _stage_compressed_frame(path, unit, options, schema)
         else:
-            kwargs: dict = {"separator": options["separator"], "has_header": options["has_header"]}
-            if schema is not None:
-                kwargs["schema"] = schema
-            else:
-                kwargs["new_columns"] = options["column_names"]
-                kwargs["infer_schema_length"] = options["infer_schema_rows"]
-            lf = pl.scan_csv(path, **kwargs)
+            lf = pl.scan_csv(path, **_stage_csv_kwargs(options, schema))
+        if options.get("columns"):
+            lf = lf.select(options["columns"])
         lf.sink_parquet(out + ".tmp", compression=options["compression"])
         os.replace(out + ".tmp", out)
     except pl.exceptions.PolarsError as e:
@@ -646,6 +704,24 @@ def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None
     finally:
         if os.path.exists(out + ".tmp"):
             os.remove(out + ".tmp")
+
+
+def _stage_csv_kwargs(options: dict, schema) -> dict:
+    """How a part's text is parsed. The first part infers dtypes; every
+    later one reads every column as text and casts the staged ones to the
+    first part's Parquet schema, so the parts line up -- and columns not
+    staged (see `columns`) never fail a parse."""
+    kwargs: dict = {
+        "separator": options["separator"],
+        "has_header": options["has_header"],
+        "new_columns": options["column_names"],
+    }
+    if schema is None:
+        kwargs["infer_schema_length"] = options["infer_schema_rows"]
+    else:
+        kwargs["infer_schema_length"] = 0
+        kwargs["schema_overrides"] = dict(schema)
+    return kwargs
 
 
 def _stage_open(path: str, unit: dict):
@@ -712,21 +788,18 @@ def _stage_compressed_frame(path: str, unit: dict, options: dict, schema) -> pl.
     def _parse(block: bytes, first: bool, schema) -> pl.DataFrame:
         has_header = first and options["has_header"]
         if schema is not None:
+            # This part's own full schema (see below): every block alike.
             return pl.read_csv(block, separator=options["separator"], has_header=has_header, schema=schema)
-        return pl.read_csv(
-            block,
-            separator=options["separator"],
-            has_header=has_header,
-            new_columns=options["column_names"],
-            infer_schema_length=options["infer_schema_rows"],
-        )
+        return pl.read_csv(block, **{**_stage_csv_kwargs(options, part_schema), "has_header": has_header})
 
-    if schema is None:
-        with _stage_open(path, unit) as stream:
-            first = next(_stage_text_blocks(stream, _STAGE_CHUNK_BYTES), None)
-        if first is None:
-            raise ValueError(f"{unit['source']} is empty")
-        schema = _parse(first, True, None).schema
+    # The schema this part is parsed with: its first block's, which follows
+    # the shared one (`part_schema`, the first part's) for staged columns.
+    part_schema = schema
+    with _stage_open(path, unit) as stream:
+        first = next(_stage_text_blocks(stream, _STAGE_CHUNK_BYTES), None)
+    if first is None:
+        raise ValueError(f"{unit['source']} is empty")
+    schema = _parse(first, True, None).schema
 
     def _source(with_columns, predicate, n_rows, batch_size):
         left = n_rows

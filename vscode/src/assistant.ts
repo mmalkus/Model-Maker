@@ -74,8 +74,20 @@ export function runOutcome(graph: Graph, target: string | null): object {
   }
   // A cascade doesn't (re)read data sources -- like the AI builder, that's
   // left to the user's Run all / Refresh sources.
-  if (blocks.some((b) => /input block .* is not green/.test(b.error ?? ''))) {
+  // A block whose output didn't fit in memory (the engine's collect guard
+  // stopped it, or its worker died): running it again fails the same way.
+  if (blocks.some((b) => /too big to hold in memory|likely out of memory/.test(b.error ?? ''))) {
+    out.next = OUT_OF_MEMORY_NEXT
+  } else if (blocks.some((b) => /input block .* is not green/.test(b.error ?? ''))) {
     out.next = 'an upstream data source has not been read yet: run the whole pipeline (modelmaker_run without a block), which reads it'
   }
   return out
 }
+
+// Same wording as assistant_mcp.OUT_OF_MEMORY_NEXT.
+const OUT_OF_MEMORY_NEXT =
+  "a block's output is too big for this machine's memory -- running it again fails the same way. Reduce it inside " +
+  'the block that produces it: select only the needed columns, filter to the population, sample whole ids or ' +
+  "aggregate to the model's grain before returning (for big zipped or plain CSVs, read them through Stage CSV as " +
+  'Parquet rather than a staging script of your own). Or mark the next block\'s dataframe input "lazy": true and ' +
+  'run with streaming, so the two run as one streamed query; turn on sample mode while building.'

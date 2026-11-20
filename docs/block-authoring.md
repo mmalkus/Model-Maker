@@ -214,11 +214,14 @@ habits keep big sources workable:
 Converting a large CSV source to Parquet once also helps a lot: a Parquet
 scan reads only the columns a query uses. **Stage CSV as Parquet** does
 it in one block: give it the file (`.csv`/`.txt`, a `.gz` of one, or a
-`.zip` holding one or more, as Fannie Mae's loan performance files come)
-with the same `separator`, `has_header`, `column_names` and
-`infer_schema_rows` as Read CSV. Each file (each zip member) becomes one
-Parquet part in a `<file name>_parquet` folder next to it (or
-`parquet_dir`). A zip member or gzipped file is read straight from the
+`.zip` holding one or more, as Fannie Mae's loan performance files come),
+a folder (every such file in it -- a set of quarterly zips, say) or a glob
+(`data/*.zip`), with the same `separator`, `has_header`, `column_names`
+and `infer_schema_rows` as Read CSV, and optionally `columns` to stage
+only the columns the model needs (a slim stage of a wide file). Each file
+(each zip member) becomes one Parquet part in a `<name>_parquet` folder
+next to the file or folder (or `parquet_dir`). Use it rather than a
+staging script of your own. A zip member or gzipped file is read straight from the
 archive: it is decompressed in blocks of about 8 MB of whole lines
 (never splitting a quoted field), each block parsed and streamed into
 the Parquet through polars' IO-source plugin (`register_io_source`,
@@ -233,6 +236,15 @@ otherwise goes straight to the Parquet. Every part is read with the
 schema of the first one staged, so they always line up; use
 `infer_schema_rows` 0 (all text) for codes with leading zeros such as
 MMYYYY dates, and cast afterwards.
+
+An input block over a big source should hand on only what the model
+needs -- select, filter, sample whole ids or aggregate before returning.
+A lazy output feeding a block whose input isn't `lazy` is collected
+whole, and the engine stops an output that grows past the memory the
+machine can spare (about 40% of what's free when the block starts;
+`MODELMAKER_COLLECT_LIMIT_MB` sets it, 0 turns the check off) with a
+*too big to hold in memory* error, rather than let the worker run the
+machine out of memory.
 
 Without it, **Read CSV → Write Parquet**, run
 with **Run all (streaming)**, does it without loading the file: Read CSV

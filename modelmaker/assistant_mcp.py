@@ -205,9 +205,27 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
     }
     # A cascade doesn't (re)read data sources -- like the AI builder, that's
     # left to a full run.
-    if any("is not green" in (b.get("error") or "") and "input block" in (b.get("error") or "") for b in blocks):
+    if any(_out_of_memory(b.get("error") or "") for b in blocks):
+        out["next"] = OUT_OF_MEMORY_NEXT
+    elif any("is not green" in (b.get("error") or "") and "input block" in (b.get("error") or "") for b in blocks):
         out["next"] = "an upstream data source has not been read yet: run the whole pipeline (run without a block), which reads it"
     return out
+
+
+# A block whose output didn't fit in memory -- stopped by the collect guard
+# (run_worker._collect_lazy) or a worker that died. Running it again fails
+# the same way; the source has to hand on less.
+OUT_OF_MEMORY_NEXT = (
+    "a block's output is too big for this machine's memory -- running it again fails the same way. Reduce it inside "
+    "the block that produces it: select only the needed columns, filter to the population, sample whole ids or "
+    "aggregate to the model's grain before returning (for big zipped or plain CSVs, read them through Stage CSV as "
+    "Parquet rather than a staging script of your own). Or mark the next block's dataframe input \"lazy\": true and "
+    "run with streaming, so the two run as one streamed query; turn on sample mode while building."
+)
+
+
+def _out_of_memory(error: str) -> bool:
+    return "too big to hold in memory" in error or "likely out of memory" in error
 
 
 # ---- the tools -------------------------------------------------------------------

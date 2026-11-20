@@ -411,7 +411,11 @@ class Worker:
 
     def crash_message(self) -> str:
         self.process.join(timeout=5)
-        return f"worker process exited unexpectedly (code {self.process.exitcode}) -- likely out of memory or a crash"
+        return (
+            f"worker process exited unexpectedly (code {self.process.exitcode}) -- likely out of memory or a crash. "
+            "If the block's output is a big table, reduce it inside the block (select, filter, sample or aggregate "
+            "before handing it on) or let the next block take it lazily and use Run all (streaming)"
+        )
 
     def stop(self) -> None:
         if self.process.is_alive():
