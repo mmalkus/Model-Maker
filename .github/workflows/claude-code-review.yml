@@ -53,11 +53,10 @@ jobs:
             4. Performance problems that matter in practice.
             Skip pure style nitpicks unless they hide a real problem.
 
-            Post each concrete finding as an inline comment on the relevant
-            line with `mcp__github_inline_comment__create_inline_comment`.
-            Then post one summary comment with `gh pr comment` that gives an
-            overall verdict and lists the findings by severity. If you find
-            nothing worth flagging, say so briefly in the summary.
+            Post exactly one comment, a summary, with `gh pr comment`: an
+            overall verdict, then the findings by severity, each with its
+            `path:line` and what to change. Do not post inline comments.
+            If you find nothing worth flagging, say so briefly.
           claude_args: |
             --model claude-opus-5-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
