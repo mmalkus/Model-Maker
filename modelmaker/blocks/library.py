@@ -233,7 +233,7 @@ BLOCKS = {
     },
     "train_test_split": {
         "display_name": "Train/test split",
-        "version": 1,
+        "version": 2,
         "block_type": "standard",
         "tags": ["sampling"],
         "inputs": [{"name": "df"}],
@@ -244,6 +244,11 @@ BLOCKS = {
             {
                 "key": "stratify_col",
                 "label": "Stratify by (optional, e.g. the default flag)",
+                "kind": "column",
+            },
+            {
+                "key": "group_col",
+                "label": "Keep each ID on one side (optional, e.g. loan_id for panel data)",
                 "kind": "column",
             },
         ],
@@ -995,7 +1000,11 @@ def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inn
 
 
 def train_test_split(
-    df: pl.DataFrame, test_size: float = 0.2, seed: int = 0, stratify_col: str | None = None
+    df: pl.DataFrame,
+    test_size: float = 0.2,
+    seed: int = 0,
+    stratify_col: str | None = None,
+    group_col: str | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Randomly splits `df`'s rows into two disjoint dataframes on the
     `train` and `test` ports; both keep every column and role. `test_size`
@@ -1007,7 +1016,16 @@ def train_test_split(
     values separately, so `train` and `test` get the same share of each --
     the usual choice for a low default rate, where a plain random split can
     leave the test sample with a noticeably different event rate. Left
-    unset, it's a simple random split."""
+    unset, it's a simple random split.
+
+    `group_col` (e.g. loan_id) keeps all of an ID's rows on one side: the
+    IDs are split, not the rows, so panel data (one row per loan per
+    snapshot) never has the same loan in train and test. `test_size` is
+    then the fraction of IDs. With `stratify_col` too, each ID is
+    stratified by its highest value of that column (for a 0/1 default
+    flag: whether the loan ever defaulted), or its first for text."""
+    if group_col:
+        return _split_by_group(df, test_size, seed, stratify_col, group_col)
     if stratify_col is None:
         shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
         n_test = int(len(shuffled) * test_size)
@@ -1021,6 +1039,31 @@ def train_test_split(
         tests.append(shuffled.head(n_test))
         trains.append(shuffled.tail(len(shuffled) - n_test))
     return pl.concat(trains), pl.concat(tests)
+
+
+def _split_by_group(
+    df: pl.DataFrame, test_size: float, seed: int, stratify_col: str | None, group_col: str
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """train_test_split with `group_col`: the IDs are shuffled and split
+    (within each stratum), then every row follows its ID."""
+    if group_col not in df.columns:
+        raise ValueError(f"group_col {group_col!r} is not a column of the input")
+    if stratify_col:
+        dtype = df.schema[stratify_col]
+        by_max = dtype.is_numeric() or dtype == pl.Boolean
+        stratum = (pl.col(stratify_col).max() if by_max else pl.col(stratify_col).first()).alias("_stratum")
+        ids = df.group_by(group_col).agg(stratum)
+    else:
+        ids = df.select(pl.col(group_col).unique()).with_columns(_stratum=pl.lit(0))
+    ids = ids.sort(group_col, nulls_last=True)  # a stable order for the seed
+    test_ids = []
+    for _, part in sorted(ids.group_by("_stratum", maintain_order=True), key=lambda kv: str(kv[0])):
+        shuffled = part.sample(fraction=1.0, shuffle=True, seed=seed)
+        test_ids.append(shuffled.head(int(len(shuffled) * test_size)).select(group_col))
+    chosen = pl.concat(test_ids) if test_ids else ids.select(group_col).clear()
+    test = df.join(chosen, on=group_col, how="semi", nulls_equal=True, maintain_order="left")
+    train = df.join(chosen, on=group_col, how="anti", nulls_equal=True, maintain_order="left")
+    return train, test
 
 
 def time_split(

@@ -50,6 +50,29 @@ def test_unstratified_split_is_unchanged():
     assert train.height == 80
 
 
+
+def test_group_split_keeps_each_id_on_one_side():
+    # A panel: 200 loans x 5 snapshots; 20 loans default in their last year (#99).
+    df = pl.DataFrame(
+        {
+            "loan_id": [i for i in range(200) for _ in range(5)],
+            "year": [y for _ in range(200) for y in range(5)],
+            "y": [int(i < 20 and y == 4) for i in range(200) for y in range(5)],
+        }
+    )
+    train, test = train_test_split(df, 0.25, seed=1, group_col="loan_id")
+    assert set(train["loan_id"]).isdisjoint(set(test["loan_id"]))
+    assert train.height + test.height == 1000 and test["loan_id"].n_unique() == 50
+    assert all(n == 5 for n in test.group_by("loan_id").len()["len"])  # whole histories
+    assert train_test_split(df, 0.25, seed=1, group_col="loan_id")[1].equals(test)  # the seed fixes it
+
+    # Stratified too: each loan by whether it ever defaulted.
+    train, test = train_test_split(df, 0.25, seed=1, stratify_col="y", group_col="loan_id")
+    assert set(train["loan_id"]).isdisjoint(set(test["loan_id"]))
+    assert test.filter(pl.col("y") == 1)["loan_id"].n_unique() == 5  # 25% of the 20 defaulters
+    with pytest.raises(ValueError, match="group_col 'nope'"):
+        train_test_split(df, group_col="nope")
+
 def test_derive_columns_adds_features_and_keeps_replaced_roles():
     df = pl.DataFrame({"bal": [50.0, 0.0], "lim": [100.0, 0.0], "age": [25, 40]})
     out = derive_columns(
