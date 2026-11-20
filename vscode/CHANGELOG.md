@@ -3,6 +3,23 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## 0.3.6
+
+- **The canvas follows what assistants do.** When Copilot, Claude Code or
+  the AI build adds blocks, the canvas zooms out to show them; when a run
+  starts, it brings the running blocks into view (zooming out only as
+  needed). Your own panning or zooming pauses this for a few seconds.
+- **The AI build ends with a model document**: purpose and data, each stage
+  in build order with the choices made and the numbers behind them,
+  deviations, results per sample, limitations and next checks. Outside
+  assistants are told to offer the same document as Markdown in the
+  project folder.
+- **Stage CSV as Parquet**, a new block: converts large text sources (a
+  .csv/.txt, a .gz of one, or the text members of a .zip) to Parquet once,
+  streaming straight from the archive in 8 MB blocks to keep memory low,
+  and rebuilds only the parts whose source changed. Block-writing guidance
+  now says to stage large text sources this way.
+
 ## 0.3.5
 
 - **Cursor and Windsurf.** **Model-Maker: Set Up AI Agent Tools** registers
