@@ -339,7 +339,16 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
           <NodeDisplay block={block} display={block.display} />
         )}
 
-        {block.status === 'orange' && block.stale_reason && (
+        {block.ran_fused && block.status !== 'red' && (
+          <div
+            title="Ran inside the last streaming run's fused query: it has no output of its own to show. Run it on its own to see one."
+            style={{ color: 'var(--mm-fg-3)', marginTop: 4 }}
+          >
+            ran fused in the streaming run
+          </div>
+        )}
+
+        {block.status === 'orange' && block.stale_reason && !block.ran_fused && (
           <div
             title={`Stale: ${block.stale_reason}`}
             style={{
@@ -356,7 +365,23 @@ export function BlockNode({ data, selected }: NodeProps<BlockFlowNode>) {
         )}
 
         {block.status === 'red' && block.last_error && (
-          <div style={{ color: '#ef4444', marginTop: 4, wordBreak: 'break-word' }}>{block.last_error}</div>
+          // Clamped so a long error stays inside the block instead of being
+          // drawn over the lane below (#95); the full text is in the
+          // tooltip and the inspector.
+          <div
+            title={block.last_error}
+            style={{
+              color: '#ef4444',
+              marginTop: 4,
+              wordBreak: 'break-word',
+              display: '-webkit-box',
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+            }}
+          >
+            {block.last_error}
+          </div>
         )}
       </div>
 

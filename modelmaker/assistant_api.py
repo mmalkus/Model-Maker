@@ -68,7 +68,11 @@ def _block_brief(bid: str) -> dict[str, Any]:
         out["column_roles"] = block.column_role_overrides
     if status == "red" and st and st.last_error:
         out["error"] = st.last_error[-ERROR_CHARS:]
-    if status == "orange":
+    if runner.ran_fused(bid):
+        # No output of its own to show, but it ran fine inside the last
+        # streaming query (#95).
+        out["ran_fused"] = True
+    elif status == "orange":
         out["stale_reason"] = runner.stale_reason(bid)
     return out
 

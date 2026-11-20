@@ -401,3 +401,27 @@ def test_write_csv_sink_does_not_apply_when_predecessor_has_another_consumer(tmp
     written = (tmp_path / "out.csv").read_text()
     rows = written.strip().splitlines()[1:]
     assert sorted(int(r.split(",")[0]) for r in rows) == list(range(6, 21))
+
+
+def test_a_fused_member_drops_its_old_error_when_the_streaming_run_succeeds(tmp_path, monkeypatch):
+    # A source stopped as too big on its own runs fine fused into the
+    # streaming query: its old red error must not linger on the canvas (#95).
+    from modelmaker import run_worker
+
+    csv_path = _write_csv(tmp_path)
+    runner = Runner(_chain_graph(csv_path), CacheStore())
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "0")
+    st = runner._st("b_read")
+    st.failed, st.last_error = True, "OutputTooBig: this block's output is too big to hold in memory: ..."
+    st.last_attempt_key = runner.compute_key("b_read")
+    assert runner.status("b_read") == "red" and not runner.ran_fused("b_read")
+
+    report = runner.run_all_streaming()
+    assert report["b_read"] == "fused" and report["b_agg"] == "green"
+    assert runner.status("b_read") == "grey" and runner.state["b_read"].last_error is None
+    assert all(runner.ran_fused(b) for b in ("b_read", "b_filter", "b_select"))
+    assert not runner.ran_fused("b_agg")  # an exit has its own cached output
+
+    # Changing the block makes that run no longer describe it.
+    runner.graph.blocks["b_filter"].params["expr"] = "a > 6"
+    assert not runner.ran_fused("b_filter")
