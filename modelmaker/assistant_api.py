@@ -64,6 +64,9 @@ def _block_brief(bid: str) -> dict[str, Any]:
         out["data_source"] = True
     if block.definition is not None:
         out["library_block"] = True
+        behind = _outdated(block)
+        if behind:
+            out["outdated"] = behind
     if block.column_role_overrides:
         out["column_roles"] = block.column_role_overrides
     if status == "red" and st and st.last_error:
@@ -71,6 +74,22 @@ def _block_brief(bid: str) -> dict[str, Any]:
     if status == "orange":
         out["stale_reason"] = runner.stale_reason(bid)
     return out
+
+
+def _outdated(block) -> dict[str, Any] | None:
+    """For a placed library block whose file has changed since it was
+    placed: the version it runs and the file's. A placed block keeps its
+    own copy of the code, so it runs the old one until it's updated
+    (update_block) -- issue #93."""
+    from .library_updates import status_for
+
+    try:
+        info = status_for(block) or {}
+    except Exception:  # noqa: BLE001 -- a broken library file never breaks the graph
+        return None
+    if not info.get("update_available"):
+        return None
+    return {"file": info.get("file"), "runs_version": info.get("version"), "library_version": info.get("latest_version")}
 
 
 @router.get("/graph")
@@ -389,6 +408,18 @@ def check_block_file(req: CheckFile) -> dict[str, Any]:
     missing = [d.id for d in f.parsed.definitions if d.id not in f.parsed.examples]
     if missing:
         out["missing_examples"] = missing
+    behind = [
+        {"block": bid, "name": b.name, **info}
+        for bid, b in _workspace().session.graph.blocks.items()
+        if b.definition is not None and (info := _outdated(b)) and info.get("file") == f.name
+    ]
+    if behind:
+        # Placed copies keep the code they were placed with (#93).
+        out["placed_copies_outdated"] = behind
     if ok:
-        out["next"] = "place a block with add_block, its id as the category"
+        out["next"] = (
+            "placed copies of this file's blocks still run their old code: update them with update_block (apply: true)"
+            if behind
+            else "place a block with add_block, its id as the category"
+        )
     return out

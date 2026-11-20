@@ -179,6 +179,18 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     run: (ctx, i) => ctx.backend.json('/assistant/check_block_file', { method: 'POST', body: { name: i.name } }),
   })
 
+  register<{ block: string; apply?: boolean }>('modelmaker_update_block', {
+    describe: (i) => (i.apply ? `Updating ${i.block} to its library file's version` : `Previewing the update of ${i.block}`),
+    edits: true,
+    run: async (ctx, i) => {
+      const block = findBlock(await graph(ctx), i.block)
+      if (!block.library_block) throw new ToolInputError(`${block.name} is a built-in block: only library blocks are updated this way`)
+      if (!i.apply) return ctx.backend.json(`/blocks/${block.id}/update_preview`)
+      const result = await ctx.backend.json<{ applied: unknown }>(`/blocks/${block.id}/update`, { method: 'POST' })
+      return { applied: result.applied, block: await ctx.backend.json(`/assistant/blocks/${block.id}`) }
+    },
+  })
+
   // ---- editing --------------------------------------------------------------
 
   register<{ name: string }>('modelmaker_add_lane', {

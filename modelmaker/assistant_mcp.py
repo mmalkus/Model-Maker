@@ -203,6 +203,12 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
         "statuses": counts,
         "blocks": [{"id": b["id"], "name": b["name"], "status": b["status"], **({"error": b["error"]} if b.get("error") else {})} for b in blocks],
     }
+    # A placed library block keeps the code it was placed with: say so, or a
+    # long run silently produces numbers from an old version (#93).
+    outdated = [{"id": b["id"], "name": b["name"], **b["outdated"]} for b in graph["blocks"] if b.get("outdated")]
+    if outdated:
+        out["outdated_blocks"] = outdated
+        out["outdated_note"] = OUTDATED_NOTE
     # A cascade doesn't (re)read data sources -- like the AI builder, that's
     # left to a full run.
     if any(_out_of_memory(b.get("error") or "") for b in blocks):
@@ -210,6 +216,12 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
     elif any("is not green" in (b.get("error") or "") and "input block" in (b.get("error") or "") for b in blocks):
         out["next"] = "an upstream data source has not been read yet: run the whole pipeline (run without a block), which reads it"
     return out
+
+
+OUTDATED_NOTE = (
+    "these placed library blocks ran an older version than their library file: update each with update_block "
+    "(apply: true), then run again"
+)
 
 
 # A block whose output didn't fit in memory -- stopped by the collect guard
@@ -494,6 +506,26 @@ def get_block_guide(r: Resolver, a: dict[str, Any]) -> Any:
 )
 def check_block_file(r: Resolver, a: dict[str, Any]) -> Any:
     return r.target().post("/assistant/check_block_file", {"name": a["name"]}, timeout=300)
+
+
+@tool(
+    "update_block",
+    "Moves a placed library block to its library file's current version. A placed block keeps a copy of the code it "
+    "was placed with, so after you edit its file it runs the old code until updated (get_graph marks it "
+    "\"outdated\"). Without apply, previews the change: the code diff and which params and wires carry over, are "
+    "renamed or are dropped. With apply: true, makes it (one undo step) and returns the block.",
+    {"block": BLOCK, "apply": {"type": "boolean", "description": "Make the update; leave out to preview it."}},
+    ["block"],
+)
+def update_block(r: Resolver, a: dict[str, Any]) -> Any:
+    t = r.target()
+    block = find_block(_graph(t), a["block"])
+    if not block.get("library_block"):
+        raise ToolInputError(f"{block['name']} is a built-in block: only library blocks are updated this way")
+    if not a.get("apply"):
+        return t.get(f"/blocks/{block['id']}/update_preview")
+    result = t.post(f"/blocks/{block['id']}/update")
+    return {"applied": result["applied"], "block": t.get(f"/assistant/blocks/{block['id']}")}
 
 
 @tool(

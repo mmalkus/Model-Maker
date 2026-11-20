@@ -15,6 +15,9 @@ export type BlockBrief = {
   error?: string
   stale_reason?: string | null
   data_source?: boolean
+  library_block?: boolean
+  // A placed library block whose file changed since: it still runs runs_version.
+  outdated?: { file: string; runs_version: number; library_version: number }
 }
 
 export type Graph = {
@@ -72,6 +75,13 @@ export function runOutcome(graph: Graph, target: string | null): object {
       .filter((b) => (target ? true : b.status !== 'green'))
       .map((b) => ({ id: b.id, name: b.name, status: b.status, ...(b.error ? { error: b.error } : {}) })),
   }
+  // A placed library block keeps the code it was placed with: say so, or a
+  // long run silently produces numbers from an old version (#93).
+  const outdated = graph.blocks.filter((b) => b.outdated).map((b) => ({ id: b.id, name: b.name, ...b.outdated }))
+  if (outdated.length) {
+    out.outdated_blocks = outdated
+    out.outdated_note = OUTDATED_NOTE
+  }
   // A cascade doesn't (re)read data sources -- like the AI builder, that's
   // left to the user's Run all / Refresh sources.
   // A block whose output didn't fit in memory (the engine's collect guard
@@ -83,6 +93,11 @@ export function runOutcome(graph: Graph, target: string | null): object {
   }
   return out
 }
+
+// Same wording as assistant_mcp.OUTDATED_NOTE.
+const OUTDATED_NOTE =
+  'these placed library blocks ran an older version than their library file: update each with update_block ' +
+  '(apply: true), then run again'
 
 // Same wording as assistant_mcp.OUT_OF_MEMORY_NEXT.
 const OUT_OF_MEMORY_NEXT =
