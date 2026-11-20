@@ -386,6 +386,66 @@ def test_stage_a_folder_of_zips_with_only_some_columns(tmp_path):
     assert "2016Q3__perf.parquet" in _part_mtimes(tmp_path / "raw" / "staged_parquet")
 
 
+
+def test_stage_picks_header_less_columns_by_position(tmp_path):
+    # A wide file without a header: name only the fields kept (#97).
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _zip(raw / "2016Q1.zip", {"2016Q1.csv": "a|1|012016|0|x|y\nb|2|012016|1|x|y\n"})
+    (raw / "2016Q2.csv").write_text("c|3|042016|0|x|y\n")
+    df = stage_csv_parquet(str(raw), separator="|", has_header=False, infer_schema_rows=0, columns="4:dlq, 2:loan_id").collect()
+    assert df.columns == ["loan_id", "dlq"] and df.rows() == [("1", "0"), ("2", "1"), ("3", "0")]
+    for bad, message in [
+        ("2:loan_id, period", "position:name"),
+        ("2:a, 2:b", "picked twice"),
+        ("0:a", "position:name"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            stage_csv_parquet(str(raw), separator="|", has_header=False, columns=bad)
+    with pytest.raises(ValueError, match="leave column_names empty"):
+        stage_csv_parquet(str(raw), separator="|", has_header=False, column_names="x,y", columns="1:a")
+
+
+def test_stage_builds_parts_side_by_side(tmp_path, monkeypatch):
+    # Several files stage at once (#97), with the same result as one by one.
+    import threading
+    import time
+
+    from modelmaker.blocks import library
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for q in range(1, 7):
+        _zip(raw / f"2016Q{q}.zip", {f"2016Q{q}.csv": "".join(f"{q}{i}|0{q}2016|{i % 2}\n" for i in range(50))})
+    real_build = library._stage_build
+    active = peak = 0
+    lock = threading.Lock()
+
+    def _counting_build(*a, **k):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.05)
+            return real_build(*a, **k)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(library, "_stage_build", _counting_build)
+    opts = dict(separator="|", has_header=False, column_names="id,period,dlq", infer_schema_rows=0)
+    parallel = library.stage_csv_parquet(str(raw), workers=3, **opts).collect()
+    assert peak == 3
+    serial = library.stage_csv_parquet(str(raw), workers=1, parquet_dir=str(tmp_path / "serial"), **opts).collect()
+    assert parallel.equals(serial) and parallel.height == 300
+    manifest = (raw.parent / "raw_parquet" / "_manifest.json").read_text()
+    assert all(f"2016Q{q}.parquet" in manifest for q in range(1, 7))
+    assert library._stage_worker_count(0, 1) == 1 and 1 <= library._stage_worker_count(0, 40) <= 4
+    assert library._stage_worker_count(8, 3) == 3
+
 def test_stage_later_parts_never_fail_on_columns_not_staged(tmp_path):
     from modelmaker.blocks.library import stage_csv_parquet
 

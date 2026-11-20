@@ -40,7 +40,7 @@ BLOCKS = {
         "capabilities": ["filesystem"],
         "use_instead": "read_dataset",
         "display_name": "Stage CSV as Parquet",
-        "version": 1,
+        "version": 2,
         "block_type": "input",
         "inputs": [],
         "outputs": [{"name": "out", "lazy": True}],
@@ -65,8 +65,13 @@ BLOCKS = {
             },
             {
                 "key": "columns",
-                "label": "Columns to keep (comma-separated; optional, default all -- a slim stage of a wide file)",
+                "label": "Columns to keep (comma-separated; optional, default all -- a slim stage of a wide file; or by position, 1-based: 2:loan_id, 3:period -- unkept fields need no names)",
                 "kind": "text",
+            },
+            {
+                "key": "workers",
+                "label": "Files staged at once (0 = as many as the machine allows, up to 4)",
+                "kind": "number",
             },
             {
                 "key": "compression",
@@ -475,6 +480,7 @@ def stage_csv_parquet(
     compression: str = "zstd",
     parquet_dir: str = "",
     columns: str = "",
+    workers: int = 0,
 ) -> pl.LazyFrame:
     """Converts large delimited text files to Parquet once, then reads the
     Parquet on the `out` port; no inputs. The way to bring a big CSV source
@@ -483,7 +489,12 @@ def stage_csv_parquet(
     file in it, e.g. a set of quarterly zips) or a glob ("data/*.zip");
     each file, and each member of a zip, becomes its own Parquet part.
     `columns` (comma-separated, after `column_names` naming) keeps only
-    those columns -- stage a slim table of a wide file. A zip member or gzipped file is decompressed
+    those columns -- stage a slim table of a wide file. Entries written
+    `position:name` ("2:loan_id, 3:period", 1-based) pick fields by
+    position and name them, so a header-less file needs no
+    `column_names` listing every field. `workers` is how many files (or
+    zip members) are staged at once: 0 picks as many as the free memory
+    allows, up to 4 (each takes a few hundred MB); 1 stages one by one. A zip member or gzipped file is decompressed
     straight from the archive in blocks of about 8 MB, each parsed and
     streamed into the Parquet: nothing is unpacked to disk and neither the
     file nor the archive is ever held in memory whole. `separator`,
@@ -510,6 +521,8 @@ def stage_csv_parquet(
     files = _stage_files(path)
     names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
     keep = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+    if keep and any(":" in c for c in keep):
+        names, keep = _stage_positional(keep, names)
     options = {
         "separator": separator,
         "has_header": bool(has_header),
@@ -542,19 +555,49 @@ def stage_csv_parquet(
     # part built infers it.
     schema = pl.read_parquet_schema(os.path.join(target, current[0])) if current else None
     parts: dict[str, dict] = {}
-    for u in units:
-        entry = {k: u[k] for k in ("source", "hash", "size", "mtime_ns") if k in u}
-        if u["part"] in current:
-            parts[u["part"]] = entry
-            continue
-        out = os.path.join(target, u["part"])
-        _stage_build(u["file"], u, out, options, schema)
-        if schema is None:
-            schema = pl.read_parquet_schema(out)
-        parts[u["part"]] = entry
+
+    def _entry(u: dict) -> dict:
+        return {k: u[k] for k in ("source", "hash", "size", "mtime_ns") if k in u}
+
+    def _done(u: dict) -> None:
+        parts[u["part"]] = _entry(u)
         # Saved after every part, so an interrupted run keeps what it did.
         manifest["parts"] = {**{p: e for p, e in old_parts.items() if p in current}, **parts}
         _stage_write_manifest(manifest_path, manifest)
+
+    for u in units:
+        if u["part"] in current:
+            parts[u["part"]] = _entry(u)
+    todo = [u for u in units if u["part"] not in current]
+    if todo and schema is None:
+        # The first part built infers the schema every other part follows.
+        first = todo.pop(0)
+        _stage_build(first["file"], first, os.path.join(target, first["part"]), options, None)
+        schema = pl.read_parquet_schema(os.path.join(target, first["part"]))
+        _done(first)
+    n = _stage_worker_count(workers, len(todo))
+    if n <= 1:
+        for u in todo:
+            _stage_build(u["file"], u, os.path.join(target, u["part"]), options, schema)
+            _done(u)
+    else:
+        # Threads: decompressing, parsing and writing Parquet all run
+        # outside the GIL (zlib, polars), so files stage side by side.
+        from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = {
+                pool.submit(_stage_build, u["file"], u, os.path.join(target, u["part"]), options, schema): u for u in todo
+            }
+            pending = set(futures)
+            while pending:
+                finished, pending = wait(pending, return_when=FIRST_EXCEPTION)
+                for f in finished:
+                    if f.exception() is not None:
+                        for other in pending:
+                            other.cancel()
+                        raise f.exception()
+                    _done(futures[f])
     for stale in previous - set(parts):
         try:
             os.remove(os.path.join(target, stale))
@@ -563,6 +606,48 @@ def stage_csv_parquet(
     manifest["parts"] = parts
     _stage_write_manifest(manifest_path, manifest)
     return pl.scan_parquet([os.path.join(target, u["part"]) for u in units])
+
+
+def _stage_positional(keep: list[str], names: list[str] | None) -> tuple[list[str], list[str]]:
+    """`columns` given by position ("2:loan_id"): (the names to read the
+    file with -- the picked fields named, every field before the last
+    picked one given a placeholder, later ones keep their own --, the
+    columns to keep)."""
+    if names:
+        raise ValueError("columns given by position (2:loan_id) name the fields themselves: leave column_names empty")
+    picked: dict[int, str] = {}
+    for entry in keep:
+        pos, sep, name = entry.partition(":")
+        if not sep or not pos.strip().isdigit() or int(pos) < 1 or not name.strip():
+            raise ValueError(f"columns: {entry!r} -- give every column by position as position:name, e.g. 2:loan_id (1-based)")
+        if int(pos) in picked:
+            raise ValueError(f"columns: position {int(pos)} is picked twice")
+        picked[int(pos)] = name.strip()
+    if len(set(picked.values())) != len(picked):
+        raise ValueError("columns: two positions have the same name")
+    read_names = [picked.get(i, f"_unused_{i}") for i in range(1, max(picked) + 1)]
+    return read_names, [picked[p] for p in sorted(picked)]
+
+
+def _stage_worker_count(asked: int, todo: int) -> int:
+    """How many files stage at once: `asked`, or with 0 as many as the free
+    memory allows (about 1 GB each, leaving room for the rest), at most 4."""
+    import os
+
+    if todo <= 1:
+        return 1
+    if asked and int(asked) > 0:
+        return min(int(asked), todo)
+    n = min(4, todo, max(1, (os.cpu_count() or 2) // 2))
+    try:
+        from modelmaker.run_worker import available_memory_bytes
+
+        free = available_memory_bytes()
+    except ImportError:  # a compiled script run without Model-Maker installed
+        free = None
+    if free is not None:
+        n = min(n, max(1, int(free // (2 * 1024**3))))
+    return n
 
 
 def _stage_files(path: str) -> list[str]:
