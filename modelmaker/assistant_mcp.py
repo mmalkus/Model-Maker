@@ -357,7 +357,7 @@ def get_graph(r: Resolver, a: dict[str, Any]) -> Any:
 
 @tool(
     "list_files",
-    "Lists a folder on the machine the backend runs on, to find data files for a read_csv/read_parquet/read_excel/"
+    "Lists a folder on the machine the backend runs on, to find data files for a read_csv/stage_csv_parquet/read_parquet/read_excel/"
     "read_json block's path param (use the path exactly as returned). Without a path: the project's folder. Also "
     "lists the workspace's datasets and sources when it offers them (for read_dataset/read_source blocks).",
     {

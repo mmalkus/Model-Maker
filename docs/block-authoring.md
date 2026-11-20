@@ -212,7 +212,29 @@ habits keep big sources workable:
   are slow on millions of rows.
 
 Converting a large CSV source to Parquet once also helps a lot: a Parquet
-scan reads only the columns a query uses. **Read CSV → Write Parquet**, run
+scan reads only the columns a query uses. **Stage CSV as Parquet** does
+it in one block: give it the file (`.csv`/`.txt`, a `.gz` of one, or a
+`.zip` holding one or more, as Fannie Mae's loan performance files come)
+with the same `separator`, `has_header`, `column_names` and
+`infer_schema_rows` as Read CSV. Each file (each zip member) becomes one
+Parquet part in a `<file name>_parquet` folder next to it (or
+`parquet_dir`). A zip member or gzipped file is read straight from the
+archive: it is decompressed in blocks of about 8 MB of whole lines
+(never splitting a quoted field), each block parsed and streamed into
+the Parquet through polars' IO-source plugin (`register_io_source`,
+which polars marks unstable), so nothing is unpacked to disk and memory
+stays bounded by the block size, not the file's: a 2.4 GB 31-column
+text file stages in ~355 MB. A `_manifest.json` in
+that folder records each part's source hash (the zip's own CRC-32 per
+member; SHA-256 for a plain or gzipped file, not recomputed while its
+size and modification time are unchanged) and the read options, so a
+run rebuilds only the parts whose source or options changed and
+otherwise goes straight to the Parquet. Every part is read with the
+schema of the first one staged, so they always line up; use
+`infer_schema_rows` 0 (all text) for codes with leading zeros such as
+MMYYYY dates, and cast afterwards.
+
+Without it, **Read CSV → Write Parquet**, run
 with **Run all (streaming)**, does it without loading the file: Read CSV
 takes a `separator` (`|` for pipe-delimited files), `has_header`,
 `column_names` for a file without a header row, and `infer_schema_rows`
@@ -283,8 +305,9 @@ block and its `use_instead`, e.g. *'Read CSV' (read_csv) reads or writes
 files on the server by path, which this workspace doesn't allow -- use
 'Read dataset' (read_dataset) instead*.
 
-The built-ins: `read_csv`, `read_parquet`, `read_json`, `read_excel`,
-`read_sql` and `write_csv` need `filesystem`; `read_dataset` needs
+The built-ins: `read_csv`, `stage_csv_parquet`, `read_parquet`,
+`read_json`, `read_excel`, `read_sql`, `write_csv` and `write_parquet`
+need `filesystem`; `read_dataset` needs
 `datasets`, `read_source` `sources`, and `export` `exports`. A block
 needing `exports` is an export block: after it runs successfully, its
 first dataframe output goes to the workspace's export sink with the

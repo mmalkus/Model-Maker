@@ -24,6 +24,7 @@ __all__ = ["INJECTED_PARAMS"]  # re-exported: the runner-injected params, never 
 AGENT_DISALLOWED: dict[str, str] = {
     "read_csv": "input blocks are prepared by the user, not the AI build",
     "read_parquet": "input blocks are prepared by the user, not the AI build",
+    "stage_csv_parquet": "input blocks are prepared by the user, not the AI build",
     "read_json": "input blocks are prepared by the user, not the AI build",
     "read_excel": "input blocks are prepared by the user, not the AI build",
     "read_sql": "input blocks are prepared by the user, not the AI build",

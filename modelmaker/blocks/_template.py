@@ -35,6 +35,8 @@ BLOCKS = {
         # per feature/bin/grade/..., never per record).
         # Large sources: an input block returns pl.scan_csv/scan_parquet
         # (lazy output), select only the needed columns and reduce early;
+        # a big CSV (zipped or not) is staged to Parquet once -- the
+        # built-in stage_csv_parquet does it -- not re-parsed every run;
         # collect inside a block only after reducing, with
         # .collect(engine="streaming"). See "Large data" in
         # docs/block-authoring.md.

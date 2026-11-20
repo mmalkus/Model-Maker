@@ -78,6 +78,160 @@ def test_write_parquet_checks_compression(tmp_path):
         write_parquet(pl.DataFrame({"a": [1]}), "x.parquet", compression="brotli9", output_dir=str(tmp_path))
 
 
+# ---- Stage CSV as Parquet ----------------------------------------------------
+
+
+def _zip(path, members):
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text in members.items():
+            zf.writestr(name, text)
+
+
+def _part_mtimes(folder):
+    return {p.name: p.stat().st_mtime_ns for p in folder.glob("*.parquet")}
+
+
+def test_stage_zip_members_into_parquet_parts(tmp_path):
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    src = tmp_path / "perf.zip"
+    _zip(src, {"2020Q1.csv": "1|012020|0\n2|012020|1\n", "2020Q2.csv": "1|042020|0\n", "readme.pdf": "x"})
+    df = stage_csv_parquet(str(src), separator="|", has_header=False, column_names="id,period,dlq", infer_schema_rows=0).collect()
+    assert df.to_dicts()[0] == {"id": "1", "period": "012020", "dlq": "0"}  # leading zeros kept as text
+    assert df.height == 3
+    staged = tmp_path / "perf_parquet"
+    assert set(_part_mtimes(staged)) == {"2020Q1.parquet", "2020Q2.parquet"}  # text members only
+    # Read straight from the zip: nothing but the parts and the manifest.
+    assert {p.name for p in staged.iterdir()} == {"2020Q1.parquet", "2020Q2.parquet", "_manifest.json"}
+
+
+def test_stage_reads_a_zip_member_in_blocks_without_unpacking(tmp_path, monkeypatch):
+    import builtins
+
+    from modelmaker.blocks import library
+
+    # Tiny blocks, so a member spans many of them; one quoted field holds
+    # a line break and must not be split.
+    monkeypatch.setattr(library, "_STAGE_CHUNK_BYTES", 40)
+    rows = [f'{i},"note {i}"' for i in range(200)]
+    rows[57] = '57,"two\nlines"'
+    src = tmp_path / "big.zip"
+    _zip(src, {"big.csv": "id,note\n" + "\n".join(rows) + "\n"})
+
+    written = []
+    real_open = builtins.open
+
+    def _spy(file, mode="r", *a, **k):
+        if any(c in mode for c in "wax+"):
+            written.append(str(file))
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _spy)
+    df = library.stage_csv_parquet(str(src)).collect()
+    assert df.height == 200 and df["id"].to_list() == list(range(200))
+    assert df["note"][57] == "two\nlines" and df["note"][199] == "note 199"
+    # The only files Python opened for writing are the manifest's.
+    assert all(w.endswith((".json", ".json.tmp")) for w in written), written
+
+
+def test_stage_skips_unchanged_parts_and_rebuilds_changed_ones(tmp_path):
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    src = tmp_path / "perf.zip"
+    _zip(src, {"q1.csv": "a,b\n1,x\n", "q2.csv": "a,b\n2,y\n", "q3.csv": "a,b\n3,z\n"})
+    stage_csv_parquet(str(src))
+    before = _part_mtimes(tmp_path / "perf_parquet")
+
+    # Same content: nothing rebuilt.
+    stage_csv_parquet(str(src))
+    assert _part_mtimes(tmp_path / "perf_parquet") == before
+
+    # One member changed, one dropped: only that part is rebuilt, the
+    # dropped one's part removed.
+    _zip(src, {"q1.csv": "a,b\n1,x\n", "q2.csv": "a,b\n2,changed\n"})
+    out = stage_csv_parquet(str(src)).collect()
+    after = _part_mtimes(tmp_path / "perf_parquet")
+    assert set(after) == {"q1.parquet", "q2.parquet"}
+    assert after["q1.parquet"] == before["q1.parquet"] and after["q2.parquet"] != before["q2.parquet"]
+    assert out["b"].to_list() == ["x", "changed"]
+
+    # Different read options: everything is rebuilt.
+    stage_csv_parquet(str(src), compression="snappy")
+    assert all(_part_mtimes(tmp_path / "perf_parquet")[p] != after[p] for p in after)
+
+
+def test_stage_plain_and_gzipped_files_by_hash(tmp_path):
+    import gzip
+    import os
+
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    csv = tmp_path / "loans.csv"
+    csv.write_text("id|amt\n1|10\n2|20\n")
+    out_dir = tmp_path / "staged"
+    assert stage_csv_parquet(str(csv), separator="|", parquet_dir=str(out_dir)).collect()["amt"].to_list() == [10, 20]
+    before = _part_mtimes(out_dir)
+    # Touched but identical: the hash matches, no rebuild.
+    st = csv.stat()
+    os.utime(csv, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    stage_csv_parquet(str(csv), separator="|", parquet_dir=str(out_dir))
+    assert _part_mtimes(out_dir) == before
+    # Real change: rebuilt.
+    csv.write_text("id|amt\n1|10\n2|20\n3|30\n")
+    assert stage_csv_parquet(str(csv), separator="|", parquet_dir=str(out_dir)).collect().height == 3
+
+    gz = tmp_path / "perf.txt.gz"
+    with gzip.open(gz, "wt") as f:
+        f.write("a\tb\n1\t2\n")
+    assert stage_csv_parquet(str(gz), separator="tab").collect().to_dicts() == [{"a": 1, "b": 2}]
+    assert (tmp_path / "perf_parquet" / "perf.parquet").exists()
+
+
+def test_stage_parts_share_the_first_parts_schema(tmp_path):
+    from modelmaker.blocks.library import stage_csv_parquet
+
+    src = tmp_path / "p.zip"
+    # The second member alone would infer `b` as text.
+    _zip(src, {"1.csv": "a,b\n1,2\n", "2.csv": "a,b\n3,oops\n"})
+    with pytest.raises(ValueError, match="infer_schema_rows to 0"):
+        stage_csv_parquet(str(src))
+    df = stage_csv_parquet(str(src), infer_schema_rows=0).collect()
+    assert df.schema == {"a": pl.String, "b": pl.String} and df.height == 2
+
+
+def test_stage_block_runs_in_the_engine_and_streams(tmp_path):
+    src = tmp_path / "perf.zip"
+    _zip(src, {"q1.csv": "id|v\n1|5\n2|15\n", "q2.csv": "id|v\n3|25\n"})
+    graph = Graph(
+        blocks={
+            "s": make_block("s", "stage_csv_parquet", params={"path": str(src), "separator": "|"}),
+            "f": make_block("f", "filter", params={"expr": "v > 10"}, x=1),
+        },
+        wires={"w1": Wire("w1", "s", "out", "f", "df")},
+    )
+    runner = Runner(graph, CacheStore())
+    report = runner.run_all_streaming()
+    assert report == {"s": "fused", "f": "green"}, (report, runner.state["f"].last_error)
+    out = runner.cache.get(runner.state["f"].last_successful_key).outputs["out"].data
+    assert out["id"].to_list() == [2, 3]
+
+
+def test_stage_block_compiles(tmp_path):
+    from modelmaker.compiler import compile_graph
+
+    src = tmp_path / "loans.csv"
+    src.write_text("a,b\n1,x\n")
+    graph = Graph(blocks={"s": make_block("s", "stage_csv_parquet", params={"path": str(src)})}, wires={})
+    runner = Runner(graph, CacheStore())
+    assert runner.refresh("s") == "green"
+    source = compile_graph(graph, runner=runner)
+    ns: dict = {}
+    exec(compile(source, "<compiled>", "exec"), ns)
+    assert ns["s"].to_dicts() == [{"a": 1, "b": "x"}]
+
+
 # ---- dataset reads in a streaming run -----------------------------------------
 
 
