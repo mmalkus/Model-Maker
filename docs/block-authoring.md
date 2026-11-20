@@ -244,7 +244,10 @@ whole, and the engine stops an output that grows past the memory the
 machine can spare (about 40% of what's free when the block starts;
 `MODELMAKER_COLLECT_LIMIT_MB` sets it, 0 turns the check off) with a
 *too big to hold in memory* error, rather than let the worker run the
-machine out of memory.
+machine out of memory. The error gives the limit and what it was based on
+(for example "2.1 GB limit (40% of the 5.3 GB of memory free when the block
+started, of 16.0 GB in total ...)"), so closing other programs, or the
+variable, can raise it.
 
 Without it, **Read CSV → Write Parquet**, run
 with **Run all (streaming)**, does it without loading the file: Read CSV
