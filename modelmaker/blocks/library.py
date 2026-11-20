@@ -469,7 +469,7 @@ def stage_csv_parquet(
     Parquet on the `out` port; no inputs. `path` is a .csv/.txt file, a
     .gz of one, or a .zip holding one or more of them (each member becomes
     its own Parquet part). A zip member or gzipped file is decompressed
-    straight from the archive in blocks of about 64 MB, each parsed and
+    straight from the archive in blocks of about 8 MB, each parsed and
     streamed into the Parquet: nothing is unpacked to disk and neither the
     file nor the archive is ever held in memory whole. `separator`,
     `has_header`, `column_names` and `infer_schema_rows` work as in Read
@@ -605,8 +605,12 @@ def _stage_units(path: str, old_parts: dict) -> list[dict]:
 
 
 # How much decompressed text a zipped/gzipped source is parsed in at a
-# time: the most of it ever held in memory (plus that block's parsed rows).
-_STAGE_CHUNK_BYTES = 64 * 1024 * 1024
+# time. Memory follows the block size, not the file's: a block's parsed
+# rows take several times its text (a string value costs ~16 bytes, even an
+# empty one) and the streaming engine keeps a few blocks in flight. Measured
+# on a 31-column all-text file: 64 MB blocks peaked at ~1.35 GB, 8 MB at
+# ~355 MB (for 1.2 and 2.4 GB of text alike), at ~10% more run time.
+_STAGE_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None:
@@ -692,8 +696,18 @@ def _stage_compressed_frame(path: str, unit: dict, options: dict, schema) -> pl.
     """A LazyFrame over a zip member or gzipped file that parses it block
     by block as the streaming engine pulls (polars' IO-source plugin), so
     sink_parquet writes it without it ever being unpacked or held whole.
-    Without a `schema`, the first block's inferred one is used for all."""
-    from polars.io.plugins import register_io_source
+    Without a `schema`, the first block's inferred one is used for all.
+
+    register_io_source is marked unstable by polars (it may change in any
+    release); test_large_data covers this path, so an upgrade that breaks
+    it shows up there."""
+    try:
+        from polars.io.plugins import register_io_source
+    except ImportError as e:
+        raise RuntimeError(
+            f"staging a zipped or gzipped file needs polars' IO-source plugin (polars.io.plugins.register_io_source), "
+            f"which this polars ({pl.__version__}) doesn't have -- upgrade polars, or unzip the file and stage the CSV"
+        ) from e
 
     def _parse(block: bytes, first: bool, schema) -> pl.DataFrame:
         has_header = first and options["has_header"]
