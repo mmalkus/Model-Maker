@@ -430,7 +430,8 @@ def test_the_default_limit_says_what_it_is_based_on(monkeypatch):
     from modelmaker import run_worker
 
     free, total = run_worker.memory_bytes()  # this machine's, for real
-    assert free and total and free <= total
+    if free is not None:  # None on macOS: no /proc/meminfo, no SC_AVPHYS_PAGES
+        assert total and free <= total
     monkeypatch.delenv(run_worker.COLLECT_LIMIT_ENV, raising=False)
     monkeypatch.setattr(run_worker, "memory_bytes", lambda: (int(5.3 * 1024**3), 16 * 1024**3))
     limit, basis = run_worker.collect_limit()

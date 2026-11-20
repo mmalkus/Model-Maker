@@ -66,7 +66,6 @@ def memory_bytes() -> tuple[int | None, int | None]:
     """(physical memory free right now -- what the OS could hand this
     process without swapping --, the machine's total physical memory);
     either is None when it can't be told."""
-    import os
     import sys
 
     if sys.platform == "win32":
@@ -100,15 +99,23 @@ def memory_bytes() -> tuple[int | None, int | None]:
                     total = int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
         pass
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        if free is None:
-            free = page * os.sysconf("SC_AVPHYS_PAGES")
-        if total is None:
-            total = page * os.sysconf("SC_PHYS_PAGES")
-    except (AttributeError, ValueError, OSError):
-        pass
+    # Each read on its own, so one name the platform lacks (macOS has no
+    # SC_AVPHYS_PAGES) doesn't lose the other.
+    if free is None:
+        free = _sysconf_bytes("SC_AVPHYS_PAGES")
+    if total is None:
+        total = _sysconf_bytes("SC_PHYS_PAGES")
     return free, total
+
+
+def _sysconf_bytes(pages_name: str) -> int | None:
+    """os.sysconf(pages_name) in bytes, or None where it isn't supported."""
+    import os
+
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf(pages_name)
+    except (AttributeError, ValueError, OSError):
+        return None
 
 
 def available_memory_bytes() -> int | None:
@@ -155,7 +162,7 @@ def _gb(n: float) -> str:
 def _collect_lazy(lf: Any) -> Any:
     """`lf` collected -- streamed in batches, adding up their size as they
     come, and stopped with OutputTooBig as soon as it passes
-    collect_limit_bytes(). A plain collect would hand the whole table to
+    collect_limit(). A plain collect would hand the whole table to
     the OS in one go and, when it doesn't fit, take the worker (and on a
     Windows machine with little headroom, other programs) down with it.
     Stopping is safe: each worker process runs one task, so raising ends
