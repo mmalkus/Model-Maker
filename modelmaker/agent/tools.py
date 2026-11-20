@@ -324,12 +324,13 @@ def flag_suspicious(b: AgentBuild, category: str, params: dict[str, Any], where:
         iv = suspicious[feature]
         b.add_concern(
             f"{where} uses {feature}{f' (IV {iv:.2f})' if isinstance(iv, float) else ''}, which fit_binning banded "
-            "'suspicious' -- an IV that high usually means leakage."
+            "'suspicious' -- an IV that high can mean leakage: confirm it is known at the snapshot date."
         )
     return (
-        f"{', '.join(hits)} {'was' if len(hits) == 1 else 'were'} banded 'suspicious' by fit_binning (IV >= 0.5), which "
-        "usually means leakage. This is recorded as a concern for the user. Unless they have already agreed to it, "
-        "ask_user before keeping it in the model."
+        f"{', '.join(hits)} {'was' if len(hits) == 1 else 'were'} banded 'suspicious' by fit_binning (IV >= 0.5): "
+        "very strong, which can mean leakage (measured after the snapshot, or partly the outcome) or a legitimate "
+        "driver known at the snapshot. This is recorded as a concern for the user. Unless they have already agreed "
+        "to it or it is clearly known at the snapshot date, ask_user before keeping it in the model."
     )
 
 
