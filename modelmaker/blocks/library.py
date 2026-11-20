@@ -468,9 +468,10 @@ def stage_csv_parquet(
     """Converts a large delimited text file to Parquet once, then reads the
     Parquet on the `out` port; no inputs. `path` is a .csv/.txt file, a
     .gz of one, or a .zip holding one or more of them (each member becomes
-    its own Parquet part; a member is unpacked to a temporary file next to
-    the Parquet, converted with polars' streaming engine and deleted, so
-    neither the file nor the zip is ever held in memory). `separator`,
+    its own Parquet part). A zip member or gzipped file is decompressed
+    straight from the archive in blocks of about 64 MB, each parsed and
+    streamed into the Parquet: nothing is unpacked to disk and neither the
+    file nor the archive is ever held in memory whole. `separator`,
     `has_header`, `column_names` and `infer_schema_rows` work as in Read
     CSV; dtypes are inferred from the first part converted and every other
     part is read with that schema, so all parts line up -- use 0 (all
@@ -603,48 +604,133 @@ def _stage_units(path: str, old_parts: dict) -> list[dict]:
     ]
 
 
+# How much decompressed text a zipped/gzipped source is parsed in at a
+# time: the most of it ever held in memory (plus that block's parsed rows).
+_STAGE_CHUNK_BYTES = 64 * 1024 * 1024
+
+
 def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None:
     """Converts one unit to `out` with the streaming engine, via `out`.tmp
-    so a half-written part is never taken for a finished one. A zipped or
-    gzipped source is unpacked to a temporary file first (polars can't
-    scan a compressed stream lazily) and deleted afterwards."""
-    import gzip
+    so a half-written part is never taken for a finished one. A plain file
+    is scanned directly. A zip member or gzipped file is decompressed
+    straight from the archive, a block of whole lines at a time (see
+    _stage_text_blocks), each block parsed and streamed into the Parquet
+    -- nothing is unpacked to disk and the text is never held whole."""
     import os
-    import shutil
+
+    compressed = "member" in unit or path.lower().endswith(".gz")
+    try:
+        if compressed:
+            lf = _stage_compressed_frame(path, unit, options, schema)
+        else:
+            kwargs: dict = {"separator": options["separator"], "has_header": options["has_header"]}
+            if schema is not None:
+                kwargs["schema"] = schema
+            else:
+                kwargs["new_columns"] = options["column_names"]
+                kwargs["infer_schema_length"] = options["infer_schema_rows"]
+            lf = pl.scan_csv(path, **kwargs)
+        lf.sink_parquet(out + ".tmp", compression=options["compression"])
+        os.replace(out + ".tmp", out)
+    except pl.exceptions.PolarsError as e:
+        hint = (
+            " -- it is read with the schema of the first part; set infer_schema_rows to 0 to stage every column as text"
+            if schema is not None
+            else ""
+        )
+        raise ValueError(f"staging {unit['source']} failed: {e}{hint}") from e
+    finally:
+        if os.path.exists(out + ".tmp"):
+            os.remove(out + ".tmp")
+
+
+def _stage_open(path: str, unit: dict):
+    """A binary stream of the unit's decompressed text, read straight from
+    the archive."""
+    import gzip
     import zipfile
 
-    src, unpacked = path, None
-    try:
-        if "member" in unit:
-            unpacked = out + ".csv.tmp"
-            with zipfile.ZipFile(path) as zf, zf.open(unit["member"]) as fin, open(unpacked, "wb") as fout:
-                shutil.copyfileobj(fin, fout, 16 * 1024 * 1024)
-            src = unpacked
-        elif path.lower().endswith(".gz"):
-            unpacked = out + ".csv.tmp"
-            with gzip.open(path, "rb") as fin, open(unpacked, "wb") as fout:
-                shutil.copyfileobj(fin, fout, 16 * 1024 * 1024)
-            src = unpacked
-        kwargs: dict = {"separator": options["separator"], "has_header": options["has_header"]}
+    if "member" in unit:
+        zf = zipfile.ZipFile(path)
+        stream = zf.open(unit["member"])
+        close = stream.close
+
+        def _close_both() -> None:
+            close()
+            zf.close()
+
+        stream.close = _close_both
+        return stream
+    return gzip.open(path, "rb")
+
+
+def _stage_text_blocks(stream, size: int):
+    """Yields the stream's bytes in blocks of about `size`, each ending at a
+    record boundary: on a newline outside double quotes (a quoted field may
+    hold line breaks; with "" as the escape, an even quote count before the
+    newline means it is outside one). Each block starts at a boundary, so
+    the count starts afresh."""
+    rest = b""
+    while True:
+        data = stream.read(size)
+        if not data:
+            if rest.strip():
+                yield rest
+            return
+        block = rest + data
+        cut = block.rfind(b"\n")
+        while cut >= 0 and block.count(b'"', 0, cut) % 2:
+            cut = block.rfind(b"\n", 0, cut)
+        if cut < 0:
+            rest = block  # no boundary yet: read on
+            continue
+        yield block[: cut + 1]
+        rest = block[cut + 1 :]
+
+
+def _stage_compressed_frame(path: str, unit: dict, options: dict, schema) -> pl.LazyFrame:
+    """A LazyFrame over a zip member or gzipped file that parses it block
+    by block as the streaming engine pulls (polars' IO-source plugin), so
+    sink_parquet writes it without it ever being unpacked or held whole.
+    Without a `schema`, the first block's inferred one is used for all."""
+    from polars.io.plugins import register_io_source
+
+    def _parse(block: bytes, first: bool, schema) -> pl.DataFrame:
+        has_header = first and options["has_header"]
         if schema is not None:
-            kwargs["schema"] = schema
-        else:
-            kwargs["new_columns"] = options["column_names"]
-            kwargs["infer_schema_length"] = options["infer_schema_rows"]
-        try:
-            pl.scan_csv(src, **kwargs).sink_parquet(out + ".tmp", compression=options["compression"])
-        except pl.exceptions.PolarsError as e:
-            hint = (
-                " -- it is read with the schema of the first part; set infer_schema_rows to 0 to stage every column as text"
-                if schema is not None
-                else ""
-            )
-            raise ValueError(f"staging {unit['source']} failed: {e}{hint}") from e
-        os.replace(out + ".tmp", out)
-    finally:
-        for leftover in (unpacked, out + ".tmp"):
-            if leftover and os.path.exists(leftover):
-                os.remove(leftover)
+            return pl.read_csv(block, separator=options["separator"], has_header=has_header, schema=schema)
+        return pl.read_csv(
+            block,
+            separator=options["separator"],
+            has_header=has_header,
+            new_columns=options["column_names"],
+            infer_schema_length=options["infer_schema_rows"],
+        )
+
+    if schema is None:
+        with _stage_open(path, unit) as stream:
+            first = next(_stage_text_blocks(stream, _STAGE_CHUNK_BYTES), None)
+        if first is None:
+            raise ValueError(f"{unit['source']} is empty")
+        schema = _parse(first, True, None).schema
+
+    def _source(with_columns, predicate, n_rows, batch_size):
+        left = n_rows
+        with _stage_open(path, unit) as stream:
+            for i, block in enumerate(_stage_text_blocks(stream, _STAGE_CHUNK_BYTES)):
+                df = _parse(block, i == 0, schema)
+                if with_columns is not None:
+                    df = df.select(with_columns)
+                if predicate is not None:
+                    df = df.filter(predicate)
+                if left is not None:
+                    df = df.head(left)
+                    left -= df.height
+                yield df
+                if left is not None and left <= 0:
+                    return
+
+    return register_io_source(_source, schema=schema)
 
 
 def _stage_read_manifest(manifest_path: str) -> dict:

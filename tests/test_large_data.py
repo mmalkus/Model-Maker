@@ -103,7 +103,37 @@ def test_stage_zip_members_into_parquet_parts(tmp_path):
     assert df.height == 3
     staged = tmp_path / "perf_parquet"
     assert set(_part_mtimes(staged)) == {"2020Q1.parquet", "2020Q2.parquet"}  # text members only
-    assert not [p for p in staged.iterdir() if p.name.endswith(".tmp")]  # unpacked members cleaned up
+    # Read straight from the zip: nothing but the parts and the manifest.
+    assert {p.name for p in staged.iterdir()} == {"2020Q1.parquet", "2020Q2.parquet", "_manifest.json"}
+
+
+def test_stage_reads_a_zip_member_in_blocks_without_unpacking(tmp_path, monkeypatch):
+    import builtins
+
+    from modelmaker.blocks import library
+
+    # Tiny blocks, so a member spans many of them; one quoted field holds
+    # a line break and must not be split.
+    monkeypatch.setattr(library, "_STAGE_CHUNK_BYTES", 40)
+    rows = [f'{i},"note {i}"' for i in range(200)]
+    rows[57] = '57,"two\nlines"'
+    src = tmp_path / "big.zip"
+    _zip(src, {"big.csv": "id,note\n" + "\n".join(rows) + "\n"})
+
+    written = []
+    real_open = builtins.open
+
+    def _spy(file, mode="r", *a, **k):
+        if any(c in mode for c in "wax+"):
+            written.append(str(file))
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _spy)
+    df = library.stage_csv_parquet(str(src)).collect()
+    assert df.height == 200 and df["id"].to_list() == list(range(200))
+    assert df["note"][57] == "two\nlines" and df["note"][199] == "note 199"
+    # The only files Python opened for writing are the manifest's.
+    assert all(w.endswith((".json", ".json.tmp")) for w in written), written
 
 
 def test_stage_skips_unchanged_parts_and_rebuilds_changed_ones(tmp_path):

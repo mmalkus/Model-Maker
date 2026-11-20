@@ -218,8 +218,11 @@ it in one block: give it the file (`.csv`/`.txt`, a `.gz` of one, or a
 with the same `separator`, `has_header`, `column_names` and
 `infer_schema_rows` as Read CSV. Each file (each zip member) becomes one
 Parquet part in a `<file name>_parquet` folder next to it (or
-`parquet_dir`); a zip member or gzip is unpacked to a temporary file,
-converted with the streaming engine and deleted. A `_manifest.json` in
+`parquet_dir`). A zip member or gzipped file is read straight from the
+archive: it is decompressed in blocks of about 64 MB of whole lines
+(never splitting a quoted field), each block parsed and streamed into
+the Parquet through polars' IO-source plugin, so nothing is unpacked to
+disk and at most one block is in memory. A `_manifest.json` in
 that folder records each part's source hash (the zip's own CRC-32 per
 member; SHA-256 for a plain or gzipped file, not recomputed while its
 size and modification time are unchanged) and the read options, so a

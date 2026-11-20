@@ -43,10 +43,11 @@ LARGE_DATA_RULES = (
     'from a `path` parameter (a "path" form field, with "capabilities": ["filesystem"]) and marks its output '
     '"lazy": true; select only the columns needed and filter as early as possible. A large text source (CSV/TXT, '
     "zipped or gzipped) is staged to Parquet once rather than re-parsed every run: point the user to the built-in "
-    "Stage CSV as Parquet block (stage_csv_parquet), which also unpacks .zip/.gz and skips the conversion while the "
-    "source's hash is unchanged; a custom input block that must read such a file itself converts it with "
-    "`pl.scan_csv(...).sink_parquet(...)` (unpacking a zip/gz member to a temporary file first -- never "
-    "`pl.read_csv` on a compressed file, which loads it whole), skips that when the Parquet is newer than the "
+    "Stage CSV as Parquet block (stage_csv_parquet), which reads .zip/.gz straight from the archive (no unpacking "
+    "to disk) and skips the conversion while the source's hash is unchanged; a custom input block that must read "
+    "such a file itself converts it with `pl.scan_csv(...).sink_parquet(...)` (for a zip/gz, decompress it as a "
+    "stream in blocks of whole lines -- never unpack it to a temporary file, never `pl.read_csv` on the whole "
+    "compressed file, which loads it whole), skips that when the Parquet is newer than the "
     "source, and returns `pl.scan_parquet(...)`. A block that reduces a big "
     "table (to one row per account, per snapshot date or per period) does it in polars expressions; if it must "
     'collect, it collects only after selecting, filtering and aggregating, with `.collect(engine="streaming")`. '
