@@ -19,6 +19,7 @@ test('publishes, touches and withdraws a canvas', () => {
   const a = JSON.parse(readFileSync(path.join(dir, `${process.pid}-41001.json`), 'utf8'))
   assert.deepEqual([a.folder, a.url, a.token, a.uri_scheme], ['/p/a', 'http://127.0.0.1:41001', 'tok-a', 'cursor'])
   assert.ok(a.active_at > 0)
+  assert.match(a.note, /private/)
   if (process.platform !== 'win32') assert.equal(statSync(path.join(dir, files[0])).mode & 0o077, 0)
 
   d.touch('/p/b')

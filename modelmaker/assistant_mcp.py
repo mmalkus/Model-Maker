@@ -54,6 +54,18 @@ OPEN_TIMEOUT_SECONDS = 120
 SCRIPT_CHARS = 30_000
 PROJECT_FILE = "model.json"
 
+# Sent to the client at initialization (MCP server instructions). The
+# backend's HTTP API is these tools' private transport: an assistant that
+# calls it itself, with the token from a discovery file, skips the hints and
+# the check step and breaks whenever the API changes (issue #92).
+INSTRUCTIONS = (
+    "Model-Maker's canvas is driven only through these tools. The canvas backend's HTTP API -- and the URL and "
+    "token in ~/.modelmaker/vscode-backends/ -- is private to them: never read that token, call the backend's "
+    "/api endpoints, or script against it (curl, Python, fetch). It skips the hints and the check step these tools "
+    "add, and it changes without notice. If something you need has no tool, or a tool keeps failing, stop and tell "
+    "the user what you needed instead of working around it."
+)
+
 
 class ToolInputError(Exception):
     """A mistake the model can fix: goes back to it as the tool's error."""
@@ -676,7 +688,7 @@ def call(resolver: Resolver, name: str, args: dict[str, Any]) -> tuple[Any, bool
 
 
 def build_server(resolver: Resolver) -> Server:
-    server = Server("modelmaker")
+    server = Server("modelmaker", instructions=INSTRUCTIONS)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

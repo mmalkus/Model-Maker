@@ -125,12 +125,14 @@ def test_a_real_mcp_client_lists_and_calls_the_tools(backend):
     async def go():
         params = StdioServerParameters(command=sys.executable, args=["-m", "modelmaker.assistant_mcp", "--url", backend])
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            await session.initialize()
+            init = await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
             result = await session.call_tool("get_graph", {})
-            return names, json.loads(result.content[0].text), result.isError
+            return init.instructions, names, json.loads(result.content[0].text), result.isError
 
-    names, graph, is_error = asyncio.run(go())
+    instructions, names, graph, is_error = asyncio.run(go())
+    # The backend's own API is off-limits to the assistant (issue #92).
+    assert instructions == mm.INSTRUCTIONS and "never read that token" in instructions
     assert "run" in names and "open_project" in names
     assert not is_error and "blocks" in graph
 
