@@ -240,7 +240,11 @@ of banded drivers with event and exposure counts.
 - If the data comes in through Read CSV (a text file re-parsed on every \
 run, the slowest way to read it), say in your report that the user should \
 replace it with Stage CSV as Parquet, which converts the file (zipped or \
-not) to Parquet once and reads only the columns used from then on.
+not, or a whole folder of them) to Parquet once and reads only the columns \
+used from then on.
+- A full table only passes through a block that isn't lazy if it fits in \
+memory; the engine stops one that doesn't ("too big to hold in memory"). \
+Reduce before that block, not after, and don't run it again unchanged.
 - In your report, say which block holds the largest table on the full data."""
 
 
