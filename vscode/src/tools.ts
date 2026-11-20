@@ -21,7 +21,8 @@ type Ctx = { backend: Backend; folder: string }
 type ToolSpec<T> = {
   // Shown while it runs, and (for edits) in the confirmation.
   describe(input: T): string
-  edits: boolean
+  // Whether this call changes the canvas: asks first, refreshes after.
+  edits: boolean | ((input: T) => boolean)
   run(ctx: Ctx, input: T, token: vscode.CancellationToken): Promise<unknown>
 }
 
@@ -33,7 +34,8 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
   // Only Copilot's agent mode uses these; an editor without vscode.lm's
   // tools API (Cursor, Windsurf: their agents use modelmaker-mcp) skips them.
   if (typeof vscode.lm?.registerTool !== 'function') return
-  const register = <T>(name: string, spec: ToolSpec<T> & { folder?: (input: T) => Promise<string> }) =>
+  const register = <T>(name: string, spec: ToolSpec<T> & { folder?: (input: T) => Promise<string> }) => {
+    const edits = (input: T) => (typeof spec.edits === 'function' ? spec.edits(input) : spec.edits)
     context.subscriptions.push(
       vscode.lm.registerTool<T>(name, {
         prepareInvocation: (options) => {
@@ -41,7 +43,7 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           const project = spec.folder ? undefined : editor.activeProject()
           return {
             invocationMessage: what,
-            confirmationMessages: spec.edits
+            confirmationMessages: edits(options.input)
               ? { title: 'Edit the Model-Maker canvas?', message: `${what}${project ? ` in ${vscode.workspace.asRelativePath(project)}` : ''}.` }
               : undefined,
           }
@@ -61,7 +63,7 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           const backend = await backends.acquire(folder)
           try {
             const result = await spec.run({ backend, folder }, options.input, token)
-            if (spec.edits) editor.refresh(folder)
+            if (edits(options.input)) editor.refresh(folder)
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result))])
           } catch (e) {
             // Input mistakes and API refusals go back to the model to correct.
@@ -73,6 +75,7 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
         },
       }),
     )
+  }
 
   const graph = (ctx: Ctx) => ctx.backend.json<Graph>('/assistant/graph')
   const brief = (ctx: Ctx, id: string) => ctx.backend.json(`/assistant/blocks/${encodeURIComponent(id)}`)
@@ -177,6 +180,20 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
     describe: (i) => `Checking the block file ${i.name}`,
     edits: false,
     run: (ctx, i) => ctx.backend.json('/assistant/check_block_file', { method: 'POST', body: { name: i.name } }),
+  })
+
+  register<{ block: string; apply?: boolean }>('modelmaker_update_block', {
+    describe: (i) => (i.apply ? `Updating ${i.block} to its library file's version` : `Previewing the update of ${i.block}`),
+    // A preview only reads: no confirmation, no canvas refresh.
+    edits: (i) => !!i.apply,
+    run: async (ctx, i) => {
+      const block = findBlock(await graph(ctx), i.block)
+      if (!block.library_block) throw new ToolInputError(`${block.name} is a built-in block: only library blocks are updated this way`)
+      const id = encodeURIComponent(block.id)
+      if (!i.apply) return ctx.backend.json(`/blocks/${id}/update_preview`)
+      const result = await ctx.backend.json<{ applied: unknown }>(`/blocks/${id}/update`, { method: 'POST' })
+      return { applied: result.applied, block: await brief(ctx, block.id) }
+    },
   })
 
   // ---- editing --------------------------------------------------------------

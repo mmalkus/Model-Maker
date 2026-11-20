@@ -445,6 +445,34 @@
         }
       },
       {
+        "name": "modelmaker_update_block",
+        "toolReferenceName": "mmUpdateBlock",
+        "displayName": "Model-Maker: Update Library Block",
+        "modelDescription": "Moves a placed library block to its library file's current version. A placed block keeps a copy of the code it was placed with, so after you edit its file it runs the old code until updated (modelmaker_get_graph marks it \"outdated\"). Without apply, previews the change: the code diff and which params and wires carry over, are renamed or are dropped. With apply: true, makes it (one undo step) and returns the block.",
+        "userDescription": "Update a placed library block to its file's version",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": "string",
+              "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "apply": {
+              "type": "boolean",
+              "description": "Make the update; leave out to preview it."
+            }
+          },
+          "required": [
+            "block"
+          ]
+        }
+      },
+      {
         "name": "modelmaker_add_lane",
         "toolReferenceName": "mmAddLane",
         "displayName": "Model-Maker: Add Lane",
