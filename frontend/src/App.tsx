@@ -6,6 +6,7 @@ import {
   ReactFlowProvider,
   applyNodeChanges,
   useReactFlow,
+  useStoreApi,
   type Connection,
   type NodeChange,
 } from '@xyflow/react'
@@ -30,6 +31,9 @@ import { host } from './host'
 import { has } from './features'
 
 const STAMP_POLL_MS = 1500
+// How long the view stops following new and running blocks after the user
+// pans or zooms it themselves.
+const FOLLOW_PAUSE_MS = 5000
 
 const nodeTypes = { modelBlock: BlockNode, laneBand: LaneBand, ghostBlock: GhostNode, ghostLane: GhostLane }
 const edgeTypes = { dataWire: DataWireEdge }
@@ -128,7 +132,7 @@ function AppInner() {
   const [build, setBuild] = useState<BuildOut | null>(null)
   // The AI build whose full report is open (see BuildReport.ReportModal).
   const [reportBuildId, setReportBuildId] = useState<string | null>(null)
-  const { fitView, screenToFlowPosition } = useReactFlow()
+  const { fitView, getNodesBounds, getZoom, screenToFlowPosition, setCenter } = useReactFlow()
   const didInitialFit = useRef(false)
 
   const reloadLlmSettings = useCallback(() => {
@@ -153,34 +157,86 @@ function AppInner() {
     setSelectedPort({ blockId, port, portType })
   }, [])
 
-  const reload = useCallback(() => {
-    api.graph().then((g) => {
-      setGraph(g)
-      const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort, setReportBuildId)
-      // Carry over React Flow's measured size and selection: the run poll
-      // reloads every 200ms, and fresh nodes without `measured` are hidden
-      // until re-measured, which blinks the whole canvas.
-      setBlockNodes((prev) => {
-        const prevById = new Map(prev.map((n) => [n.id, n]))
-        return nextBlockNodes.map((n) => {
-          const old = prevById.get(n.id)
-          return old ? { ...n, measured: old.measured, selected: old.selected } : n
-        })
-      })
-      // fit the view to the actual blocks (not the oversized lane bands) once,
-      // on first load -- re-fitting on every later reload would yank the
-      // viewport out from under someone mid-edit.
-      if (!didInitialFit.current && nextBlockNodes.length > 0) {
-        didInitialFit.current = true
-        requestAnimationFrame(() => fitView({ nodes: nextBlockNodes.map((n) => ({ id: n.id })), padding: 0.2 }))
+  // Following changes made elsewhere (an assistant adding blocks, a run):
+  // the ids on the canvas and the blocks running at the last load, and when
+  // the user last moved the view themselves -- following never fights a
+  // pan or zoom they just made.
+  const knownIds = useRef<Set<string> | null>(null)
+  const runningIds = useRef<Set<string>>(new Set())
+  const userMovedAt = useRef(0)
+  const flowStore = useStoreApi()
+
+  // Shows `ids` (zooming in no further than now when `keepZoom`, else to
+  // fit). When they can't all fit even fully zoomed out, zooms out as far
+  // as the canvas allows and scrolls to `focus` instead.
+  const followView = useCallback(
+    (ids: string[], focus: string, keepZoom: boolean) => {
+      const { width, height, minZoom } = flowStore.getState()
+      const padding = 0.25
+      const bounds = getNodesBounds(ids)
+      if (!width || !height || !bounds.width || !bounds.height) return
+      const fitZoom = Math.min(width / (bounds.width * (1 + 2 * padding)), height / (bounds.height * (1 + 2 * padding)))
+      if (fitZoom >= minZoom) {
+        fitView({ nodes: ids.map((id) => ({ id })), padding, maxZoom: keepZoom ? getZoom() : undefined, duration: 400 })
+        return
       }
-      // A run started in the background (see api.py's _start_background_run)
-      // can fail on a precondition (e.g. "Run" clicked on a block whose
-      // upstream isn't green) before any block state changes -- surfaced
-      // here once, the server clears it as soon as this read happens.
-      if (g.run_error) host.notify(g.run_error)
-    })
-  }, [collapsedLanes, fitView, onViewPort])
+      const f = getNodesBounds([focus])
+      setCenter(f.x + f.width / 2, f.y + f.height / 2, { zoom: minZoom, duration: 400 })
+    },
+    [flowStore, fitView, getNodesBounds, getZoom, setCenter],
+  )
+
+  const load = useCallback(
+    (follow: boolean) =>
+      api.graph().then((g) => {
+        setGraph(g)
+        const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort, setReportBuildId)
+        const ids = new Set(Object.keys(g.blocks))
+        const added = knownIds.current ? [...ids].filter((id) => !knownIds.current!.has(id)) : []
+        knownIds.current = ids
+        const running = new Set(Object.entries(g.blocks).filter(([, b]) => b.status === 'running').map(([id]) => id))
+        const prevRunning = runningIds.current
+        const startedRunning = [...running].some((id) => !prevRunning.has(id))
+        runningIds.current = running
+        const userBusy = Date.now() - userMovedAt.current < FOLLOW_PAUSE_MS
+        if (follow && didInitialFit.current && !userBusy && (added.length > 0 || startedRunning)) {
+          // New blocks: zoom out to the whole graph, focused on the newest.
+          // A run: bring the running blocks into view, panning, and zooming
+          // out only if they don't fit -- focused on the one that just started.
+          const focus = added.length > 0 ? added[added.length - 1] : [...running].find((id) => !prevRunning.has(id))!
+          // After the new nodes are measured, or the bounds miss them.
+          setTimeout(() => followView(added.length > 0 ? [...ids] : [...running], focus, added.length === 0), 80)
+        }
+        // Carry over React Flow's measured size and selection: the run poll
+        // reloads every 200ms, and fresh nodes without `measured` are hidden
+        // until re-measured, which blinks the whole canvas.
+        setBlockNodes((prev) => {
+          const prevById = new Map(prev.map((n) => [n.id, n]))
+          return nextBlockNodes.map((n) => {
+            const old = prevById.get(n.id)
+            return old ? { ...n, measured: old.measured, selected: old.selected } : n
+          })
+        })
+        // fit the view to the actual blocks (not the oversized lane bands) once,
+        // on first load -- re-fitting on every later reload would yank the
+        // viewport out from under someone mid-edit.
+        if (!didInitialFit.current && nextBlockNodes.length > 0) {
+          didInitialFit.current = true
+          requestAnimationFrame(() => fitView({ nodes: nextBlockNodes.map((n) => ({ id: n.id })), padding: 0.2 }))
+        }
+        // A run started in the background (see api.py's _start_background_run)
+        // can fail on a precondition (e.g. "Run" clicked on a block whose
+        // upstream isn't green) before any block state changes -- surfaced
+        // here once, the server clears it as soon as this read happens.
+        if (g.run_error) host.notify(g.run_error)
+      }),
+    [collapsedLanes, fitView, followView, onViewPort],
+  )
+  // After the canvas's own edits: the view stays where the user put it.
+  const reload = useCallback(() => load(false), [load])
+  // After changes from elsewhere (an assistant, a run, another tab): the
+  // view follows new and running blocks.
+  const reloadFollow = useCallback(() => load(true), [load])
 
   useEffect(() => {
     reload()
@@ -241,9 +297,9 @@ function AppInner() {
             .catch((e) => host.notify((e as Error).message))
         else if (name === 'reload' && path) api.load(path).then(reload).catch((e) => host.notify((e as Error).message))
         // The backend's graph changed underneath (a Copilot Chat tool edit).
-        else if (name === 'refresh') reload()
+        else if (name === 'refresh') reloadFollow()
       }),
-    [reload],
+    [reload, reloadFollow],
   )
   useEffect(() => {
     if (host.kind !== 'vscode') return
@@ -320,9 +376,9 @@ function AppInner() {
     // grey -> running -> green/red transition during a Run all/Force run
     // all sweep is actually visible rather than the canvas jumping straight
     // from all-grey to done between two 700ms-apart polls.
-    const id = setInterval(reload, 200)
+    const id = setInterval(reloadFollow, 200)
     return () => clearInterval(id)
-  }, [anyRunning, reload])
+  }, [anyRunning, reloadFollow])
 
   // Edits made elsewhere -- an assistant such as Claude Code over MCP,
   // another tab -- show up within a couple of seconds: poll a cheap stamp
@@ -337,7 +393,7 @@ function AppInner() {
         .graphStamp()
         .then(({ stamp }) => {
           if (stopped) return
-          if (stampRef.current !== null && stamp !== stampRef.current) reload()
+          if (stampRef.current !== null && stamp !== stampRef.current) reloadFollow()
           stampRef.current = stamp
         })
         .catch(() => {})
@@ -346,7 +402,7 @@ function AppInner() {
       stopped = true
       clearInterval(id)
     }
-  }, [anyRunning, reload])
+  }, [anyRunning, reloadFollow])
 
   useEffect(() => {
     if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort, setReportBuildId))
@@ -798,6 +854,10 @@ function AppInner() {
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
+            onMoveStart={(event) => {
+              // Only the user's own pans and zooms (fitView's carry no event).
+              if (event) userMovedAt.current = Date.now()
+            }}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onEdgeClick={onEdgeClick}
@@ -877,7 +937,7 @@ function AppInner() {
               graph={graph}
               selectedIds={selectedIds}
               llmSettings={llmSettings}
-              onChanged={reload}
+              onChanged={reloadFollow}
               onBuild={setBuild}
               onClose={() => setBuildOpen(false)}
               onOpenReport={setReportBuildId}
