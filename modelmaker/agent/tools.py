@@ -1421,8 +1421,9 @@ def ask_user(b: AgentBuild, question: str, options: list[str] | None = None) -> 
 
 @tool(
     "finish",
-    "Finish the build, once the last stage is built and checked. `report` is Markdown for the user: what "
-    "you built, deviations, key results and concerns. `key_outputs` lists the blocks/ports holding the "
+    "Finish the build, once the last stage is built and checked. `report` is the model document, in Markdown: "
+    "purpose and data, then one section per stage in build order explaining each step and the choices made "
+    "(with the numbers behind them), deviations, results, limitations and next checks. `key_outputs` lists the blocks/ports holding the "
     "headline metrics, so they can be refreshed after the final full-data run. If the user agreed (through "
     "ask_user) to drop the remaining stages, say why in `dropped_stages_reason`. After calling it, end your turn.",
     {

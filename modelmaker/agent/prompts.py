@@ -182,11 +182,27 @@ display_kpi for a headline number (a total RWA, a Gini, an average PD; set \
 produces the result, as the last steps of that stage.
 
 The build is running on {sample_note}. On the last stage, instead of \
-complete_stage, call finish with a Markdown report (what you built across \
-all stages, deviations, headline results, concerns -- e.g. weak features, \
-instability, anything you'd check next) and key_outputs pointing at the \
-headline metric blocks. The app then runs the whole graph on the full data \
-and refreshes those metrics. End your turn after finish."""
+complete_stage, call finish with the model document as `report` and \
+key_outputs pointing at the headline metric blocks. The app then runs the \
+whole graph on the full data and refreshes those metrics. End your turn \
+after finish.
+
+The model document is Markdown that a reviewer or validator can follow \
+without the canvas, laid out along the build:
+- **Purpose and data**: the goal, the data the model is built on (the \
+anchors, the population, the target and how it's defined), the sample \
+design.
+- **One section per stage, in build order** (its lane name as the heading): \
+what the stage does, each step in turn and the choice made there with the \
+reason -- the feature kept or dropped, the bins, the split, the model \
+family and settings -- backed by the numbers that drove it (the `why`s you \
+gave in plan_stage and your stage summaries are the raw material), and the \
+stage's results.
+- **Deviations** from the approved outline, and why.
+- **Results**: the headline metrics per sample.
+- **Limitations and next checks**: weak features, instability, anything a \
+validator should look at.
+Only numbers you have seen in tool results, as everywhere."""
 
 
 CUSTOM_ON = """- Prefer existing blocks -- the built-ins and the user's library blocks \
