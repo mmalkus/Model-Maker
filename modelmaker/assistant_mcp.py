@@ -349,7 +349,10 @@ def _launch_uri(uri: str, scheme: str = "vscode") -> bool:
     "grey/green/orange/red/running, params, input and output ports as name:type, the error of a red block, why an "
     "orange block is stale) and every wire. Call this first, and again after edits. Building a model from scratch: "
     "add lanes for its phases, a data source block (tag data_sources), tag the target column, then add, wire and run "
-    "blocks one phase at a time, checking with check as you go.",
+    "blocks one phase at a time, checking with check as you go. Once the model is built, offer to write a model "
+    "document (Markdown in the project folder): purpose and data, then one section per lane in build order "
+    "explaining each step and the choices made, with the numbers that drove them, then results, limitations and "
+    "next checks.",
 )
 def get_graph(r: Resolver, a: dict[str, Any]) -> Any:
     return _graph(r.target())
