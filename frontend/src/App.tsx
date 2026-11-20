@@ -186,9 +186,8 @@ function AppInner() {
     [flowStore, fitView, getNodesBounds, getZoom, setCenter],
   )
 
-  const load = useCallback(
-    (follow: boolean) =>
-      api.graph().then((g) => {
+  const apply = useCallback(
+    (g: GraphOut, follow: boolean) => {
         setGraph(g)
         const nextBlockNodes = toBlockNodes(g, collapsedLanes, onViewPort, setReportBuildId)
         const ids = new Set(Object.keys(g.blocks))
@@ -229,9 +228,59 @@ function AppInner() {
         // upstream isn't green) before any block state changes -- surfaced
         // here once, the server clears it as soon as this read happens.
         if (g.run_error) host.notify(g.run_error)
-      }),
+    },
     [collapsedLanes, fitView, followView, onViewPort],
   )
+
+  // One graph read at a time: a reload asked for while one is in flight
+  // runs once it's back (so it sees the newer state), however many were
+  // asked for meanwhile. Polls that pile up behind a slow or stuck backend
+  // would otherwise take every connection the browser allows it and freeze
+  // the canvas on its last state -- "running" forever. A read that fails
+  // (timed out, backend gone) is retried by the next poll; after a few in
+  // a row the canvas says it's reconnecting.
+  const inFlight = useRef<Promise<void> | null>(null)
+  const queued = useRef<{ follow: boolean; promise: Promise<void>; resolve: () => void } | null>(null)
+  const failures = useRef(0)
+  const [reconnecting, setReconnecting] = useState(false)
+  const loadRef = useRef<(follow: boolean) => Promise<void>>(() => Promise.resolve())
+  const load = useCallback(
+    (follow: boolean): Promise<void> => {
+      if (inFlight.current) {
+        if (queued.current) {
+          queued.current.follow ||= follow
+          return queued.current.promise
+        }
+        let resolve!: () => void
+        const promise = new Promise<void>((r) => (resolve = r))
+        queued.current = { follow, promise, resolve }
+        return promise
+      }
+      const p = api
+        .graph()
+        .then(
+          (g) => {
+            failures.current = 0
+            setReconnecting(false)
+            apply(g, follow)
+          },
+          () => {
+            failures.current += 1
+            if (failures.current >= 3) setReconnecting(true)
+          },
+        )
+        .finally(() => {
+          inFlight.current = null
+          const next = queued.current
+          queued.current = null
+          if (next) loadRef.current(next.follow).then(next.resolve)
+        })
+      inFlight.current = p
+      return p
+    },
+    [apply],
+  )
+  loadRef.current = load
   // After the canvas's own edits: the view stays where the user put it.
   const reload = useCallback(() => load(false), [load])
   // After changes from elsewhere (an assistant, a run, another tab): the
@@ -393,7 +442,9 @@ function AppInner() {
         .graphStamp()
         .then(({ stamp }) => {
           if (stopped) return
-          if (stampRef.current !== null && stamp !== stampRef.current) reloadFollow()
+          // Changed -- or the last graph read failed, so what's shown may
+          // be stale even if the stamp looks the same.
+          if ((stampRef.current !== null && stamp !== stampRef.current) || failures.current > 0) reloadFollow()
           stampRef.current = stamp
         })
         .catch(() => {})
@@ -403,6 +454,16 @@ function AppInner() {
       clearInterval(id)
     }
   }, [anyRunning, reloadFollow])
+
+  // Catch up as soon as the canvas is shown again: while hidden (another
+  // tab in front, a minimized window) it doesn't poll.
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden) reloadFollow()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [reloadFollow])
 
   useEffect(() => {
     if (graph) setBlockNodes(toBlockNodes(graph, collapsedLanes, onViewPort, setReportBuildId))
@@ -800,6 +861,23 @@ function AppInner() {
           </span>
           <span style={{ flex: 1 }} />
           <button onClick={() => api.setSampleMode(null).then(reload)}>Use full data</button>
+        </div>
+      )}
+      {reconnecting && (
+        <div
+          role="status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '5px 12px',
+            background: 'var(--brand-light)',
+            borderBottom: '1px solid var(--brand-border)',
+            fontSize: 12,
+          }}
+        >
+          <strong>Reconnecting to the backend…</strong>
+          <span>what's shown may be out of date; it updates as soon as the backend answers again.</span>
         </div>
       )}
       {recovery && (

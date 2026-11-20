@@ -30,10 +30,16 @@ import type {
 } from './types'
 import { host } from './host'
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  // A timeout for the polls: a request the backend never answers (it was
+  // starved of memory, or restarted) would otherwise hold one of the
+  // browser's few connections to it for good, and enough of them freeze
+  // every later request -- and with them the canvas.
+  const { timeoutMs, ...rest } = init ?? {}
   const res = await fetch(`${host.apiBase}/api${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...host.authHeaders(), ...init?.headers },
+    ...rest,
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+    headers: { 'Content-Type': 'application/json', ...host.authHeaders(), ...rest.headers },
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
@@ -48,8 +54,8 @@ export const api = {
   datasets: () => request<DatasetEntry[]>('/datasets'),
   capabilities: () => request<{ capabilities: string[]; features?: string[] }>('/capabilities'),
   sources: () => request<SourceEntry[]>('/sources'),
-  graph: () => request<GraphOut>('/graph'),
-  graphStamp: () => request<{ stamp: string }>('/graph/stamp'),
+  graph: () => request<GraphOut>('/graph', { timeoutMs: 20_000 }),
+  graphStamp: () => request<{ stamp: string }>('/graph/stamp', { timeoutMs: 10_000 }),
 
   createBlock: (body: {
     category?: string

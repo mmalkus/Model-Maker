@@ -42,6 +42,122 @@ def resolve_fn(category: str, code: str | None):
     return BLOCK_REGISTRY[category].fn
 
 
+# Guarding a LazyFrame's collect against running the machine out of memory
+# (see _collect_lazy). MODELMAKER_COLLECT_LIMIT_MB sets the limit outright;
+# 0 turns the guard off. Otherwise it's this share of the memory that's
+# free when the task starts: the result is copied again on its way to the
+# app process and into the cache, so a result can't take it all.
+COLLECT_LIMIT_ENV = "MODELMAKER_COLLECT_LIMIT_MB"
+COLLECT_FREE_SHARE = 0.4
+# Rows per streamed batch: large enough that the per-batch overhead is
+# noise, small enough that the guard stops close to the limit.
+COLLECT_BATCH_ROWS = 1_000_000
+# The phrase the assistants' run outcome keys its `next` hint on (see
+# assistant_mcp.run_outcome, vscode/src/assistant.ts).
+TOO_BIG_PHRASE = "too big to hold in memory"
+
+
+class OutputTooBig(MemoryError):
+    """A block's output was stopped while collecting, before it could run
+    the machine out of memory."""
+
+
+def available_memory_bytes() -> int | None:
+    """Physical memory free right now (what the OS could hand this process
+    without swapping), or None when it can't be told."""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(_MemoryStatus)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+            return None
+        return int(status.ullAvailPhys)
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def collect_limit_bytes() -> int | None:
+    """How big a collected output may grow before it's stopped; None for
+    no limit (turned off, or the free memory can't be told)."""
+    import os
+
+    raw = os.environ.get(COLLECT_LIMIT_ENV, "").strip()
+    if raw:
+        try:
+            mb = int(raw)
+        except ValueError:
+            mb = None
+        if mb is not None:
+            return None if mb <= 0 else mb * 1024**2
+    free = available_memory_bytes()
+    return None if free is None else int(free * COLLECT_FREE_SHARE)
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1024**3:,.1f} GB" if n >= 1024**3 else f"{n / 1024**2:,.0f} MB"
+
+
+def _collect_lazy(lf: Any) -> Any:
+    """`lf` collected -- streamed in batches, adding up their size as they
+    come, and stopped with OutputTooBig as soon as it passes
+    collect_limit_bytes(). A plain collect would hand the whole table to
+    the OS in one go and, when it doesn't fit, take the worker (and on a
+    Windows machine with little headroom, other programs) down with it.
+    Stopping is safe: each worker process runs one task, so raising ends
+    the query with the process. Without a limit, or on a polars without
+    collect_batches, it's a plain collect."""
+    import polars as pl
+
+    limit = collect_limit_bytes()
+    if limit is None or not hasattr(lf, "collect_batches"):
+        return lf.collect()
+    batches: list[pl.DataFrame] = []
+    rows = size = 0
+    for batch in lf.collect_batches(chunk_size=COLLECT_BATCH_ROWS):
+        batches.append(batch)
+        rows += batch.height
+        size += batch.estimated_size()
+        if size > limit:
+            raise OutputTooBig(
+                f"this block's output is {TOO_BIG_PHRASE}: it passed {rows:,} rows and {_gb(size)} and was still "
+                f"growing, past the {_gb(limit)} this machine can spare, so it was stopped before it ran out of "
+                "memory. Reduce it inside the block before it is handed on -- select only the columns needed, "
+                "filter to the population, sample whole IDs or aggregate (to one row per loan per snapshot, say) "
+                "-- or mark the next block's dataframe input \"lazy\": true and use Run all (streaming) so the two "
+                "run as one streamed query; sample mode keeps builds small meanwhile. "
+                f"({COLLECT_LIMIT_ENV} sets the limit; 0 turns it off.)"
+            )
+    if not batches:
+        return pl.DataFrame(schema=lf.collect_schema())
+    return pl.concat(batches, how="vertical", rechunk=False)
+
+
 def _sample_by_key(value: Any, rows: int, key: str) -> Any:
     """Sample mode keyed on an ID column: keeps every row of a pseudo-random
     subset of IDs, sized so that about `rows` rows come back. All of an
@@ -61,9 +177,9 @@ def _sample_by_key(value: Any, rows: int, key: str) -> Any:
     lf = value.lazy() if isinstance(value, pl.DataFrame) else value
     total = lf.select(pl.len()).collect().item()
     if total <= rows:
-        return lf.collect()
+        return _collect_lazy(lf)
     threshold = int(rows / total * 2**64)
-    return lf.filter(pl.col(key).hash(seed=0) < pl.lit(threshold, dtype=pl.UInt64)).collect()
+    return _collect_lazy(lf.filter(pl.col(key).hash(seed=0) < pl.lit(threshold, dtype=pl.UInt64)))
 
 
 def _collect(value: Any, sample: int | dict[str, Any] | None) -> Any:
@@ -78,7 +194,7 @@ def _collect(value: Any, sample: int | dict[str, Any] | None) -> Any:
     import polars as pl
 
     if sample is None or not isinstance(value, (pl.LazyFrame, pl.DataFrame)):
-        return value.collect() if isinstance(value, pl.LazyFrame) else value
+        return _collect_lazy(value) if isinstance(value, pl.LazyFrame) else value
     if isinstance(sample, dict):
         rows, key = int(sample["rows"]), sample.get("key")
         names = value.collect_schema().names() if isinstance(value, pl.LazyFrame) else value.columns
@@ -196,7 +312,12 @@ def run_fused_group_entry(
                 exit_ids.append(step["id"])
 
         results: dict[str, pl.DataFrame] = {}
-        if exit_ids:
+        if len(exit_ids) == 1:
+            # One exit: streamed and guarded like any block's output (see
+            # _collect_lazy). Several share subplans that collect_all
+            # computes once, so they're collected together, unguarded.
+            results = {exit_ids[0]: _collect_lazy(lazy_by_id[exit_ids[0]])}
+        elif exit_ids:
             collected = pl.collect_all([lazy_by_id[eid] for eid in exit_ids], engine="streaming")
             results = dict(zip(exit_ids, collected))
         result_queue.put((task_key, True, (schemas, results)))
