@@ -260,10 +260,11 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
 
   // ---- running ----------------------------------------------------------------
 
-  register<{ block?: string }>('modelmaker_run', {
-    describe: (i) => (i.block ? `Running up to ${i.block}` : 'Running the whole pipeline'),
+  register<{ block?: string; streaming?: boolean }>('modelmaker_run', {
+    describe: (i) => (i.streaming ? 'Running the whole pipeline (streaming)' : i.block ? `Running up to ${i.block}` : 'Running the whole pipeline'),
     edits: true,
     run: async (ctx, i, token) => {
+      if (i.streaming && i.block) throw new Error('a streaming run runs the whole pipeline: leave out block')
       const before = await graph(ctx)
       const target = i.block ? findBlock(before, i.block).id : null
       const deadline = Date.now() + RUN_TIMEOUT_MS
@@ -278,7 +279,7 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           refreshed.push(b.name)
         }
       }
-      await ctx.backend.json(target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
+      await ctx.backend.json(i.streaming ? '/run_all_streaming' : target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
       // The canvas polls while it sees a run: let it see this one.
       setTimeout(() => editor.refresh(ctx.folder), 300)
       for (;;) {

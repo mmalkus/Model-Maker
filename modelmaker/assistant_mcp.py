@@ -216,11 +216,14 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
 # (run_worker._collect_lazy) or a worker that died. Running it again fails
 # the same way; the source has to hand on less.
 OUT_OF_MEMORY_NEXT = (
-    "a block's output is too big for this machine's memory -- running it again fails the same way. Reduce it inside "
-    "the block that produces it: select only the needed columns, filter to the population, sample whole ids or "
+    "a block's output is too big for this machine's memory -- running it again the same way fails the same way. "
+    "First, mark the dataframe input of the block it feeds \"lazy\": true (for a library block, in its file, then "
+    "check_block_file) and keep that block polars expressions without a collect, then run the whole pipeline with "
+    "streaming: true, so the two run as one streamed query that never holds the full table. Or reduce it inside the "
+    "block that produces it: select only the needed columns, filter to the population, sample whole ids or "
     "aggregate to the model's grain before returning (for big zipped or plain CSVs, read them through Stage CSV as "
-    "Parquet rather than a staging script of your own). Or mark the next block's dataframe input \"lazy\": true and "
-    "run with streaming, so the two run as one streamed query; turn on sample mode while building."
+    "Parquet rather than a staging script of your own). Turn on sample mode while building (a streaming run needs "
+    "it off)."
 )
 
 
@@ -615,14 +618,25 @@ def delete_block(r: Resolver, a: dict[str, Any]) -> Any:
     "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data "
     "sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's "
     "status, with the error of any red block. Also reports any holdout leakage or suspicious features in the "
-    "pipeline, and the target block's decision hints.",
-    {"block": BLOCK},
+    "pipeline, and the target block's decision hints. streaming: true runs the whole pipeline as a streaming run "
+    "(no block; sample mode off): stretches of lazy blocks fuse into one streamed query, so a source larger than "
+    "memory never fully materializes between them -- the way forward when a block's output is too big.",
+    {
+        "block": BLOCK,
+        "streaming": {
+            "type": "boolean",
+            "description": "Run the whole pipeline streaming, fusing lazy blocks into streamed queries. Leave out block.",
+        },
+    },
 )
 def run(r: Resolver, a: dict[str, Any]) -> Any:
     t = r.target()
+    streaming = bool(a.get("streaming"))
+    if streaming and a.get("block"):
+        raise ToolInputError("a streaming run runs the whole pipeline: leave out block")
     target = find_block(_graph(t), a["block"])["id"] if a.get("block") else None
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
-    t.post(f"/blocks/{target}/run_to_here" if target else "/run_all", timeout=120)
+    t.post("/run_all_streaming" if streaming else f"/blocks/{target}/run_to_here" if target else "/run_all", timeout=120)
     g = _wait_idle(t, deadline)
     if g["running"]:
         return {"still_running": True, "note": "the run is still going; check the graph later", **run_outcome(g, target)}

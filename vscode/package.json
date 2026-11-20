@@ -675,7 +675,7 @@
         "name": "modelmaker_run",
         "toolReferenceName": "mmRun",
         "displayName": "Model-Maker: Run",
-        "modelDescription": "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's status, with the error of any red block. Also reports any holdout leakage or suspicious features in the pipeline, and the target block's decision hints.",
+        "modelDescription": "Runs a block and the blocks upstream of it, or with no block the whole pipeline (which also reads the data sources -- a single block's run doesn't), and waits for it. Returns status counts and each affected block's status, with the error of any red block. Also reports any holdout leakage or suspicious features in the pipeline, and the target block's decision hints. streaming: true runs the whole pipeline as a streaming run (no block; sample mode off): stretches of lazy blocks fuse into one streamed query, so a source larger than memory never fully materializes between them -- the way forward when a block's output is too big.",
         "userDescription": "Run the pipeline, or up to one block",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy-sub)",
@@ -688,6 +688,10 @@
             "block": {
               "type": "string",
               "description": "A block id (or exact name) from modelmaker_get_graph."
+            },
+            "streaming": {
+              "type": "boolean",
+              "description": "Run the whole pipeline streaming, fusing lazy blocks into streamed queries. Leave out block."
             }
           }
         }

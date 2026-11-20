@@ -60,6 +60,9 @@ LARGE_DATA_RULES = (
     'collect, it collects only after selecting, filtering and aggregating, with `.collect(engine="streaming")`. '
     "Never `.to_pandas()`, `.iter_rows()`, `.map_elements()` or Python loops over rows. A block that is only "
     'polars expressions marks its dataframe inputs "lazy": true, so a streaming run fuses it with its neighbours. '
+    "A block that consumes a large source (a lazy scan, or Stage CSV as Parquet's output) must declare its dataframe "
+    'input "lazy": true and stay lazy -- polars expressions, no collect -- so a streaming run fuses it with the '
+    "source instead of collecting the whole table into memory first. "
     "Panel data (several rows per id, e.g. a loan per month): per-id logic uses `.over(id)` or a `group_by` on "
     "the id joined back, and anything that looks ahead per id (an outcome flag) runs on the complete history "
     "before rows are thinned. Downcast a table that stays large (Float64 to Float32, Int64 to Int32, repeated "

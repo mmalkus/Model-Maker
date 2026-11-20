@@ -86,8 +86,11 @@ export function runOutcome(graph: Graph, target: string | null): object {
 
 // Same wording as assistant_mcp.OUT_OF_MEMORY_NEXT.
 const OUT_OF_MEMORY_NEXT =
-  "a block's output is too big for this machine's memory -- running it again fails the same way. Reduce it inside " +
-  'the block that produces it: select only the needed columns, filter to the population, sample whole ids or ' +
+  "a block's output is too big for this machine's memory -- running it again the same way fails the same way. " +
+  'First, mark the dataframe input of the block it feeds "lazy": true (for a library block, in its file, then ' +
+  'check_block_file) and keep that block polars expressions without a collect, then run the whole pipeline with ' +
+  'streaming: true, so the two run as one streamed query that never holds the full table. Or reduce it inside the ' +
+  "block that produces it: select only the needed columns, filter to the population, sample whole ids or " +
   "aggregate to the model's grain before returning (for big zipped or plain CSVs, read them through Stage CSV as " +
-  'Parquet rather than a staging script of your own). Or mark the next block\'s dataframe input "lazy": true and ' +
-  'run with streaming, so the two run as one streamed query; turn on sample mode while building.'
+  'Parquet rather than a staging script of your own). Turn on sample mode while building (a streaming run needs ' +
+  'it off).'
