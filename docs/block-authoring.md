@@ -207,6 +207,13 @@ habits keep big sources workable:
       )
   ```
 
+- **A block that consumes a large source stays lazy.** Declare its
+  dataframe input `"lazy": true` and write it as polars expressions with
+  no collect, so a streaming run (**Run all (streaming)**, or the
+  assistant's `run` with `streaming: true`) fuses it with the source into
+  one streamed query. A block whose input isn't lazy gets the source's
+  full table collected into memory first, and the engine stops that run
+  when the table doesn't fit.
 - **No row-by-row Python.** `.to_pandas()`, `.iter_rows()`,
   `.map_elements()` and loops over rows copy the data out of polars and
   are slow on millions of rows.

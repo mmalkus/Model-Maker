@@ -150,6 +150,24 @@ def test_a_whole_run_rereads_a_source_whose_settings_changed(backend, tmp_path, 
     assert ran["statuses"] == {"green": 2}, ran
 
 
+
+def test_run_can_start_a_streaming_run(backend, tmp_path, monkeypatch):
+    # The out-of-memory hint says "run ... with streaming: true": the tool can.
+    monkeypatch.chdir(tmp_path)
+    r = mm.Resolver(backend, None, discovery=tmp_path / "none")
+    call(r, "open_project", folder="p", create=True)
+    load = call(r, "add_block", category="demo_credit_data")
+    split = call(r, "add_block", category="train_test_split")
+    call(r, "connect", from_block=load["id"], from_port=load["outputs"][0].split(":")[0], to_block=split["id"], to_port="df")
+    posted = []
+    real_post = mm.Target.post
+    monkeypatch.setattr(mm.Target, "post", lambda self, path, *a, **k: (posted.append(path), real_post(self, path, *a, **k))[1])
+    ran = call(r, "run", streaming=True)
+    assert posted == ["/run_all_streaming"] and "red" not in ran["statuses"], ran
+    result, is_error = mm.call(r, "run", {"block": split["id"], "streaming": True})
+    assert is_error and "leave out block" in result["error"]
+    assert "streaming: true" in mm.OUT_OF_MEMORY_NEXT and mm.OUT_OF_MEMORY_NEXT.index("lazy") < mm.OUT_OF_MEMORY_NEXT.index("reduce it")
+
 def test_an_assistant_writes_and_checks_a_library_block(backend, tmp_path, monkeypatch, block_library_dir):
     from tests.test_embedding import LAZY_SOURCE
 

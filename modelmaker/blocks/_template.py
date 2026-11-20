@@ -41,8 +41,11 @@ BLOCKS = {
         # not with a staging script of your own; an input block hands on
         # only what the model needs (select, filter, sample, aggregate);
         # collect inside a block only after reducing, with
-        # .collect(engine="streaming"). See "Large data" in
-        # docs/block-authoring.md.
+        # .collect(engine="streaming"). A block that consumes a large
+        # source declares its dataframe input "lazy": True and stays lazy
+        # (polars expressions, no collect), so a streaming run fuses it
+        # with the source instead of collecting the whole table first.
+        # See "Large data" in docs/block-authoring.md.
         "inputs": [{"name": "df", "type": "dataframe", "lazy": True}],
         "outputs": [{"name": "out", "type": "dataframe"}],
         # Params form fields worth a label, placeholder or options; every
