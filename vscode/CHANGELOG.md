@@ -3,6 +3,23 @@
 The extension's version follows the `quantology-modelmaker` Python package
 it runs (see vscode-extension-plan.md §8.2).
 
+## 0.3.7
+
+- **No more out-of-memory crashes from a too-big table.** A block's output
+  is read in streamed batches and stopped, red, with a clear "too big to
+  hold in memory" message once it passes the memory the machine can spare,
+  instead of the worker taking the machine down. The message (and the
+  assistants' next-step hint) says how to fix it: reduce the data in the
+  source block, or let the next block take it lazily and run streaming.
+  `MODELMAKER_COLLECT_LIMIT_MB` sets the limit; 0 turns the check off.
+- **The canvas recovers.** Its update requests time out and never pile up,
+  it catches up as soon as it's shown again, and it says when it's
+  reconnecting to the backend -- no more canvas stuck on "running".
+- **Stage CSV as Parquet takes a folder or glob** (e.g. a set of quarterly
+  zips) and a `columns` list for a slim stage. Guidance tells assistants
+  to use it rather than a staging script of their own, and to reduce big
+  sources inside the source block.
+
 ## 0.3.6
 
 - **The canvas follows what assistants do.** When Copilot, Claude Code or
