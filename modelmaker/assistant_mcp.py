@@ -219,8 +219,9 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
 
 
 OUTDATED_NOTE = (
-    "these placed library blocks ran an older version than their library file: update each with update_block "
-    "(apply: true), then run again"
+    "these placed library blocks still have the code they were placed with, which is not what their library file "
+    "has now (runs_version and library_version are the version numbers each says): to use the file's code, update "
+    "each with update_block (apply: true), then run again"
 )
 
 

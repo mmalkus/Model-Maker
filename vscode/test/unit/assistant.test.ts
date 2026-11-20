@@ -41,6 +41,17 @@ test('a run reports the target, or every block that is not green', () => {
   assert.deepEqual((runOutcome(graph, null) as any).blocks, [{ id: 'c', name: 'Block c', status: 'red', error: 'boom' }])
 })
 
+test('a run names placed library blocks whose file has different code', () => {
+  const behind = { file: 'loans.py', runs_version: 1, library_version: 2 }
+  const g = { ...graph, blocks: [{ ...block('a', null, 0, 0), outdated: behind }, block('b', null, 0, 0)] }
+  const ran = runOutcome(g, null) as any
+  assert.deepEqual(ran.outdated_blocks, [{ id: 'a', name: 'Block a', ...behind }])
+  assert.match(ran.outdated_note, /update_block \(apply: true\)/)
+  const clean = runOutcome(graph, null) as any
+  assert.equal(clean.outdated_blocks, undefined)
+  assert.equal(clean.outdated_note, undefined)
+})
+
 test('a run blocked on an unread source says how to unblock it', () => {
   const g = { ...graph, blocks: [block('d', null, 0, 0, 'red', "RuntimeError: input block 'b_load' is not green")] }
   assert.match((runOutcome(g, 'd') as any).next, /run the whole pipeline/)

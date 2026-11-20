@@ -77,9 +77,11 @@ def _block_brief(bid: str) -> dict[str, Any]:
 
 
 def _outdated(block) -> dict[str, Any] | None:
-    """For a placed library block whose file has changed since it was
-    placed: the version it runs and the file's. A placed block keeps its
-    own copy of the code, so it runs the old one until it's updated
+    """For a placed library block whose file's code differs from the copy
+    it was placed with: the version number each says. Flagged on the code,
+    not the number, so an edit without a version bump (equal numbers) or a
+    file rolled back (library_version lower) counts too. A placed block
+    keeps its own copy of the code, so it runs that until it's updated
     (update_block) -- issue #93."""
     from .library_updates import status_for
 
