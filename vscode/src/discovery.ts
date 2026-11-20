@@ -12,7 +12,12 @@ import * as path from 'node:path'
 export const DISCOVERY_DIR = path.join(homedir(), '.modelmaker', 'vscode-backends')
 
 // uri_scheme: the editor's (vscode, cursor, windsurf), for open_project's links.
-export type DiscoveryEntry = { folder: string; url: string; token: string; pid: number; active_at: number; uri_scheme: string }
+export type DiscoveryEntry = { folder: string; url: string; token: string; pid: number; active_at: number; uri_scheme: string; note?: string }
+
+// Written into every file: an assistant that finds it is told the API is
+// off-limits (the MCP server says the same in its instructions).
+export const DISCOVERY_NOTE =
+  "For modelmaker-mcp only. This backend's HTTP API is private: assistants use the modelmaker MCP tools, never this URL and token directly."
 
 export class Discovery {
   // folder -> its file and what's in it
@@ -30,7 +35,7 @@ export class Discovery {
     const file = path.join(this.dir, `${process.pid}-${new URL(url).port}.json`)
     const previous = this.entries.get(folder)
     if (previous && previous.file !== file) rmSync(previous.file, { force: true })
-    this.write(folder, file, { folder, url, token, pid: process.pid, active_at: active ? Date.now() : (previous?.entry.active_at ?? 0), uri_scheme: this.uriScheme })
+    this.write(folder, file, { folder, url, token, pid: process.pid, active_at: active ? Date.now() : (previous?.entry.active_at ?? 0), uri_scheme: this.uriScheme, note: DISCOVERY_NOTE })
   }
 
   /** The folder's canvas is the one in use now. */

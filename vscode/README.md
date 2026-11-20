@@ -120,6 +120,9 @@ that stay put across extension updates. Before committing a workspace's
 The server finds the canvases through small files in
 `~/.modelmaker/vscode-backends/` (each backend's local address and access
 token, readable by you only). Turn this off with `modelmaker.mcp.discovery`.
+That API is private to the tools: the server's instructions (and a note in
+each file) tell the assistant to use the tools and never call the backend
+directly with that token.
 
 The same server works with the browser app: `modelmaker-mcp --url
 http://127.0.0.1:8001`.
