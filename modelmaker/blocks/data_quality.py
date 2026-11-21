@@ -124,7 +124,7 @@ def apply_exclusions(df: pl.DataFrame, rules: list[dict]) -> tuple[pl.DataFrame,
     kept = df
     for rule in rules:
         before = kept.height
-        _check_sql(kept, rule["expr"], where=True)
+        _check_sql(kept, rule["expr"])
         kept = kept.filter(pl.sql_expr(rule["expr"]))
         after = kept.height
         steps.append({"step": rule["name"], "rule": rule["expr"], "dropped": before - after, "remaining": after})
@@ -138,17 +138,21 @@ def apply_exclusions(df: pl.DataFrame, rules: list[dict]) -> tuple[pl.DataFrame,
     return kept, summary
 
 
-def _check_sql(df: pl.DataFrame, expr: str, where: bool) -> None:
-    """Parses `expr` as part of a whole query on an empty copy of `df`
-    (as the WHERE condition, or as one SELECT column) so a malformed one
-    fails here. pl.sql_expr alone can quietly read trailing text as an
-    alias ("a > 1 xyz" is "a > 1 AS xyz"), and before polars 1.40 it also
-    dropped what it couldn't read ("not a valid expr(((" became "NOT a")."""
-    query = f"SELECT * FROM self WHERE ({expr})" if where else f"SELECT ({expr}) AS _checked FROM self"
-    try:
-        df.clear().sql(query)
-    except (pl.exceptions.SQLInterfaceError, pl.exceptions.SQLSyntaxError) as e:
-        raise ValueError(f"can't read the expression {expr!r}: {e}") from None
+def _check_sql(df: pl.DataFrame, expr: str) -> None:
+    """Parses `expr` as a column of a whole query on an empty copy of `df`,
+    so a malformed one fails here. pl.sql_expr alone can quietly read
+    trailing text as an alias ("a > 1 xyz" is "a > 1 AS xyz"), and before
+    polars 1.40 it also dropped what it couldn't read ("not a valid
+    expr(((" became "NOT a"). Parsed twice: bare, so a stray ")" can't
+    close a bracket of the query ("a > 1) AND (a < 3"), and bracketed, so
+    a trailing clause can't end the query early ("a > 1 ORDER BY a").
+    Kept identical in library.py and data_quality.py: a compiled script
+    copies a block's helpers from its own file only."""
+    for column in (expr, f"({expr})"):
+        try:
+            df.clear().sql(f"SELECT {column} AS _checked FROM self")
+        except (pl.exceptions.SQLInterfaceError, pl.exceptions.SQLSyntaxError, pl.exceptions.ColumnNotFoundError) as e:
+            raise ValueError(f"can't read the expression {expr!r}: {e}") from None
 
 
 def data_quality_rules(df: pl.DataFrame, rules: list[dict]) -> dict:
