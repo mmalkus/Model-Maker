@@ -516,8 +516,7 @@ def stage_csv_parquet(
     zip's CRC-32 per member; SHA-256 for a plain or gzipped file, skipped
     while its size and modification time are unchanged) and the read
     options: a part is rebuilt only when its source or the options
-    changed, so later runs go straight to the Parquet. Staging is faster
-    on polars 2.x."""
+    changed, so later runs go straight to the Parquet."""
     import os
 
     if separator in ("\\t", "tab", "TAB"):
