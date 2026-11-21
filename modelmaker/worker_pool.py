@@ -411,8 +411,18 @@ class Worker:
 
     def crash_message(self) -> str:
         self.process.join(timeout=5)
+        code = self.process.exitcode
+        if code == -9:
+            # SIGKILL: on Linux, almost always the kernel's out-of-memory
+            # killer (a user stop terminates with SIGTERM instead).
+            return (
+                "worker process was killed by the system (signal 9) -- likely out of memory: the system stops a "
+                "process that takes more memory than the machine has. "
+                "If the block's output is a big table, reduce it inside the block (select, filter, sample or "
+                "aggregate before handing it on) or let the next block take it lazily and use Run all (streaming)"
+            )
         return (
-            f"worker process exited unexpectedly (code {self.process.exitcode}) -- likely out of memory or a crash. "
+            f"worker process exited unexpectedly (code {code}) -- likely out of memory or a crash. "
             "If the block's output is a big table, reduce it inside the block (select, filter, sample or aggregate "
             "before handing it on) or let the next block take it lazily and use Run all (streaming)"
         )

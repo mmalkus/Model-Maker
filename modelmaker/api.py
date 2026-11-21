@@ -15,7 +15,7 @@ from dataclasses import asdict
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import capabilities, features, gitops, library_store, project
+from . import capabilities, features, gitops, library_store, preflight, project
 from .agent.catalogue import TAGS as BLOCK_TAGS
 from .agent.build import BUILD_LOG_DIRNAME, AgentBuild, BuildOptions, LLMChoice, build_log_dir
 from .agent.controller import BuildError
@@ -330,6 +330,14 @@ class LaneUpsert(BaseModel):
     height: float | None = None
 
 
+class PreflightRequest(BaseModel):
+    # Which run is about to start: run_all, force_run_all,
+    # run_all_streaming, run_block or run_to_here (the last two with
+    # block_id).
+    mode: Literal["run_all", "force_run_all", "run_all_streaming", "run_block", "run_to_here"]
+    block_id: str | None = None
+
+
 class SampleModeUpdate(BaseModel):
     # None turns sample mode off; an int is the row cap applied to every
     # input block's output (see Runner.sample_rows).
@@ -541,6 +549,14 @@ def _block_out(block_id: str) -> dict[str, Any]:
         # Ran inside the last successful streaming query, with no cached
         # output of its own (see Runner.ran_fused).
         "ran_fused": _session().runner.ran_fused(block_id),
+        # For a block stopped for running out of memory: whether Run all
+        # (streaming) would take its output lazily, and the blocks that
+        # take it whole (see preflight.memory_advice). None otherwise.
+        "memory_advice": (
+            preflight.memory_advice(_session().graph, block_id)
+            if status == "red" and preflight.is_out_of_memory_error(st.last_error if st else None)
+            else None
+        ),
         "last_successful_read_at": st.last_successful_read_at if st else None,
         "last_attempt_at": st.last_attempt_at if st else None,
         # A crude heartbeat while a block (or a whole fused streaming
@@ -1195,6 +1211,18 @@ def run_all_streaming() -> dict[str, Any]:
 def refresh_all() -> dict[str, Any]:
     report = _start_background_run(lambda session: session.runner.refresh_all())
     return report if report is not None else {"started": True}
+
+
+@app.post("/api/run_preflight")
+def run_preflight(req: PreflightRequest) -> dict[str, Any]:
+    """Before a run starts: the input blocks it would collect whole that are
+    bigger than the memory the machine can spare, each with an estimated
+    size and whether Run all (streaming) would avoid it (see preflight.py).
+    Reads only file metadata and a few MB of text -- no block runs. An empty
+    `blocks` list means go ahead."""
+    if req.block_id is not None:
+        _require_block(req.block_id)
+    return preflight.preflight(_session().graph, _session().runner, req.mode, req.block_id)
 
 
 @app.post("/api/run/cancel")

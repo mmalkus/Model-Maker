@@ -20,9 +20,11 @@ import type {
   LibraryFile,
   LibraryOut,
   LLMSettingsOut,
+  PreflightOut,
   PreviewOut,
   RecoveryInfo,
   RegistryEntry,
+  RunMode,
   SourceEntry,
   SuggestNamesOut,
   TryOut,
@@ -115,6 +117,10 @@ export const api = {
   refresh: (id: string) => request<BlockOut>(`/blocks/${id}/refresh`, { method: 'POST' }),
   checkChanges: (id: string) => request<{ changed: boolean }>(`/blocks/${id}/check_changes`, { method: 'POST' }),
 
+  // Before a run: the input blocks it would load whole that won't fit in
+  // memory (estimated from file metadata and a sample -- nothing runs).
+  runPreflight: (mode: RunMode, block_id?: string) =>
+    request<PreflightOut>('/run_preflight', { method: 'POST', body: JSON.stringify({ mode, block_id }), timeoutMs: 30_000 }),
   runAll: () => request<Record<string, string>>('/run_all', { method: 'POST' }),
   forceRunAll: () => request<Record<string, string>>('/force_run_all', { method: 'POST' }),
   // Opt-in streaming run (see Runner.run_all_streaming): fuses whatever
