@@ -87,12 +87,15 @@ def memory_budget_bytes() -> int | None:
 
 
 def entry_size(entry: "CacheEntry") -> int:
-    """An entry's in-memory size, estimated from its dataframes (polars'
-    own estimate); other values are small next to them and count as 0."""
+    """An entry's in-memory size, estimated from its dataframes (see
+    run_worker.frame_bytes); other values are small next to them and count
+    as 0."""
+    from .run_worker import frame_bytes
+
     size = 0
     for value in entry.outputs.values():
         if isinstance(value, DataFramePacket):
-            size += value.data.estimated_size()
+            size += frame_bytes(value.data)
     return size
 
 

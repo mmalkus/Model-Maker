@@ -566,6 +566,47 @@ def test_guarded_collect_stops_an_output_too_big_for_memory(monkeypatch):
     assert run_worker._collect_lazy(lf).height == 3_000_000
 
 
+def test_frame_bytes_counts_the_view_of_every_string_value():
+    # polars' estimated_size() counts a string's characters but not its
+    # 16-byte view, so short codes (MMYYYY dates, status codes, read as text)
+    # held ~4x what it said and the guard let a loan tape run the machine out
+    # of memory instead of stopping it.
+    from modelmaker.run_worker import STRING_VIEW_BYTES, frame_bytes
+
+    n = 100_000
+    df = pl.DataFrame({"period": ["012014"] * n, "dlq": ["00"] * n, "upb": [1.0] * n})
+    assert frame_bytes(df) == df.estimated_size() + STRING_VIEW_BYTES * 2 * n
+    assert frame_bytes(df) >= 3 * df.estimated_size()
+    nested = pl.DataFrame({"l": [["a", "b"], ["c"]], "s": [{"x": "a", "y": 1}, {"x": None, "y": 2}], "b": [b"x", b"y"]})
+    assert frame_bytes(nested) == nested.estimated_size() + STRING_VIEW_BYTES * (3 + 2 + 2)
+    numeric = pl.DataFrame({"a": range(10), "l": [[1]] * 10})
+    assert frame_bytes(numeric) == numeric.estimated_size()
+
+
+def test_guarded_collect_stops_short_codes_that_polars_underestimates(monkeypatch):
+    from modelmaker import run_worker
+
+    # 1.5M rows of three short text codes: polars says ~16 MB, they hold ~85 MB.
+    lf = pl.LazyFrame({"a": range(1_500_000)}).select(
+        period=pl.col("a").mod(120).cast(pl.String).str.zfill(6),
+        dlq=pl.col("a").mod(7).cast(pl.String).str.zfill(2),
+        state=pl.col("a").mod(50).cast(pl.String),
+    )
+    collected = lf.collect()
+    assert collected.height == 1_500_000 and collected.estimated_size() < 30 * 1024**2
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "40")
+    with pytest.raises(run_worker.OutputTooBig, match="too big to hold in memory"):
+        run_worker._collect_lazy(lf)
+
+
+def test_cache_entry_size_counts_string_views():
+    from modelmaker.run_worker import STRING_VIEW_BYTES
+
+    df = pl.DataFrame({"code": ["00"] * 1000})
+    entry = type("E", (), {"outputs": {"out": DataFramePacket(data=df, schema_meta={})}})()
+    assert entry_size(entry) == df.estimated_size() + STRING_VIEW_BYTES * 1000
+
+
 def test_the_default_limit_says_what_it_is_based_on(monkeypatch):
     # 2.1 GB on a 16 GB machine read as "this machine can spare 2.1 GB" (#94).
     from modelmaker import run_worker

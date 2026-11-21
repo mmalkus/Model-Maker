@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..packet import ColumnRole, DataFramePacket
+from ..run_worker import frame_bytes
 
 # ---- thresholds ----------------------------------------------------------------
 
@@ -139,7 +140,7 @@ def size_hints(outputs: dict[str, Any], scale: float | None) -> list[str]:
     for port, packet in outputs.items():
         if not isinstance(packet, DataFramePacket):
             continue
-        rows, size = packet.data.height, packet.data.estimated_size()
+        rows, size = packet.data.height, frame_bytes(packet.data)
         k = scale or 1.0
         if rows * k < LARGE_TABLE_ROWS and size * k < LARGE_TABLE_BYTES:
             continue
