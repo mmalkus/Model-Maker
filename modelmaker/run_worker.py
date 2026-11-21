@@ -142,6 +142,11 @@ def memory_bytes() -> tuple[int | None, int | None]:
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
             return None, None
         return int(status.ullAvailPhys), int(status.ullTotalPhys)
+    if sys.platform == "darwin":
+        # macOS has neither /proc/meminfo nor SC_AVPHYS_PAGES; without this
+        # the free memory read as unknown and the collect limit was off.
+        total = _sysconf_bytes("SC_PHYS_PAGES")
+        return (None if total is None else _darwin_available_bytes(total)), total
     free = total = None
     try:
         with open("/proc/meminfo", encoding="ascii") as f:
@@ -169,6 +174,100 @@ def _sysconf_bytes(pages_name: str) -> int | None:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf(pages_name)
     except (AttributeError, ValueError, OSError):
         return None
+
+
+def _darwin_free_from_counts(
+    total_bytes: int, internal: int, purgeable: int, wired: int, compressed: int, page_size: int
+) -> int:
+    """Bytes macOS could hand a process without swapping: the machine's
+    memory less what Activity Monitor counts as "Memory Used" -- app memory
+    (anonymous pages, less those apps marked purgeable), wired memory and
+    what the compressor holds. What's left is free pages and the file
+    cache, which macOS keeps full and drops on demand: the same thing
+    Linux's MemAvailable counts. (Free + inactive pages alone leaves the
+    file cache out, and on a Mac that's been up a while reads a few GB
+    on a 16 GB machine.)"""
+    used = (max(internal - purgeable, 0) + wired + compressed) * page_size
+    return max(total_bytes - used, 0)
+
+
+def _darwin_available_bytes(total_bytes: int) -> int | None:
+    """Physical memory free right now on macOS (see _darwin_free_from_counts),
+    from the Mach call host_statistics64(HOST_VM_INFO64) -- what `vm_stat`
+    prints -- or None when it can't be read."""
+    import ctypes
+    import ctypes.util
+
+    u32, u64 = ctypes.c_uint32, ctypes.c_uint64
+
+    class _VmStatistics64(ctypes.Structure):  # <mach/vm_statistics.h>
+        _fields_ = [
+            ("free_count", u32),
+            ("active_count", u32),
+            ("inactive_count", u32),
+            ("wire_count", u32),
+            ("zero_fill_count", u64),
+            ("reactivations", u64),
+            ("pageins", u64),
+            ("pageouts", u64),
+            ("faults", u64),
+            ("cow_faults", u64),
+            ("lookups", u64),
+            ("hits", u64),
+            ("purges", u64),
+            ("purgeable_count", u32),
+            ("speculative_count", u32),
+            ("decompressions", u64),
+            ("compressions", u64),
+            ("swapins", u64),
+            ("swapouts", u64),
+            ("compressor_page_count", u32),
+            ("throttled_count", u32),
+            ("external_page_count", u32),
+            ("internal_page_count", u32),
+            ("total_uncompressed_pages_in_compressor", u64),
+        ]
+
+    host_vm_info64 = 4  # HOST_VM_INFO64
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "/usr/lib/libSystem.B.dylib")
+        libc.mach_host_self.restype = u32
+        libc.host_statistics64.argtypes = [u32, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(u32)]
+        libc.host_statistics64.restype = ctypes.c_int
+        stats = _VmStatistics64()
+        count = u32(ctypes.sizeof(stats) // 4)  # HOST_VM_INFO64_COUNT, in 32-bit words
+        host = libc.mach_host_self()
+        try:
+            if libc.host_statistics64(host, host_vm_info64, ctypes.byref(stats), ctypes.byref(count)) != 0:
+                return None
+        finally:
+            # mach_host_self() hands out a new port reference on each call.
+            # Releasing it is tidying up: failing to doesn't spoil a reading.
+            try:
+                libc.mach_port_deallocate(u32.in_dll(libc, "mach_task_self_").value, u32(host))
+            except (OSError, AttributeError, ValueError):
+                pass
+        # The counts are in the kernel's pages, which can differ from this
+        # process's: 16 KB on Apple silicon even under Rosetta, where
+        # SC_PAGE_SIZE says 4 KB.
+        try:
+            page_size = ctypes.c_size_t.in_dll(libc, "vm_kernel_page_size").value
+        except ValueError:
+            page_size = 0
+        if not page_size:
+            import os
+
+            page_size = os.sysconf("SC_PAGE_SIZE")
+    except (OSError, AttributeError, ValueError):
+        return None
+    return _darwin_free_from_counts(
+        total_bytes,
+        stats.internal_page_count,
+        stats.purgeable_count,
+        stats.wire_count,
+        stats.compressor_page_count,
+        page_size,
+    )
 
 
 def available_memory_bytes() -> int | None:
