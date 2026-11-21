@@ -1,11 +1,12 @@
 name: Claude Code Review
 
-# Runs an automated Claude code review whenever a PR is opened (or marked
-# ready for review). Bills the Claude subscription via the
-# CLAUDE_CODE_OAUTH_TOKEN repo secret (created with `claude setup-token`).
+# Runs an automated Claude code review whenever a PR is opened, marked ready
+# for review, reopened, or gets new commits (synchronize). A newer push
+# cancels the review still running for the previous one. Bills the Claude
+# subscription via the CLAUDE_CODE_OAUTH_TOKEN repo secret (created with `claude setup-token`).
 on:
   pull_request:
-    types: [opened, ready_for_review, reopened]
+    types: [opened, ready_for_review, reopened, synchronize]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -44,6 +45,11 @@ jobs:
 
             Review this pull request. Read the diff with `gh pr diff` and
             `gh pr view`, and open the surrounding code where you need context.
+
+            This may be a re-review after new commits. Check your earlier
+            review comments with `gh pr view --comments`: say which earlier
+            findings are now fixed, keep the ones still present, and focus
+            on what changed since then. Don't repeat fixed findings.
 
             Focus on, in order:
             1. Correctness bugs and regressions (logic errors, edge cases,
