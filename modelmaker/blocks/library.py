@@ -1068,7 +1068,21 @@ def filter(df: pl.DataFrame, expr: str) -> pl.DataFrame:
     `out` with the same columns and roles. `expr` is a Polars SQL boolean
     expression over column names, e.g. "age >= 18 AND region = 'EU'" or
     "balance IS NOT NULL" (string literals in single quotes)."""
+    _check_sql(df, expr, where=True)
     return df.filter(pl.sql_expr(expr))
+
+
+def _check_sql(df: pl.DataFrame, expr: str, where: bool) -> None:
+    """Parses `expr` as part of a whole query on an empty copy of `df`
+    (as the WHERE condition, or as one SELECT column) so a malformed one
+    fails here. pl.sql_expr alone can quietly read trailing text as an
+    alias ("a > 1 xyz" is "a > 1 AS xyz"), and before polars 1.40 it also
+    dropped what it couldn't read ("not a valid expr(((" became "NOT a")."""
+    query = f"SELECT * FROM self WHERE ({expr})" if where else f"SELECT ({expr}) AS _checked FROM self"
+    try:
+        df.clear().sql(query)
+    except (pl.exceptions.SQLInterfaceError, pl.exceptions.SQLSyntaxError) as e:
+        raise ValueError(f"can't read the expression {expr!r}: {e}") from None
 
 
 def select(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
@@ -1231,6 +1245,8 @@ def derive_columns(df: pl.DataFrame, expressions: dict[str, str]) -> pl.DataFram
     Expressions are evaluated against the input columns (not each other),
     in one step. New columns are tagged role=feature; a replaced column
     keeps its role."""
+    for expr in expressions.values():
+        _check_sql(df, expr, where=False)
     return df.with_columns([pl.sql_expr(expr).alias(name) for name, expr in expressions.items()])
 
 
