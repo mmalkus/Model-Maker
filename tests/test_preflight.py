@@ -141,6 +141,22 @@ def test_streaming_still_flags_a_source_taken_whole(tmp_path, monkeypatch):
     assert len(preflight.preflight(graph2, runner2, "run_all_streaming")["blocks"]) == 1
 
 
+def test_a_lazy_port_that_wont_fuse_counts_as_taking_it_whole(tmp_path, monkeypatch):
+    # A grouped filter has a lazy input port, but a streaming run doesn't
+    # fuse it (grouping needs the whole table): the source is still loaded.
+    graph, runner = _graph(tmp_path, "filter")
+    graph.blocks["c"].group_by = "code"
+    monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "1")
+    monkeypatch.setattr(preflight, "estimate_block", lambda b: preflight.SizeEstimate(10**7, 5 * 1024**2, True))
+    [flag] = preflight.preflight(graph, runner, "run_all_streaming")["blocks"]
+    assert not flag["can_stream"] and flag["whole_consumers"] == ["c"]
+    # A sink (Write Parquet) streams the source straight to disk.
+    graph.blocks["c"] = make_block("c", "write_parquet", params={"filename": "x.parquet"}, x=1)
+    graph.wires["w"].to_port = "df"
+    assert preflight.preflight(graph, runner, "run_all_streaming")["blocks"] == []
+    assert preflight.memory_advice(graph, "r")["can_stream"]
+
+
 def test_nothing_flagged_under_the_limit_in_sample_mode_or_with_the_guard_off(tmp_path, monkeypatch):
     graph, runner = _graph(tmp_path, "filter")
     monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "1000")

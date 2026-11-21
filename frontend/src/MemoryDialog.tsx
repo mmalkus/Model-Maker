@@ -102,7 +102,12 @@ export function MemoryAdvice({ block, run }: { block: BlockOut; run: (fn: () => 
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {advice.can_stream && <button onClick={() => run(() => api.runAllStreaming())}>Run all (streaming)</button>}
-        <button onClick={() => run(() => api.setSampleMode(advice.sample_rows))}>Sample mode ({advice.sample_rows.toLocaleString()} rows)</button>
+        <button
+          title="Caps every source for this and later runs; the sample-mode bar above the canvas says so and has Use full data. Run again after."
+          onClick={() => run(() => api.setSampleMode(advice.sample_rows))}
+        >
+          Turn on sample mode ({advice.sample_rows.toLocaleString()} rows)
+        </button>
       </div>
     </div>
   )

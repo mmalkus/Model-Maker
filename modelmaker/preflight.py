@@ -50,14 +50,20 @@ class SizeEstimate:
 def lazy_consumers(graph: Graph, block_id: str) -> tuple[list[str], list[str]]:
     """(names of the blocks that take `block_id`'s output lazily, names of
     those that take it whole) -- a whole one makes even a streaming run
-    collect the output."""
+    collect the output. Lazily means the streaming run fuses the block
+    with its source, or folds it on as a sink: the runner's own rule
+    (_fusable_block / _sink_block), not just a `lazy` input port -- a
+    grouped block, or one needing role auto-fill, has a lazy port yet is
+    run on the whole table."""
+    from .runner import _fusable_block, _sink_block
+
     lazy, whole = [], []
     for w in graph.wires.values():
         if w.from_block != block_id or w.to_block not in graph.blocks:
             continue
         to = graph.blocks[w.to_block]
-        port = next((p for p in to.inputs if p.name == w.to_port), None)
-        (lazy if port is not None and getattr(port, "lazy", False) else whole).append(to.name)
+        fuses = _fusable_block(to) is not None or _sink_block(to) is not None
+        (lazy if fuses else whole).append(to.name)
     return lazy, whole
 
 
