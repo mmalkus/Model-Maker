@@ -57,6 +57,56 @@ COLLECT_BATCH_ROWS = 1_000_000
 TOO_BIG_PHRASE = "too big to hold in memory"
 
 
+# Bytes per value of a String/Binary column that polars' estimated_size()
+# leaves out: each value has a 16-byte view (length, prefix, buffer offset)
+# besides its characters, and values of up to 12 bytes live in the view
+# alone. estimated_size() counts only the characters, so a column of short
+# codes -- the MMYYYY dates, status codes and flags of a loan tape read as
+# text -- holds several times what it reports.
+STRING_VIEW_BYTES = 16
+
+
+def frame_bytes(df: Any) -> int:
+    """A polars DataFrame's in-memory size: polars' estimated_size() plus
+    the 16-byte view per String/Binary value it leaves out (see
+    STRING_VIEW_BYTES), nested ones (in List, Array and Struct columns)
+    included. Errs high by up to 12 bytes per short value, never low."""
+    return df.estimated_size() + STRING_VIEW_BYTES * sum(_view_count(s) for s in df.get_columns())
+
+
+def _has_views(dtype: Any) -> bool:
+    import polars as pl
+
+    if dtype in (pl.String, pl.Binary):
+        return True
+    if isinstance(dtype, (pl.List, pl.Array)):
+        return _has_views(dtype.inner)
+    if isinstance(dtype, pl.Struct):
+        return any(_has_views(f.dtype) for f in dtype.fields)
+    return False
+
+
+def _view_count(s: Any) -> int:
+    """How many String/Binary values (null slots included) `s` holds."""
+    import polars as pl
+
+    dtype = s.dtype
+    if not _has_views(dtype):
+        return 0
+    if dtype in (pl.String, pl.Binary):
+        return s.len()
+    if isinstance(dtype, pl.Struct):
+        return sum(_view_count(f) for f in s.struct.unnest().get_columns())
+    if dtype.inner in (pl.String, pl.Binary):
+        # Counted from the lengths, without copying the values out.
+        if isinstance(dtype, pl.Array):
+            return s.len() * dtype.size
+        return int(s.list.len().sum() or 0)
+    # Deeper nesting (lists of structs, of lists): rare enough to unpack.
+    inner = s.list.explode() if isinstance(dtype, pl.List) else s.arr.explode()
+    return _view_count(inner)
+
+
 class OutputTooBig(MemoryError):
     """A block's output was stopped while collecting, before it could run
     the machine out of memory."""
@@ -179,7 +229,7 @@ def _collect_lazy(lf: Any) -> Any:
     for batch in lf.collect_batches(chunk_size=COLLECT_BATCH_ROWS):
         batches.append(batch)
         rows += batch.height
-        size += batch.estimated_size()
+        size += frame_bytes(batch)
         if size > limit:
             raise OutputTooBig(
                 f"this block's output is {TOO_BIG_PHRASE}: it passed {rows:,} rows and {_gb(size)} and was still "

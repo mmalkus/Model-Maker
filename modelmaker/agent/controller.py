@@ -14,6 +14,7 @@ from contextlib import ExitStack
 from typing import Any, Callable
 
 from ..packet import ColumnRole, DataFramePacket
+from ..run_worker import frame_bytes
 from ..runslot import RunBusy
 from . import prompts
 from .build import (
@@ -124,7 +125,7 @@ def run_preflight(build: AgentBuild) -> dict[str, Any]:
         # The full data: what the build's large-data guidance and size
         # hints scale a sample's numbers up to (see AgentBuild.full_rows).
         build.full_rows = max_rows
-        build.full_bytes = max(f.data.estimated_size() for f in frames)
+        build.full_bytes = max(frame_bytes(f.data) for f in frames)
     warnings += _large_data_issues(build, frames, max_rows)
     return {"blocking": blocking, "warnings": warnings, "max_rows": max_rows}
 
