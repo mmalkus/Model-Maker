@@ -118,6 +118,9 @@ export interface BlockOut {
   provenance: Provenance | null
   status: Status
   last_error: string | null
+  // Ran inside the last successful streaming query, with no cached output
+  // of its own (see Runner.ran_fused); optional for older backends.
+  ran_fused?: boolean
   last_successful_read_at: string | null
   last_attempt_at: string | null
   // Why an orange block's cached output is no longer current, in one phrase

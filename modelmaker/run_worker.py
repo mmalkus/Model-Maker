@@ -62,10 +62,10 @@ class OutputTooBig(MemoryError):
     the machine out of memory."""
 
 
-def available_memory_bytes() -> int | None:
-    """Physical memory free right now (what the OS could hand this process
-    without swapping), or None when it can't be told."""
-    import os
+def memory_bytes() -> tuple[int | None, int | None]:
+    """(physical memory free right now -- what the OS could hand this
+    process without swapping --, the machine's total physical memory);
+    either is None when it can't be told."""
     import sys
 
     if sys.platform == "win32":
@@ -87,24 +87,47 @@ def available_memory_bytes() -> int | None:
         status = _MemoryStatus()
         status.dwLength = ctypes.sizeof(_MemoryStatus)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
-            return None
-        return int(status.ullAvailPhys)
+            return None, None
+        return int(status.ullAvailPhys), int(status.ullTotalPhys)
+    free = total = None
     try:
         with open("/proc/meminfo", encoding="ascii") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    free = int(line.split()[1]) * 1024
+                elif line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
         pass
+    # Each read on its own, so one name the platform lacks (macOS has no
+    # SC_AVPHYS_PAGES) doesn't lose the other.
+    if free is None:
+        free = _sysconf_bytes("SC_AVPHYS_PAGES")
+    if total is None:
+        total = _sysconf_bytes("SC_PHYS_PAGES")
+    return free, total
+
+
+def _sysconf_bytes(pages_name: str) -> int | None:
+    """os.sysconf(pages_name) in bytes, or None where it isn't supported."""
+    import os
+
     try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf(pages_name)
     except (AttributeError, ValueError, OSError):
         return None
 
 
-def collect_limit_bytes() -> int | None:
-    """How big a collected output may grow before it's stopped; None for
-    no limit (turned off, or the free memory can't be told)."""
+def available_memory_bytes() -> int | None:
+    """Physical memory free right now, or None when it can't be told."""
+    return memory_bytes()[0]
+
+
+def collect_limit() -> tuple[int, str] | None:
+    """How big a collected output may grow before it's stopped, and what
+    that limit is based on (said in OutputTooBig's message, so 2.1 GB on a
+    16 GB machine doesn't read as Model-Maker thinking it has 2 GB);
+    None for no limit (turned off, or the free memory can't be told)."""
     import os
 
     raw = os.environ.get(COLLECT_LIMIT_ENV, "").strip()
@@ -114,9 +137,22 @@ def collect_limit_bytes() -> int | None:
         except ValueError:
             mb = None
         if mb is not None:
-            return None if mb <= 0 else mb * 1024**2
-    free = available_memory_bytes()
-    return None if free is None else int(free * COLLECT_FREE_SHARE)
+            return None if mb <= 0 else (mb * 1024**2, f"set by {COLLECT_LIMIT_ENV}={mb}")
+    free, total = memory_bytes()
+    if free is None:
+        return None
+    of_total = f", of {_gb(total)} in total" if total else ""
+    basis = (
+        f"{COLLECT_FREE_SHARE:.0%} of the {_gb(free)} of memory free when the block started{of_total}; other "
+        "programs use the rest, and the result is copied again on its way to the app"
+    )
+    return int(free * COLLECT_FREE_SHARE), basis
+
+
+def collect_limit_bytes() -> int | None:
+    """collect_limit's size alone."""
+    found = collect_limit()
+    return None if found is None else found[0]
 
 
 def _gb(n: float) -> str:
@@ -126,7 +162,7 @@ def _gb(n: float) -> str:
 def _collect_lazy(lf: Any) -> Any:
     """`lf` collected -- streamed in batches, adding up their size as they
     come, and stopped with OutputTooBig as soon as it passes
-    collect_limit_bytes(). A plain collect would hand the whole table to
+    collect_limit(). A plain collect would hand the whole table to
     the OS in one go and, when it doesn't fit, take the worker (and on a
     Windows machine with little headroom, other programs) down with it.
     Stopping is safe: each worker process runs one task, so raising ends
@@ -134,9 +170,10 @@ def _collect_lazy(lf: Any) -> Any:
     collect_batches, it's a plain collect."""
     import polars as pl
 
-    limit = collect_limit_bytes()
-    if limit is None or not hasattr(lf, "collect_batches"):
+    found = collect_limit()
+    if found is None or not hasattr(lf, "collect_batches"):
         return lf.collect()
+    limit, basis = found
     batches: list[pl.DataFrame] = []
     rows = size = 0
     for batch in lf.collect_batches(chunk_size=COLLECT_BATCH_ROWS):
@@ -146,12 +183,13 @@ def _collect_lazy(lf: Any) -> Any:
         if size > limit:
             raise OutputTooBig(
                 f"this block's output is {TOO_BIG_PHRASE}: it passed {rows:,} rows and {_gb(size)} and was still "
-                f"growing, past the {_gb(limit)} this machine can spare, so it was stopped before it ran out of "
+                f"growing, past its {_gb(limit)} limit ({basis}), so it was stopped before it ran out of "
                 "memory. Reduce it inside the block before it is handed on -- select only the columns needed, "
                 "filter to the population, sample whole IDs or aggregate (to one row per loan per snapshot, say) "
                 "-- or mark the next block's dataframe input \"lazy\": true and use Run all (streaming) so the two "
                 "run as one streamed query; sample mode keeps builds small meanwhile. "
-                f"({COLLECT_LIMIT_ENV} sets the limit; 0 turns it off.)"
+                f"(Closing other programs frees memory for it; {COLLECT_LIMIT_ENV} sets the limit in MB, 0 turns "
+                "it off -- but an output bigger than the machine's memory still won't fit.)"
             )
     if not batches:
         return pl.DataFrame(schema=lf.collect_schema())
