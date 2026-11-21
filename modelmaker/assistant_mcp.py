@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -50,6 +51,7 @@ DEFAULT_URL = "http://127.0.0.1:8001"
 DISCOVERY_DIR = Path.home() / ".modelmaker" / "vscode-backends"
 EXTENSION_ID = "quantology.modelmaker"
 RUN_TIMEOUT_SECONDS = 10 * 60
+WAIT_MAX_SECONDS = 60 * 60
 OPEN_TIMEOUT_SECONDS = 120
 SCRIPT_CHARS = 30_000
 PROJECT_FILE = "model.json"
@@ -213,7 +215,16 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
     blocks = [b for b in graph["blocks"] if b["id"] == target] if target else [b for b in graph["blocks"] if b["status"] != "green"]
     out: dict[str, Any] = {
         "statuses": counts,
-        "blocks": [{"id": b["id"], "name": b["name"], "status": b["status"], **({"error": b["error"]} if b.get("error") else {})} for b in blocks],
+        "blocks": [
+            {
+                "id": b["id"],
+                "name": b["name"],
+                "status": b["status"],
+                **({"error": b["error"]} if b.get("error") else {}),
+                **({"running_seconds": b["running_seconds"]} if b.get("running_seconds") is not None else {}),
+            }
+            for b in blocks
+        ],
     }
     # A placed library block keeps the code it was placed with: say so, or a
     # long run silently produces numbers from an old version (#93).
@@ -681,10 +692,28 @@ def run(r: Resolver, a: dict[str, Any]) -> Any:
         raise ToolInputError("a streaming run runs the whole pipeline: leave out block")
     target = find_block(_graph(t), a["block"])["id"] if a.get("block") else None
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
-    t.post("/run_all_streaming" if streaming else f"/blocks/{target}/run_to_here" if target else "/run_all", timeout=120)
+    # A run already going (the canvas's, or an earlier call's that timed
+    # out): queue behind it rather than fail with "already in progress".
     g = _wait_idle(t, deadline)
     if g["running"]:
-        return {"still_running": True, "note": "the run is still going; check the graph later", **run_outcome(g, target)}
+        return _still_running(g, target, "another run is still going, so this one hasn't started")
+    try:
+        t.post("/run_all_streaming" if streaming else f"/blocks/{target}/run_to_here" if target else "/run_all", timeout=120)
+    except BackendError as e:
+        if "already in progress" in str(e):
+            raise ToolInputError(f"{e}: wait_for_run waits for it and returns its outcome; then run again") from None
+        raise
+    return _finish(t, _wait_idle(t, deadline), target)
+
+
+def _still_running(g: dict[str, Any], target: str | None, note: str) -> dict[str, Any]:
+    return {"still_running": True, "note": f"{note}; wait_for_run keeps waiting and returns the outcome", **run_outcome(g, target)}
+
+
+def _finish(t: Target, g: dict[str, Any], target: str | None) -> dict[str, Any]:
+    """A run's outcome once the graph is idle, plus what check says about it."""
+    if g["running"]:
+        return _still_running(g, target, "the run is still going")
     out = run_outcome(g, target)
     try:
         found = t.get("/assistant/check", block=target)
@@ -708,6 +737,27 @@ def _wait_idle(t: Target, deadline: float) -> dict[str, Any]:
         if not g["running"] or time.monotonic() > deadline:
             return g
         time.sleep(0.5)
+
+
+@tool(
+    "wait_for_run",
+    "Waits for the run in progress -- started by run, or on the canvas -- to finish, for up to `seconds` (default "
+    "600, at most 3600), and returns its outcome like run does. If it's still going then, returns still_running "
+    "with each running block and how long it has run; call it again to keep waiting. Returns at once when nothing "
+    "runs. Use it instead of polling the backend or the output folder.",
+    {"seconds": {"type": "number", "description": "How long to wait at most (default 600, at most 3600)."}},
+)
+def wait_for_run(r: Resolver, a: dict[str, Any]) -> Any:
+    t = r.target()
+    asked = a.get("seconds")
+    try:
+        seconds = float(RUN_TIMEOUT_SECONDS if asked is None else asked)
+    except (TypeError, ValueError):
+        seconds = math.nan
+    if not math.isfinite(seconds):  # NaN would wait with no deadline
+        raise ToolInputError(f"seconds must be a number of seconds, got {asked!r}")
+    seconds = min(max(seconds, 0), WAIT_MAX_SECONDS)
+    return _finish(t, _wait_idle(t, time.monotonic() + seconds), None)
 
 
 @tool(

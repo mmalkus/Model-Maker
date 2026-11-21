@@ -246,3 +246,77 @@ def test_opens_canvases_in_the_editor_the_tools_run_for(backend, tmp_path, monke
     with pytest.raises(mm.ToolInputError, match="couldn't ask Cursor"):
         mm._open_in_vscode(r, str(tmp_path / "elsewhere"), True)
     assert launched and launched[0][0].startswith("cursor://quantology.modelmaker/open?") and launched[0][1] == "cursor"
+
+
+class _FakeTarget:
+    """A backend whose graph reports a run for the first `busy` reads."""
+
+    def __init__(self, busy: int) -> None:
+        self.busy = busy
+        self.posted: list[str] = []
+        self.folder = None
+        self.refuse: str | None = None
+
+    def get(self, endpoint, /, **params):
+        if endpoint == "/assistant/graph":
+            running = self.busy > 0
+            self.busy -= 1
+            status = "running" if running else "green"
+            block = {"id": "b_1", "name": "Stage", "status": status, **({"running_seconds": 448.0} if running else {})}
+            return {"blocks": [block], "wires": [], "lanes": [], "running": running}
+        assert endpoint == "/assistant/check"
+        return {"leaks": [], "suspicious_features": [], "hints": {}, "ok": True}
+
+    def post(self, path, body=None, timeout=60):
+        self.posted.append(path)
+        if self.refuse:
+            raise mm.BackendError(self.refuse)
+        return {"started": True}
+
+
+class _FakeResolver:
+    def __init__(self, target):
+        self.t = target
+
+    def target(self):
+        return self.t
+
+
+def test_wait_for_run_waits_and_run_queues_behind_a_run(monkeypatch):
+    # Long runs (#96): no polling loops of the assistant's own.
+    monkeypatch.setattr(mm.time, "sleep", lambda s: None)
+    t = _FakeTarget(busy=3)
+    waited = call(_FakeResolver(t), "wait_for_run")
+    assert waited == {"statuses": {"green": 1}, "blocks": []} and not t.posted
+
+    t = _FakeTarget(busy=10**9)
+    still = call(_FakeResolver(t), "wait_for_run", seconds=0)
+    assert still["still_running"] and "wait_for_run" in still["note"]
+    assert still["blocks"] == [{"id": "b_1", "name": "Stage", "status": "running", "running_seconds": 448.0}]
+
+    # A run called while another is going waits for it, then starts its own.
+    t = _FakeTarget(busy=2)
+    ran = call(_FakeResolver(t), "run")
+    assert t.posted == ["/run_all"] and ran["statuses"] == {"green": 1}
+    t = _FakeTarget(busy=10**9)
+    monkeypatch.setattr(mm, "RUN_TIMEOUT_SECONDS", 0)
+    queued = call(_FakeResolver(t), "run")
+    assert queued["still_running"] and not t.posted and "hasn't started" in queued["note"]
+
+
+def test_run_started_in_between_points_to_wait_for_run_and_bad_seconds_are_refused(monkeypatch):
+    monkeypatch.setattr(mm.time, "sleep", lambda s: None)
+    # Idle when checked, but the canvas starts a run before this one posts.
+    t = _FakeTarget(busy=0)
+    t.refuse = "a run is already in progress"
+    result, is_error = mm.call(_FakeResolver(t), "run", {})
+    assert is_error and "already in progress" in result["error"] and "wait_for_run" in result["error"]
+    # Any other refusal passes through as it is.
+    t.refuse = "no project is open"
+    result, is_error = mm.call(_FakeResolver(t), "run", {})
+    assert is_error and result["error"] == "no project is open"
+
+    for bad in (float("nan"), "soon", float("inf")):
+        result, is_error = mm.call(_FakeResolver(_FakeTarget(busy=0)), "wait_for_run", {"seconds": bad})
+        assert is_error and "seconds must be a number" in result["error"]
+    assert mm.call(_FakeResolver(_FakeTarget(busy=0)), "wait_for_run", {"seconds": "5"})[1] is False

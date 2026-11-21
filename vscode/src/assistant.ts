@@ -15,6 +15,7 @@ export type BlockBrief = {
   error?: string
   stale_reason?: string | null
   data_source?: boolean
+  running_seconds?: number | null
   library_block?: boolean
   // A placed library block whose file changed since: it still runs runs_version.
   outdated?: { file: string; runs_version: number; library_version: number }
@@ -73,7 +74,13 @@ export function runOutcome(graph: Graph, target: string | null): object {
     statuses: counts,
     blocks: blocks
       .filter((b) => (target ? true : b.status !== 'green'))
-      .map((b) => ({ id: b.id, name: b.name, status: b.status, ...(b.error ? { error: b.error } : {}) })),
+      .map((b) => ({
+        id: b.id,
+        name: b.name,
+        status: b.status,
+        ...(b.error ? { error: b.error } : {}),
+        ...(b.running_seconds != null ? { running_seconds: b.running_seconds } : {}),
+      })),
   }
   // A placed library block keeps the code it was placed with: say so, or a
   // long run silently produces numbers from an old version (#93).

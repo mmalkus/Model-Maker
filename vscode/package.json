@@ -725,6 +725,27 @@
         }
       },
       {
+        "name": "modelmaker_wait_for_run",
+        "toolReferenceName": "mmWaitForRun",
+        "displayName": "Model-Maker: Wait for Run",
+        "modelDescription": "Waits for the run in progress -- started by modelmaker_run, or on the canvas -- to finish, for up to `seconds` (default 600, at most 3600), and returns its outcome like modelmaker_run does. If it's still going then, returns still_running with each running block and how long it has run; call it again to keep waiting. Returns at once when nothing runs. Use it instead of polling the backend or the output folder.",
+        "userDescription": "Wait for the run in progress to finish",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "modelmaker"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "number",
+              "description": "How long to wait at most (default 600, at most 3600)."
+            }
+          }
+        }
+      },
+      {
         "name": "modelmaker_compile",
         "toolReferenceName": "mmCompile",
         "displayName": "Model-Maker: Compile",
