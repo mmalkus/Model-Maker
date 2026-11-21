@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { MemoryAdvice } from './MemoryDialog'
+import { guardedRun } from './memoryGuard'
 import { CodeEditor } from './CodeEditor'
 import { DataModal } from './DataModal'
 import { FileBrowser } from './FileBrowser'
@@ -174,7 +176,7 @@ export function Inspector({
       setParamsError(null)
       run(async () => {
         await api.updateBlock(block.id, { params: parsed })
-        await api.run(block.id)
+        await guardedRun('run_block', block.id, () => api.run(block.id))
       })
     } catch {
       setParamsError('invalid JSON')
@@ -345,12 +347,13 @@ export function Inspector({
           {block.last_error}
         </div>
       )}
+      <MemoryAdvice block={block} run={run} />
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-        <button disabled={busy || block.status === 'running'} onClick={() => run(() => api.run(block.id))}>
+        <button disabled={busy || block.status === 'running'} onClick={() => run(() => guardedRun('run_block', block.id, () => api.run(block.id)))}>
           Run
         </button>
-        <button disabled={busy || block.status === 'running'} onClick={() => run(() => api.runToHere(block.id))}>
+        <button disabled={busy || block.status === 'running'} onClick={() => run(() => guardedRun('run_to_here', block.id, () => api.runToHere(block.id)))}>
           Run to here
         </button>
         {block.status === 'running' && (

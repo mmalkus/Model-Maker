@@ -1483,6 +1483,13 @@ class Runner:
             return self.status(block_id)
         return self.run_block(block_id, plan)
 
+    def input_needs_read(self, block_id: str, plan: RunPlan) -> bool:
+        """Whether Run all and Force run all (see _sweep) read input block
+        `block_id`: when it never has been, or when its settings changed
+        since. preflight.py asks the same question, so the size check before
+        a run covers exactly the sources the run reads."""
+        return self._st(block_id).last_successful_key is None or not self._is_current(block_id, plan)
+
     def _blocked_on_unread_input(self, block_id: str, plan: RunPlan) -> bool:
         preds = plan.graph.ancestors([block_id]) - {block_id}
         return any(
@@ -1513,7 +1520,7 @@ class Runner:
                     # stale, everything downstream would fail on it. A source
                     # that's current isn't re-read just in case its data
                     # changed -- that's what Refresh sources is for.
-                    if self._st(bid).last_successful_key is None or not self._is_current(bid, plan):
+                    if self.input_needs_read(bid, plan):
                         self.run_block(bid, plan)
                     continue
                 if self._blocked_on_unread_input(bid, plan):

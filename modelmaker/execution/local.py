@@ -243,9 +243,10 @@ class LocalExecutor:
 def _crash_message(worker: Worker, limits: TaskLimits) -> str:
     """Why a task process died without reporting. With a memory limit set,
     one SIGKILLed before the watchdog's next look was most likely killed by
-    the kernel for memory (a container's OOM killer): say so, and what the
-    limit was."""
+    the kernel for memory (a container's OOM killer): the worker's message
+    already says so (see WorkerProcess.crash_message), so add the limit."""
     message = worker.crash_message()
     if limits.memory_mb is not None and worker.process.exitcode == -9:
-        message += f" (killed, most likely by the system for lack of memory; the block's memory limit is {limits.memory_mb:,} MB)"
+        # The message already says the system killed it, likely for memory.
+        message += f" (the block's memory limit is {limits.memory_mb:,} MB)"
     return message

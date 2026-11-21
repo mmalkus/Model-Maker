@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import type { AutosaveStatus } from './App'
 import { api } from './api'
+import { guardedRun } from './memoryGuard'
 import { CodeEditor } from './CodeEditor'
 import { FileBrowser } from './FileBrowser'
 import { GitPanel } from './GitPanel'
@@ -183,18 +184,18 @@ export function Toolbar({
           <span style={{ color: 'var(--brand-charcoal)', fontWeight: 500 }}>Model Maker</span>
         </a>
       )}
-      <button className="brand-primary" disabled={busy || running} onClick={() => run(() => api.runAll())}>
+      <button className="brand-primary" disabled={busy || running} onClick={() => run(() => guardedRun('run_all', undefined, api.runAll))}>
         Run all
       </button>
       {!lean && (
         <>
-          <button disabled={busy || running} onClick={() => run(() => api.forceRunAll())}>
+          <button disabled={busy || running} onClick={() => run(() => guardedRun('force_run_all', undefined, api.forceRunAll))}>
             Force run all
           </button>
           <button
             disabled={busy || running}
             title="Fuse compatible blocks (filter/select/group-by/join, read from source) into one streaming query per group, so a source larger than memory doesn't fully load at every step. Fused mid-chain blocks won't individually turn green -- only the block ending each fused stretch does. For a full, production-scale run; use sample mode instead for cheap interactive iteration."
-            onClick={() => run(() => api.runAllStreaming())}
+            onClick={() => run(() => guardedRun('run_all_streaming', undefined, api.runAllStreaming))}
           >
             Run all (streaming)
           </button>
@@ -242,8 +243,8 @@ export function Toolbar({
             <MoreMenu
               onClose={() => setShowMore(false)}
               items={[
-                { label: 'Force run all', disabled: running, onClick: () => run(() => api.forceRunAll()) },
-                { label: 'Run all (streaming)', disabled: running, onClick: () => run(() => api.runAllStreaming()) },
+                { label: 'Force run all', disabled: running, onClick: () => run(() => guardedRun('force_run_all', undefined, api.forceRunAll)) },
+                { label: 'Run all (streaming)', disabled: running, onClick: () => run(() => guardedRun('run_all_streaming', undefined, api.runAllStreaming)) },
                 { label: 'Refresh sources', disabled: running, onClick: () => run(() => api.refreshAll()) },
                 { label: 'Check all sources', disabled: running, onClick: () => run(() => api.checkAllSources()) },
                 { label: 'Compile (streaming)', onClick: () => doCompile(true) },

@@ -121,6 +121,9 @@ export interface BlockOut {
   // Ran inside the last successful streaming query, with no cached output
   // of its own (see Runner.ran_fused); optional for older backends.
   ran_fused?: boolean
+  // Set only on a red block stopped for running out of memory (see
+  // preflight.memory_advice); optional for older backends.
+  memory_advice?: MemoryAdvice | null
   last_successful_read_at: string | null
   last_attempt_at: string | null
   // Why an orange block's cached output is no longer current, in one phrase
@@ -655,4 +658,36 @@ export interface DatasetEntry {
 export interface SourceEntry {
   name: string
   description: string
+}
+
+// What a block stopped for running out of memory could do instead (see
+// modelmaker/preflight.py).
+export interface MemoryAdvice {
+  // Every block it feeds takes it lazily: Run all (streaming) never loads it whole.
+  can_stream: boolean
+  // The blocks that take its output whole (their input isn't lazy).
+  whole_consumers: string[]
+  // Rows sample mode is offered with.
+  sample_rows: number
+}
+
+export type RunMode = 'run_all' | 'force_run_all' | 'run_all_streaming' | 'run_block' | 'run_to_here'
+
+// An input block a run would load whole that won't fit (see /api/run_preflight).
+export interface PreflightBlock extends MemoryAdvice {
+  id: string
+  name: string
+  rows: number
+  bytes: number
+  // Rows counted from Parquet metadata, rather than scaled from a sample.
+  exact: boolean
+  size: string
+}
+
+export interface PreflightOut {
+  limit_bytes: number | null
+  limit_basis: string | null
+  limit?: string
+  sample_rows: number
+  blocks: Omit<PreflightBlock, 'sample_rows'>[]
 }
