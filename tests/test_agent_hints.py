@@ -170,6 +170,9 @@ def test_splits_flag_few_events_rate_gaps_and_empty_samples():
     assert _hint("train_test_split", train=train, test=_sample([1] * 60 + [0] * 540)) == ""
     empty = _sample([], "default_flag")
     assert "out_of_time is empty" in _hint("time_split", development=train, out_of_time=empty)
+    # An out-of-time sample may have another target rate, and time_split
+    # has no stratify_col (#98).
+    assert "stratify_col" not in _hint("time_split", development=train, out_of_time=test)
 
 
 def test_computed_lgd_and_ccf_flag_nulls():
@@ -185,7 +188,10 @@ def test_iv_table_uses_the_binning_bands():
     rows = [{"feature": "a", "iv": 0.9}, {"feature": "b", "iv": 0.1}, {"feature": "c", "iv": 0.001}]
     text = _hint("iv_table", metric={"rows": rows})
     assert "Candidate features" in text and "b" in text
-    assert "Leave out" in text and "c" in text and "leakage: a" in text
+    assert "Leave out" in text and "c" in text and "Very strong (IV >= 0.5): a" in text
+    # Not called leakage outright: a credit score or past delinquency is a
+    # normal strong driver if it is known at the snapshot date (#98).
+    assert "known at the snapshot date" in text and "usually means leakage" not in text
 
 
 def test_correlation_flags_pairs_and_vifs():

@@ -169,7 +169,9 @@ def iv_rows(rows: list[dict[str, Any]], keep_monotonic: bool) -> list[str]:
             hints.append(f"Leave out (IV < {USELESS_IV}, no signal): {names(drop)}.")
         if leak:
             hints.append(
-                f"IV >= {SUSPICIOUS_IV} usually means leakage: {names(leak)}. ask_user before using any of them."
+                f"Very strong (IV >= {SUSPICIOUS_IV}): {names(leak)}. Confirm each is known at the snapshot date and "
+                "isn't derived from the outcome -- a credit score or past delinquency measured at or before the "
+                "snapshot is a normal strong driver; one recorded after it is leakage. ask_user when you can't tell."
             )
     else:
         keep = [r["feature"] for r in rows if (r.get("r2_binned") or 0.0) >= WEAK_R2]

@@ -301,8 +301,8 @@ def _last_outputs(block_id: str) -> dict[str, Any] | None:
 def check(block: str | None = None) -> dict[str, Any]:
     """The AI builder's judgement, for a pipeline someone else is building:
     holdout leakage in the wiring, features fit_binning banded 'suspicious'
-    (IV >= 0.5, usually leakage), and the decision hints of blocks that ran
-    green -- every such block, or just `block`. Advice, not a guard: the
+    (IV >= 0.5: very strong -- possible leakage), and the decision hints of
+    blocks that ran green -- every such block, or just `block`. Advice, not a guard: the
     chat tools report it and the user decides."""
     session = _session()
     g = session.graph
