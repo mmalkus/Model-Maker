@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   tests:
-    name: Tests (Python ${{ matrix.python-version }})
+    name: Tests (Python ${{ matrix.python-version }}${{ matrix.polars != 'latest' && format(', polars {0}', matrix.polars) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -25,6 +25,13 @@ jobs:
       matrix:
         # Lowest supported and newest classified version.
         python-version: ["3.11", "3.13"]
+        polars: ["latest"]
+        # Plus the oldest polars pyproject.toml allows, on the oldest Python:
+        # polars changes behaviour between releases, and the floor has to
+        # be one the suite passes on. Keep this in step with pyproject.toml.
+        include:
+          - python-version: "3.11"
+            polars: "1.40.0"
     steps:
       - uses: actions/checkout@v7
 
@@ -38,6 +45,10 @@ jobs:
       # covers that) -- every extra the tests exercise.
       - name: Install
         run: python -m pip install -e ".[dev,anthropic,tui,excel,db]"
+
+      - name: Pin the oldest supported polars
+        if: matrix.polars != 'latest'
+        run: python -m pip install "polars==${{ matrix.polars }}"
 
       # Parallel across the runner's cores (pytest-xdist): most of the
       # suite's time is block runs waiting on freshly spawned worker
