@@ -142,7 +142,8 @@ def memory_bytes() -> tuple[int | None, int | None]:
     if sys.platform == "darwin":
         # macOS has neither /proc/meminfo nor SC_AVPHYS_PAGES; without this
         # the free memory read as unknown and the collect limit was off.
-        return _darwin_available_bytes(), _sysconf_bytes("SC_PHYS_PAGES")
+        total = _sysconf_bytes("SC_PHYS_PAGES")
+        return (None if total is None else _darwin_available_bytes(total)), total
     free = total = None
     try:
         with open("/proc/meminfo", encoding="ascii") as f:
@@ -172,19 +173,25 @@ def _sysconf_bytes(pages_name: str) -> int | None:
         return None
 
 
-def _darwin_free_from_counts(free_pages: int, inactive_pages: int, page_size: int) -> int:
-    """Bytes macOS could hand a process without swapping: the free pages
-    (speculative ones included) plus the inactive ones, which hold cached
-    files and memory not used lately and are reclaimed first -- the same
-    sum psutil reports as `available` on macOS, and the closest match to
-    Linux's MemAvailable."""
-    return (free_pages + inactive_pages) * page_size
+def _darwin_free_from_counts(
+    total_bytes: int, internal: int, purgeable: int, wired: int, compressed: int, page_size: int
+) -> int:
+    """Bytes macOS could hand a process without swapping: the machine's
+    memory less what Activity Monitor counts as "Memory Used" -- app memory
+    (anonymous pages, less those apps marked purgeable), wired memory and
+    what the compressor holds. What's left is free pages and the file
+    cache, which macOS keeps full and drops on demand: the same thing
+    Linux's MemAvailable counts. (Free + inactive pages alone leaves the
+    file cache out, and on a Mac that's been up a while reads a few GB
+    on a 16 GB machine.)"""
+    used = (max(internal - purgeable, 0) + wired + compressed) * page_size
+    return max(total_bytes - used, 0)
 
 
-def _darwin_available_bytes() -> int | None:
-    """Physical memory free right now on macOS, from the Mach call
-    host_statistics64(HOST_VM_INFO64) -- what `vm_stat` prints -- or None
-    when it can't be read."""
+def _darwin_available_bytes(total_bytes: int) -> int | None:
+    """Physical memory free right now on macOS (see _darwin_free_from_counts),
+    from the Mach call host_statistics64(HOST_VM_INFO64) -- what `vm_stat`
+    prints -- or None when it can't be read."""
     import ctypes
     import ctypes.util
 
@@ -232,7 +239,11 @@ def _darwin_available_bytes() -> int | None:
                 return None
         finally:
             # mach_host_self() hands out a new port reference on each call.
-            libc.mach_port_deallocate(u32.in_dll(libc, "mach_task_self_").value, u32(host))
+            # Releasing it is tidying up: failing to doesn't spoil a reading.
+            try:
+                libc.mach_port_deallocate(u32.in_dll(libc, "mach_task_self_").value, u32(host))
+            except (OSError, AttributeError, ValueError):
+                pass
         # The counts are in the kernel's pages, which can differ from this
         # process's: 16 KB on Apple silicon even under Rosetta, where
         # SC_PAGE_SIZE says 4 KB.
@@ -246,7 +257,14 @@ def _darwin_available_bytes() -> int | None:
             page_size = os.sysconf("SC_PAGE_SIZE")
     except (OSError, AttributeError, ValueError):
         return None
-    return _darwin_free_from_counts(stats.free_count, stats.inactive_count, page_size)
+    return _darwin_free_from_counts(
+        total_bytes,
+        stats.internal_page_count,
+        stats.purgeable_count,
+        stats.wire_count,
+        stats.compressor_page_count,
+        page_size,
+    )
 
 
 def available_memory_bytes() -> int | None:

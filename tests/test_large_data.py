@@ -619,8 +619,10 @@ def test_the_default_limit_says_what_it_is_based_on(monkeypatch):
     from modelmaker import run_worker
 
     free, total = run_worker.memory_bytes()  # this machine's, for real
-    if sys.platform in ("linux", "darwin", "win32"):
-        assert free is not None and total and 0 < free <= total
+    if free is not None:  # None where it can't be read, e.g. Linux without /proc
+        assert total and free <= total
+    if sys.platform in ("darwin", "win32"):
+        assert free is not None
     monkeypatch.delenv(run_worker.COLLECT_LIMIT_ENV, raising=False)
     monkeypatch.setattr(run_worker, "memory_bytes", lambda: (int(5.3 * 1024**3), 16 * 1024**3))
     limit, basis = run_worker.collect_limit()
@@ -634,20 +636,43 @@ def test_the_default_limit_says_what_it_is_based_on(monkeypatch):
     assert run_worker.collect_limit() is None and run_worker._collect_lazy(lf).height == 10
 
 
-def test_macos_free_memory_counts_free_and_inactive_pages():
+def test_macos_free_memory_counts_the_file_cache_as_free():
     # macOS has no /proc/meminfo or SC_AVPHYS_PAGES; free memory read as
     # unknown there, and that turned the collect limit off altogether.
+    # It's what Activity Monitor doesn't count as used: the file cache
+    # macOS keeps RAM full of is free, like Linux's MemAvailable.
     from modelmaker import run_worker
 
-    assert run_worker._darwin_free_from_counts(1000, 3000, 16384) == 4000 * 16384
+    page, gb = 16384, 1024**3
+    pages = gb // page
+    # 16 GB: 6 GB of app memory (7 GB anonymous, 1 GB purgeable), 2 GB wired,
+    # 1 GB compressed; the other 7 GB, file cache included, is available.
+    free = run_worker._darwin_free_from_counts(16 * gb, 7 * pages, pages, 2 * pages, pages, page)
+    assert free == 7 * gb
+    # Counts that add up past the total (they're read a moment apart) give 0.
+    assert run_worker._darwin_free_from_counts(gb, 2 * pages, 0, 0, 0, page) == 0
+
+
+def test_macos_unreadable_free_memory_means_no_limit(monkeypatch):
+    from modelmaker import run_worker
+
+    monkeypatch.setattr(sys, "platform", "darwin")  # memory_bytes imports sys when called
+    monkeypatch.setattr(run_worker, "_darwin_available_bytes", lambda total: None)
+    monkeypatch.setattr(run_worker, "_sysconf_bytes", lambda name: 16 * 1024**3)
+    monkeypatch.delenv(run_worker.COLLECT_LIMIT_ENV, raising=False)
+    assert run_worker.memory_bytes() == (None, 16 * 1024**3)
+    assert run_worker.collect_limit() is None
+    monkeypatch.setattr(run_worker, "_darwin_available_bytes", lambda total: total // 2)
+    assert run_worker.collect_limit()[0] == int(8 * 1024**3 * run_worker.COLLECT_FREE_SHARE)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads the Mach VM statistics")
 def test_macos_free_memory_is_read_and_sets_a_limit(monkeypatch):
     from modelmaker import run_worker
 
-    free = run_worker._darwin_available_bytes()
     total = run_worker._sysconf_bytes("SC_PHYS_PAGES")
+    assert total
+    free = run_worker._darwin_available_bytes(total)
     assert free is not None and total and 0 < free <= total
     monkeypatch.delenv(run_worker.COLLECT_LIMIT_ENV, raising=False)
     assert run_worker.collect_limit() is not None
