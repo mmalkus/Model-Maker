@@ -97,6 +97,12 @@ def _view_count(s: Any) -> int:
         return s.len()
     if isinstance(dtype, pl.Struct):
         return sum(_view_count(f) for f in s.struct.unnest().get_columns())
+    if dtype.inner in (pl.String, pl.Binary):
+        # Counted from the lengths, without copying the values out.
+        if isinstance(dtype, pl.Array):
+            return s.len() * dtype.size
+        return int(s.list.len().sum() or 0)
+    # Deeper nesting (lists of structs, of lists): rare enough to unpack.
     inner = s.list.explode() if isinstance(dtype, pl.List) else s.arr.explode()
     return _view_count(inner)
 

@@ -579,6 +579,11 @@ def test_frame_bytes_counts_the_view_of_every_string_value():
     assert frame_bytes(df) >= 3 * df.estimated_size()
     nested = pl.DataFrame({"l": [["a", "b"], ["c"]], "s": [{"x": "a", "y": 1}, {"x": None, "y": 2}], "b": [b"x", b"y"]})
     assert frame_bytes(nested) == nested.estimated_size() + STRING_VIEW_BYTES * (3 + 2 + 2)
+    deeper = pl.DataFrame(
+        {"a": pl.Series([["x", "y"], ["z", "w"]], dtype=pl.Array(pl.String, 2)), "ll": [[["a"], ["b", "c"]], []]}
+    )
+    # Array: 2 rows x 2 values; the list of lists: a, b and c.
+    assert frame_bytes(deeper) == deeper.estimated_size() + STRING_VIEW_BYTES * (4 + 3)
     numeric = pl.DataFrame({"a": range(10), "l": [[1]] * 10})
     assert frame_bytes(numeric) == numeric.estimated_size()
 
