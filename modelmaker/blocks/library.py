@@ -489,12 +489,14 @@ def stage_csv_parquet(
     file in it, e.g. a set of quarterly zips) or a glob ("data/*.zip");
     each file, and each member of a zip, becomes its own Parquet part.
     `columns` (comma-separated, after `column_names` naming) keeps only
-    those columns -- stage a slim table of a wide file. Entries written
-    `position:name` ("2:loan_id, 3:period", 1-based) pick fields by
-    position and name them, so a header-less file needs no
-    `column_names` listing every field. `workers` is how many files (or
-    zip members) are staged at once: 0 picks as many as the free memory
-    allows, up to 4 (each takes a few hundred MB); 1 stages one by one. A zip member or gzipped file is decompressed
+    those columns -- stage a slim table of a wide file. For a file without
+    a header, entries written `position:name` ("2:loan_id, 3:period",
+    1-based) pick fields by position and name them, so no `column_names`
+    has to list every field. (With a header, `columns` are always header
+    names, colons and all.) `workers` is how many files (or zip members)
+    are staged at once: 0 picks as many as the free memory allows at
+    about 2 GB each, up to 4; 1 stages one by one. A zip member or
+    gzipped file is decompressed
     straight from the archive in blocks of about 8 MB, each parsed and
     streamed into the Parquet: nothing is unpacked to disk and neither the
     file nor the archive is ever held in memory whole. `separator`,
@@ -521,8 +523,9 @@ def stage_csv_parquet(
     files = _stage_files(path)
     names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
     keep = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
-    if keep and any(":" in c for c in keep):
-        names, keep = _stage_positional(keep, names)
+    positions = None
+    if keep and not has_header and any(_stage_is_position(c) for c in keep):
+        positions, keep = _stage_positional(keep, names)
     options = {
         "separator": separator,
         "has_header": bool(has_header),
@@ -532,6 +535,8 @@ def stage_csv_parquet(
     }
     if keep:
         options["columns"] = keep  # only when set, so stages made before it existed stay current
+    if positions:
+        options["positions"] = positions
     target = parquet_dir or _stage_default_dir(path)
     os.makedirs(target, exist_ok=True)
     manifest_path = os.path.join(target, _STAGE_MANIFEST)
@@ -592,12 +597,21 @@ def stage_csv_parquet(
             pending = set(futures)
             while pending:
                 finished, pending = wait(pending, return_when=FIRST_EXCEPTION)
+                error = next((f.exception() for f in finished if f.exception() is not None), None)
+                if error is not None:
+                    # Parts not started are dropped. A build already running
+                    # can't be stopped: wait for it and record it if it
+                    # succeeds, so the next run doesn't rebuild it and the
+                    # manifest lists every part left on disk.
+                    for other in pending:
+                        other.cancel()
+                    finished |= wait(pending)[0]
+                    pending = set()
                 for f in finished:
-                    if f.exception() is not None:
-                        for other in pending:
-                            other.cancel()
-                        raise f.exception()
-                    _done(futures[f])
+                    if not f.cancelled() and f.exception() is None:
+                        _done(futures[f])
+                if error is not None:
+                    raise error
     for stale in previous - set(parts):
         try:
             os.remove(os.path.join(target, stale))
@@ -608,11 +622,17 @@ def stage_csv_parquet(
     return pl.scan_parquet([os.path.join(target, u["part"]) for u in units])
 
 
-def _stage_positional(keep: list[str], names: list[str] | None) -> tuple[list[str], list[str]]:
-    """`columns` given by position ("2:loan_id"): (the names to read the
-    file with -- the picked fields named, every field before the last
-    picked one given a placeholder, later ones keep their own --, the
-    columns to keep)."""
+def _stage_is_position(entry: str) -> bool:
+    """Whether a `columns` entry is written position:name ("2:loan_id")."""
+    pos, sep, _ = entry.partition(":")
+    return bool(sep) and pos.strip().isdigit()
+
+
+def _stage_positional(keep: list[str], names: list[str] | None) -> tuple[list[int], list[str]]:
+    """`columns` given by position ("2:loan_id") for a header-less file:
+    (the 1-based positions picked, the names they get), in file order. The fields are read by position (pl.nth), so the fields not
+    kept need no names -- and polars' own default names, which differ
+    between versions, never matter."""
     if names:
         raise ValueError("columns given by position (2:loan_id) name the fields themselves: leave column_names empty")
     picked: dict[int, str] = {}
@@ -625,13 +645,13 @@ def _stage_positional(keep: list[str], names: list[str] | None) -> tuple[list[st
         picked[int(pos)] = name.strip()
     if len(set(picked.values())) != len(picked):
         raise ValueError("columns: two positions have the same name")
-    read_names = [picked.get(i, f"_unused_{i}") for i in range(1, max(picked) + 1)]
-    return read_names, [picked[p] for p in sorted(picked)]
+    order = sorted(picked)
+    return order, [picked[p] for p in order]
 
 
 def _stage_worker_count(asked: int, todo: int) -> int:
     """How many files stage at once: `asked`, or with 0 as many as the free
-    memory allows (about 1 GB each, leaving room for the rest), at most 4."""
+    memory allows (about 2 GB each, leaving room for the rest), at most 4."""
     import os
 
     if todo <= 1:
@@ -775,7 +795,16 @@ def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None
             lf = _stage_compressed_frame(path, unit, options, schema)
         else:
             lf = pl.scan_csv(path, **_stage_csv_kwargs(options, schema))
-        if options.get("columns"):
+        if options.get("positions"):
+            # By position; a later part is read as text and cast to the
+            # first part's types (see _stage_csv_kwargs).
+            lf = lf.select(
+                [
+                    pl.nth(p - 1).alias(n) if schema is None else pl.nth(p - 1).cast(schema[n]).alias(n)
+                    for p, n in zip(options["positions"], options["columns"])
+                ]
+            )
+        elif options.get("columns"):
             lf = lf.select(options["columns"])
         lf.sink_parquet(out + ".tmp", compression=options["compression"])
         os.replace(out + ".tmp", out)
@@ -805,7 +834,8 @@ def _stage_csv_kwargs(options: dict, schema) -> dict:
         kwargs["infer_schema_length"] = options["infer_schema_rows"]
     else:
         kwargs["infer_schema_length"] = 0
-        kwargs["schema_overrides"] = dict(schema)
+        if not options.get("positions"):  # by position, _stage_build casts after picking the fields
+            kwargs["schema_overrides"] = dict(schema)
     return kwargs
 
 
