@@ -198,3 +198,49 @@ def test_join_accepts_the_old_outer_name_and_rejects_cross():
     assert lazy.sort(by, nulls_last=True).equals(full.sort(by, nulls_last=True))
     with pytest.raises(ValueError, match="cross"):
         join(left, right, ["k"], how="cross")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not a valid expr(((",
+        "a > 1 xyz",
+        "a > 1 )",
+        "a >",
+        # A stray ")" closing a bracket of the check's own query, and a
+        # trailing clause ending it early (PR #113 review).
+        "a > 1) AND (a < 3",
+        "s = 'x') OR (a > 0",
+        "a > 1) --",
+        "a > 1 ORDER BY a",
+        "a > 1 LIMIT 0",
+    ],
+)
+def test_sql_expression_blocks_reject_a_malformed_expression(bad):
+    # pl.sql_expr alone reads "a > 1 xyz" as "a > 1 AS xyz", and before
+    # polars 1.40 turned "not a valid expr(((" into "NOT a": the block
+    # must fail, not filter on something the user didn't write.
+    from modelmaker.blocks.data_quality import apply_exclusions
+    from modelmaker.blocks.library import derive_columns, filter
+
+    df = pl.DataFrame({"a": [1, 2, 3], "s": ["x", "y", "z"]})
+    with pytest.raises(ValueError, match="can't read the expression"):
+        filter(df, bad)
+    with pytest.raises(ValueError, match="can't read the expression"):
+        derive_columns(df, {"b": bad})
+    with pytest.raises(ValueError, match="can't read the expression"):
+        apply_exclusions(df, [{"name": "r", "expr": bad}])
+    # Valid ones are unaffected.
+    assert filter(df, "a > 1 AND s IN ('y', 'z')").height == 2
+    assert derive_columns(df, {"b": "CASE WHEN a > 1 THEN 'hi' ELSE 'lo' END"})["b"].to_list() == ["lo", "hi", "hi"]
+    assert apply_exclusions(df, [{"name": "r", "expr": "s LIKE 'x%'"}])[0].height == 1
+
+
+def test_the_sql_check_is_the_same_in_both_block_files():
+    # Each file keeps its own copy (a compiled script copies a block's
+    # helpers from its own file only); they must not drift apart.
+    import inspect
+
+    from modelmaker.blocks import data_quality, library
+
+    assert inspect.getsource(library._check_sql) == inspect.getsource(data_quality._check_sql)
