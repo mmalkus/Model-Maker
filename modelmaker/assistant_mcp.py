@@ -477,8 +477,8 @@ def get_input_columns(r: Resolver, a: dict[str, Any]) -> Any:
     "check",
     "Reviews the pipeline as the AI builder would: holdout leakage in the wiring (a binning, WoE or model fitted on "
     "rows that include the test/out-of-time sample it is applied to), features fit_binning banded 'suspicious' "
-    "(IV >= 0.5: very strong -- leakage unless known at the snapshot date), and decision hints -- what each green block's result means and what to do next "
-    "(event counts, IV screens, Gini, PSI, calibration...). With a block: just that block's hints. Report problems "
+    "(IV >= 0.5: very strong -- leakage if measured after the snapshot date or derived from the outcome), and "
+    "decision hints -- what each green block's result means and what to do next (event counts, IV screens, Gini, PSI, calibration...). With a block: just that block's hints. Report problems "
     "to the user rather than silently working around them.",
     {"block": BLOCK},
 )

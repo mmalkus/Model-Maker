@@ -274,8 +274,9 @@ def block_hints(b: AgentBuild, block_id: str) -> list[str]:
 
 def suspicious_features(b: AgentBuild) -> dict[str, float | None]:
     """{feature: IV} for every feature a fit_binning in the graph banded
-    'suspicious' -- an IV that high usually means the column is partly the
-    outcome (leakage)."""
+    'suspicious' -- an IV that high can mean leakage (the column is measured
+    after the snapshot date or is partly the outcome), or a legitimate strong
+    driver known at the snapshot."""
 
     def summary(bid: str) -> Any:
         try:
