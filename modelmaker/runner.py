@@ -365,6 +365,10 @@ class RunState:
     # says that something changed but never what. Diffed against the current
     # basis by Runner.stale_reason.
     last_successful_basis: dict[str, Any] | None = None
+    # The key at which this block last ran as an interior member of a
+    # successful fused streaming query (see _run_fused_group): it has no
+    # cached output of its own then, but it did run -- see ran_fused.
+    fused_key: str | None = None
 
 
 class Runner:
@@ -613,6 +617,18 @@ class Runner:
         if st.last_successful_key is not None:
             return "orange"
         return "grey"
+
+    def ran_fused(self, block_id: str) -> bool:
+        """Whether the block's current version last ran inside a successful
+        fused streaming query, with no output of its own cached -- shown as
+        "ran fused" rather than leaving it to look never-run or stale."""
+        st = self.state.get(block_id)
+        if st is None or st.fused_key is None or block_id not in self.graph.blocks:
+            return False
+        try:
+            return st.fused_key == self.compute_key(block_id) and st.last_successful_key != st.fused_key
+        except RuntimeError:
+            return False
 
     def stale_reason(self, block_id: str) -> str | None:
         """Why this block's cached output is no longer current, in one short
@@ -1404,10 +1420,23 @@ class Runner:
                 _fail_group(f"role '{role.value}' is set on more than one column: {', '.join(cols)}")
                 return
             out_meta_by_id[bid] = out_meta
-            if bid not in group.exits:
-                report[bid] = "fused"
 
         now = _now()
+        # The query succeeded, so every interior member ran: an error left
+        # from an earlier, unfused attempt (a source stopped as too big to
+        # collect on its own, say) no longer describes it (#95). It still
+        # has no cached output, so it isn't green -- ran_fused says why.
+        for bid in group.members:
+            if bid in group.exits or bid in group.sinks:
+                continue
+            st = self._st(bid)
+            key = plan.key(bid)
+            st.last_attempt_key = key
+            st.last_attempt_at = now
+            st.failed = False
+            st.last_error = None
+            st.fused_key = key
+            report[bid] = "fused"
         for sink_id in group.sinks:
             key = plan.key(sink_id)
             self.cache.set(key, {})

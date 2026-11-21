@@ -238,7 +238,7 @@ BLOCKS = {
     },
     "train_test_split": {
         "display_name": "Train/test split",
-        "version": 1,
+        "version": 2,
         "block_type": "standard",
         "tags": ["sampling"],
         "inputs": [{"name": "df"}],
@@ -249,6 +249,11 @@ BLOCKS = {
             {
                 "key": "stratify_col",
                 "label": "Stratify by (optional, e.g. the default flag)",
+                "kind": "column",
+            },
+            {
+                "key": "group_col",
+                "label": "Keep each ID on one side (optional, e.g. loan_id for panel data)",
                 "kind": "column",
             },
         ],
@@ -1110,7 +1115,11 @@ def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inn
 
 
 def train_test_split(
-    df: pl.DataFrame, test_size: float = 0.2, seed: int = 0, stratify_col: str | None = None
+    df: pl.DataFrame,
+    test_size: float = 0.2,
+    seed: int = 0,
+    stratify_col: str | None = None,
+    group_col: str | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Randomly splits `df`'s rows into two disjoint dataframes on the
     `train` and `test` ports; both keep every column and role. `test_size`
@@ -1122,7 +1131,18 @@ def train_test_split(
     values separately, so `train` and `test` get the same share of each --
     the usual choice for a low default rate, where a plain random split can
     leave the test sample with a noticeably different event rate. Left
-    unset, it's a simple random split."""
+    unset, it's a simple random split.
+
+    `group_col` (e.g. loan_id) keeps all of an ID's rows on one side: the
+    IDs are split, not the rows, so panel data (one row per loan per
+    snapshot) never has the same loan in train and test. `test_size` is
+    then the fraction of IDs. With `stratify_col` too, each ID is
+    stratified by its highest value of that column (for a 0/1 default
+    flag: whether the loan ever defaulted), or its first for text."""
+    if stratify_col:
+        _check_split_column(df, stratify_col, "stratify_col")
+    if group_col:
+        return _split_by_group(df, test_size, seed, stratify_col, group_col)
     if stratify_col is None:
         shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
         n_test = int(len(shuffled) * test_size)
@@ -1136,6 +1156,38 @@ def train_test_split(
         tests.append(shuffled.head(n_test))
         trains.append(shuffled.tail(len(shuffled) - n_test))
     return pl.concat(trains), pl.concat(tests)
+
+
+def _split_by_group(
+    df: pl.DataFrame, test_size: float, seed: int, stratify_col: str | None, group_col: str
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """train_test_split with `group_col`: the IDs are shuffled and split
+    (within each stratum), then every row follows its ID. Rows with a null
+    ID count as one ID. Both sides keep the input's row order."""
+    _check_split_column(df, group_col, "group_col")
+    # Each ID as an integer (null -> 0), so the split needs no null-aware
+    # join -- which older polars versions spell differently.
+    gid = pl.col(group_col).rank("dense").fill_null(0).alias("_gid")
+    work = df.select(gid, *([stratify_col] if stratify_col else []))
+    if stratify_col:
+        dtype = df.schema[stratify_col]
+        by_max = dtype.is_numeric() or dtype == pl.Boolean
+        stratum = (pl.col(stratify_col).max() if by_max else pl.col(stratify_col).first()).alias("_stratum")
+        ids = work.group_by("_gid").agg(stratum)
+    else:
+        ids = work.select(pl.col("_gid").unique()).with_columns(_stratum=pl.lit(0))
+    ids = ids.sort("_gid")  # a stable order for the seed
+    test_ids: list[int] = []
+    for _, part in sorted(ids.group_by("_stratum", maintain_order=True), key=lambda kv: str(kv[0])):
+        shuffled = part.sample(fraction=1.0, shuffle=True, seed=seed)
+        test_ids.extend(shuffled.head(int(len(shuffled) * test_size))["_gid"].to_list())
+    in_test = work["_gid"].is_in(pl.Series(test_ids, dtype=work["_gid"].dtype))
+    return df.filter(~in_test), df.filter(in_test)
+
+
+def _check_split_column(df: pl.DataFrame, col: str, param: str) -> None:
+    if col not in df.columns:
+        raise ValueError(f"{param} {col!r} is not a column of the input")
 
 
 def time_split(

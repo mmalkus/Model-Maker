@@ -54,6 +54,18 @@ OPEN_TIMEOUT_SECONDS = 120
 SCRIPT_CHARS = 30_000
 PROJECT_FILE = "model.json"
 
+# Sent to the client at initialization (MCP server instructions). The
+# backend's HTTP API is these tools' private transport: an assistant that
+# calls it itself, with the token from a discovery file, skips the hints and
+# the check step and breaks whenever the API changes (issue #92).
+INSTRUCTIONS = (
+    "Model-Maker's canvas is driven only through these tools. The canvas backend's HTTP API -- and the URL and "
+    "token in ~/.modelmaker/vscode-backends/ -- is private to them: never read that token, call the backend's "
+    "/api endpoints, or script against it (curl, Python, fetch). It skips the hints and the check step these tools "
+    "add, and it changes without notice. If something you need has no tool, or a tool keeps failing, stop and tell "
+    "the user what you needed instead of working around it."
+)
+
 
 class ToolInputError(Exception):
     """A mistake the model can fix: goes back to it as the tool's error."""
@@ -203,6 +215,12 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
         "statuses": counts,
         "blocks": [{"id": b["id"], "name": b["name"], "status": b["status"], **({"error": b["error"]} if b.get("error") else {})} for b in blocks],
     }
+    # A placed library block keeps the code it was placed with: say so, or a
+    # long run silently produces numbers from an old version (#93).
+    outdated = [{"id": b["id"], "name": b["name"], **b["outdated"]} for b in graph["blocks"] if b.get("outdated")]
+    if outdated:
+        out["outdated_blocks"] = outdated
+        out["outdated_note"] = OUTDATED_NOTE
     # A cascade doesn't (re)read data sources -- like the AI builder, that's
     # left to a full run.
     if any(_out_of_memory(b.get("error") or "") for b in blocks):
@@ -210,6 +228,13 @@ def run_outcome(graph: dict[str, Any], target: str | None) -> dict[str, Any]:
     elif any("is not green" in (b.get("error") or "") and "input block" in (b.get("error") or "") for b in blocks):
         out["next"] = "an upstream data source has not been read yet: run the whole pipeline (run without a block), which reads it"
     return out
+
+
+OUTDATED_NOTE = (
+    "these placed library blocks still have the code they were placed with, which is not what their library file "
+    "has now (runs_version and library_version are the version numbers each says): to use the file's code, update "
+    "each with update_block (apply: true), then run again"
+)
 
 
 # A block whose output didn't fit in memory -- stopped by the collect guard
@@ -465,8 +490,8 @@ def get_input_columns(r: Resolver, a: dict[str, Any]) -> Any:
     "check",
     "Reviews the pipeline as the AI builder would: holdout leakage in the wiring (a binning, WoE or model fitted on "
     "rows that include the test/out-of-time sample it is applied to), features fit_binning banded 'suspicious' "
-    "(IV >= 0.5, usually leakage), and decision hints -- what each green block's result means and what to do next "
-    "(event counts, IV screens, Gini, PSI, calibration...). With a block: just that block's hints. Report problems "
+    "(IV >= 0.5: very strong -- leakage if measured after the snapshot date or derived from the outcome), and "
+    "decision hints -- what each green block's result means and what to do next (event counts, IV screens, Gini, PSI, calibration...). With a block: just that block's hints. Report problems "
     "to the user rather than silently working around them.",
     {"block": BLOCK},
 )
@@ -497,6 +522,26 @@ def get_block_guide(r: Resolver, a: dict[str, Any]) -> Any:
 )
 def check_block_file(r: Resolver, a: dict[str, Any]) -> Any:
     return r.target().post("/assistant/check_block_file", {"name": a["name"]}, timeout=300)
+
+
+@tool(
+    "update_block",
+    "Moves a placed library block to its library file's current version. A placed block keeps a copy of the code it "
+    "was placed with, so after you edit its file it runs the old code until updated (get_graph marks it "
+    "\"outdated\"). Without apply, previews the change: the code diff and which params and wires carry over, are "
+    "renamed or are dropped. With apply: true, makes it (one undo step) and returns the block.",
+    {"block": BLOCK, "apply": {"type": "boolean", "description": "Make the update; leave out to preview it."}},
+    ["block"],
+)
+def update_block(r: Resolver, a: dict[str, Any]) -> Any:
+    t = r.target()
+    block = find_block(_graph(t), a["block"])
+    if not block.get("library_block"):
+        raise ToolInputError(f"{block['name']} is a built-in block: only library blocks are updated this way")
+    if not a.get("apply"):
+        return t.get(f"/blocks/{block['id']}/update_preview")
+    result = t.post(f"/blocks/{block['id']}/update")
+    return {"applied": result["applied"], "block": t.get(f"/assistant/blocks/{block['id']}")}
 
 
 @tool(
@@ -690,7 +735,7 @@ def call(resolver: Resolver, name: str, args: dict[str, Any]) -> tuple[Any, bool
 
 
 def build_server(resolver: Resolver) -> Server:
-    server = Server("modelmaker")
+    server = Server("modelmaker", instructions=INSTRUCTIONS)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

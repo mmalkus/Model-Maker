@@ -538,6 +538,9 @@ def _block_out(block_id: str) -> dict[str, Any]:
         "provenance": block.provenance,
         "status": status,
         "last_error": st.last_error if st else None,
+        # Ran inside the last successful streaming query, with no cached
+        # output of its own (see Runner.ran_fused).
+        "ran_fused": _session().runner.ran_fused(block_id),
         "last_successful_read_at": st.last_successful_read_at if st else None,
         "last_attempt_at": st.last_attempt_at if st else None,
         # A crude heartbeat while a block (or a whole fused streaming

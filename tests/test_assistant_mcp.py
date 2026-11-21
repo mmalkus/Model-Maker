@@ -125,12 +125,14 @@ def test_a_real_mcp_client_lists_and_calls_the_tools(backend):
     async def go():
         params = StdioServerParameters(command=sys.executable, args=["-m", "modelmaker.assistant_mcp", "--url", backend])
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            await session.initialize()
+            init = await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
             result = await session.call_tool("get_graph", {})
-            return names, json.loads(result.content[0].text), result.isError
+            return init.instructions, names, json.loads(result.content[0].text), result.isError
 
-    names, graph, is_error = asyncio.run(go())
+    instructions, names, graph, is_error = asyncio.run(go())
+    # The backend's own API is off-limits to the assistant (issue #92).
+    assert instructions == mm.INSTRUCTIONS and "never read that token" in instructions
     assert "run" in names and "open_project" in names
     assert not is_error and "blocks" in graph
 
@@ -184,6 +186,45 @@ def test_an_assistant_writes_and_checks_a_library_block(backend, tmp_path, monke
     block = call(r, "add_block", category="monthly_panel", params={"path": str(csv)})
     assert call(r, "run")["statuses"] == {"green": 1}
     assert [c["name"] for c in call(r, "get_output_summary", block=block["id"])["columns"]] == ["loan_id", "period", "dpd"]
+
+
+def test_an_edited_library_file_is_flagged_on_its_placed_copies(backend, tmp_path, monkeypatch, block_library_dir):
+    # A placed block keeps the code it was placed with: after its file is
+    # edited, the tools say so until update_block moves it (#93).
+    from tests.test_embedding import LAZY_SOURCE
+
+    monkeypatch.chdir(tmp_path)
+    r = mm.Resolver(backend, None, discovery=tmp_path / "none")
+    call(r, "open_project", folder="p", create=True)
+    library = Path(call(r, "get_block_guide")["library_dir"])
+    library.mkdir(parents=True, exist_ok=True)
+    (library / "loans.py").write_text(LAZY_SOURCE)
+    call(r, "check_block_file", name="loans.py")
+    csv = tmp_path / "panel.csv"
+    csv.write_text("loan_id,period,dpd,extra\n1,202001,0,a\n")
+    block = call(r, "add_block", category="monthly_panel", params={"path": str(csv)})
+    assert "outdated" not in block
+
+    v2 = LAZY_SOURCE.replace('"version": 1', '"version": 2').replace('.select("loan_id", "period", "dpd")', '.select("loan_id", "dpd")')
+    v2 = v2.replace('["loan_id", "period", "dpd"]', '["loan_id", "dpd"]')
+    (library / "loans.py").write_text(v2)
+    checked = call(r, "check_block_file", name="loans.py")
+    assert checked["ok"] and [c["block"] for c in checked["placed_copies_outdated"]] == [block["id"]], checked
+    assert "update_block" in checked["next"]
+    placed = next(b for b in call(r, "get_graph")["blocks"] if b["id"] == block["id"])
+    assert placed["outdated"] == {"file": "loans.py", "runs_version": 1, "library_version": 2}
+    ran = call(r, "run")
+    assert [b["id"] for b in ran["outdated_blocks"]] == [block["id"]] and "update_block" in ran["outdated_note"]
+
+    preview = call(r, "update_block", block=block["id"])
+    assert (preview["from_version"], preview["to_version"]) == (1, 2) and '"period"' in preview["code_diff"]
+    updated = call(r, "update_block", block=block["id"], apply=True)
+    assert updated["applied"]["to_version"] == 2 and "outdated" not in updated["block"]
+    assert "outdated_blocks" not in call(r, "run")
+    assert [c["name"] for c in call(r, "get_output_summary", block=block["id"])["columns"]] == ["loan_id", "dpd"]
+
+    result, is_error = mm.call(r, "update_block", {"block": call(r, "add_block", category="filter")["id"]})
+    assert is_error and "built-in" in result["error"]
 
 
 def test_opens_canvases_in_the_editor_the_tools_run_for(backend, tmp_path, monkeypatch):

@@ -558,11 +558,32 @@ def test_guarded_collect_stops_an_output_too_big_for_memory(monkeypatch):
 
     lf = pl.LazyFrame({"a": range(3_000_000)}).with_columns(b=pl.col("a").cast(pl.String))
     monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "5")
-    with pytest.raises(run_worker.OutputTooBig, match="too big to hold in memory"):
+    with pytest.raises(run_worker.OutputTooBig, match="too big to hold in memory") as stopped:
         run_worker._collect_lazy(lf)
+    assert "its 5 MB limit (set by MODELMAKER_COLLECT_LIMIT_MB=5)" in str(stopped.value)
     monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "0")  # turned off
     assert run_worker.collect_limit_bytes() is None
     assert run_worker._collect_lazy(lf).height == 3_000_000
+
+
+def test_the_default_limit_says_what_it_is_based_on(monkeypatch):
+    # 2.1 GB on a 16 GB machine read as "this machine can spare 2.1 GB" (#94).
+    from modelmaker import run_worker
+
+    free, total = run_worker.memory_bytes()  # this machine's, for real
+    if free is not None:  # None on macOS: no /proc/meminfo, no SC_AVPHYS_PAGES
+        assert total and free <= total
+    monkeypatch.delenv(run_worker.COLLECT_LIMIT_ENV, raising=False)
+    monkeypatch.setattr(run_worker, "memory_bytes", lambda: (int(5.3 * 1024**3), 16 * 1024**3))
+    limit, basis = run_worker.collect_limit()
+    assert limit == int(5.3 * 1024**3 * run_worker.COLLECT_FREE_SHARE)
+    assert "40% of the 5.3 GB of memory free when the block started, of 16.0 GB in total" in basis
+    lf = pl.LazyFrame({"a": range(10)})
+    monkeypatch.setattr(run_worker, "memory_bytes", lambda: (100, None))
+    with pytest.raises(run_worker.OutputTooBig, match=r"limit \(40% of the 0 MB of memory free when the block started; other"):
+        run_worker._collect_lazy(lf)
+    monkeypatch.setattr(run_worker, "memory_bytes", lambda: (None, None))
+    assert run_worker.collect_limit() is None and run_worker._collect_lazy(lf).height == 10
 
 
 def test_a_too_big_input_block_ends_red_not_in_a_crash(tmp_path, monkeypatch):

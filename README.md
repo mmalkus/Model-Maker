@@ -348,7 +348,7 @@ Two **Settings → AI builder** switches help small models:
   - **Data:** empty, constant or id-like columns; exclusion rules that drop
     a lot or nothing; failed data-quality rules; samples with too few
     events or a different event rate.
-  - **Features:** candidates, no-signal and likely-leakage features by IV;
+  - **Features:** candidates, no-signal and very strong (possible leakage) features by IV;
     correlated pairs and high VIFs; unstable features; an immature last
     period.
   - **Fits:** wrong-sign (WoE) or insignificant coefficients; a fit that

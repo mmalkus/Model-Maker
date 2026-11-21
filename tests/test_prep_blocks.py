@@ -50,6 +50,61 @@ def test_unstratified_split_is_unchanged():
     assert train.height == 80
 
 
+def test_group_split_keeps_each_id_on_one_side():
+    # A panel: 200 loans x 5 snapshots; 20 loans default in their last year (#99).
+    df = pl.DataFrame(
+        {
+            "loan_id": [i for i in range(200) for _ in range(5)],
+            "year": [y for _ in range(200) for y in range(5)],
+            "y": [int(i < 20 and y == 4) for i in range(200) for y in range(5)],
+        }
+    )
+    train, test = train_test_split(df, 0.25, seed=1, group_col="loan_id")
+    assert set(train["loan_id"]).isdisjoint(set(test["loan_id"]))
+    assert train.height + test.height == 1000 and test["loan_id"].n_unique() == 50
+    assert all(n == 5 for n in test.group_by("loan_id").len()["len"])  # whole histories
+    assert train_test_split(df, 0.25, seed=1, group_col="loan_id")[1].equals(test)  # the seed fixes it
+
+    # Stratified too: each loan by whether it ever defaulted.
+    train, test = train_test_split(df, 0.25, seed=1, stratify_col="y", group_col="loan_id")
+    assert set(train["loan_id"]).isdisjoint(set(test["loan_id"]))
+    assert test.filter(pl.col("y") == 1)["loan_id"].n_unique() == 5  # 25% of the 20 defaulters
+    with pytest.raises(ValueError, match="group_col 'nope'"):
+        train_test_split(df, group_col="nope")
+    with pytest.raises(ValueError, match="stratify_col 'nope'"):
+        train_test_split(df, stratify_col="nope", group_col="loan_id")
+    with pytest.raises(ValueError, match="stratify_col 'nope'"):
+        train_test_split(df, stratify_col="nope")
+
+
+def test_group_split_keeps_row_order_null_ids_and_text_strata():
+    # Text IDs, some null; a text segment to stratify by. Rows interleaved.
+    ids = [f"L{i:03d}" if i % 10 else None for i in range(100)]
+    df = pl.DataFrame(
+        {
+            "loan_id": [ids[i] for _ in range(3) for i in range(100)],
+            "seg": [("retail" if i < 60 else "sme") for _ in range(3) for i in range(100)],
+            "row": list(range(300)),
+        }
+    )
+    for kwargs in ({}, {"stratify_col": "seg"}):
+        train, test = train_test_split(df, 0.3, seed=3, group_col="loan_id", **kwargs)
+        assert train.height + test.height == 300
+        # Both sides keep the input's row order.
+        assert train["row"].is_sorted() and test["row"].is_sorted()
+        # Every null-ID row lands on the same side: null is one ID.
+        null_sides = {side for side, part in (("train", train), ("test", test)) if part["loan_id"].null_count()}
+        assert len(null_sides) == 1
+        assert train["loan_id"].null_count() + test["loan_id"].null_count() == 30
+        named = set(train["loan_id"].drop_nulls()), set(test["loan_id"].drop_nulls())
+        assert named[0].isdisjoint(named[1])
+    # Stratified by text: 30% of each segment's IDs (rounded down). retail has
+    # 54 named IDs plus the null ID (its first row is retail) = 55 -> 16; sme
+    # has 36 -> 10. n_unique counts null as one value.
+    _, test = train_test_split(df, 0.3, seed=3, stratify_col="seg", group_col="loan_id")
+    assert test["loan_id"].n_unique() == 26
+
+
 def test_derive_columns_adds_features_and_keeps_replaced_roles():
     df = pl.DataFrame({"bal": [50.0, 0.0], "lim": [100.0, 0.0], "age": [25, 40]})
     out = derive_columns(

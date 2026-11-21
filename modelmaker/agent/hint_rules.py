@@ -57,13 +57,15 @@ def _split_hints(outputs: dict[str, Any]) -> list[str]:
         if shared:
             hints.append(
                 f"{shared:,} {key} values have rows in both train and test -- the data has several rows per "
-                f"{key} (a panel), so a random row split leaks: test isn't unseen. Split by time "
-                "(time_split), or derive a per-id split flag and filter on it."
+                f"{key} (a panel), so a random row split leaks: test isn't unseen. Set group_col to "
+                f"{key} so each id stays on one side, or split by time (time_split)."
             )
     thin = [f"{p} has {ev}" for p, (_, _, ev) in samples.items() if ev is not None and ev < h.MIN_EVENTS]
     if thin:
         hints.append(f"Few events (< {h.MIN_EVENTS}): {h.names(thin)} -- metrics on it will be noisy.")
-    if len(samples) == 2:
+    # Only a random split (train/test) is meant to share the target rate: an
+    # out-of-time sample may differ, and time_split has no stratify_col (#98).
+    if len(samples) == 2 and set(samples) == {"train", "test"}:
         (a, (_, ra, _)), (b, (_, rb, _)) = samples.items()
         if ra and abs(rb - ra) / abs(ra) > h.SPLIT_RATE_GAP:
             hints.append(
