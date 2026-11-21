@@ -57,8 +57,8 @@ def _split_hints(outputs: dict[str, Any]) -> list[str]:
         if shared:
             hints.append(
                 f"{shared:,} {key} values have rows in both train and test -- the data has several rows per "
-                f"{key} (a panel), so a random row split leaks: test isn't unseen. Split by time "
-                "(time_split), or derive a per-id split flag and filter on it."
+                f"{key} (a panel), so a random row split leaks: test isn't unseen. Set group_col to "
+                f"{key} so each id stays on one side, or split by time (time_split)."
             )
     thin = [f"{p} has {ev}" for p, (_, _, ev) in samples.items() if ev is not None and ev < h.MIN_EVENTS]
     if thin:
