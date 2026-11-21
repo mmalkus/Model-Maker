@@ -14,6 +14,14 @@ export function MemoryDialog({ pf, mode, onChoose }: { pf: PreflightOut; mode: R
   const streaming = mode === 'run_all_streaming'
   const canStream = !streaming && pf.blocks.every((b) => b.can_stream)
   const whole = [...new Set(pf.blocks.flatMap((b) => b.whole_consumers))]
+  // Streaming is a different run than the one asked for, except from Run all.
+  const streamNote =
+    mode === 'run_block' || mode === 'run_to_here'
+      ? ' It runs the whole graph, not just this block.'
+      : mode === 'force_run_all'
+        ? ' It re-runs only the blocks that aren’t current, rather than forcing every one.'
+        : ''
+  const streamLabel = mode === 'run_all' ? 'Run all (streaming)' : 'Run all (streaming) instead'
   const first = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     first.current?.focus()
@@ -50,6 +58,7 @@ export function MemoryDialog({ pf, mode, onChoose }: { pf: PreflightOut; mode: R
         {canStream && (
           <p style={{ margin: '0 0 8px' }}>
             <strong>Run all (streaming)</strong> reads them in batches through the blocks they feed, without loading them whole.
+            {streamNote}
           </p>
         )}
         {!canStream && whole.length > 0 && (
@@ -61,7 +70,7 @@ export function MemoryDialog({ pf, mode, onChoose }: { pf: PreflightOut; mode: R
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 12 }}>
           {canStream && (
             <button ref={first} className="brand-primary" onClick={() => onChoose('stream')}>
-              Run all (streaming)
+              {streamLabel}
             </button>
           )}
           <button ref={canStream ? undefined : first} className={canStream ? undefined : 'brand-primary'} onClick={() => onChoose('sample')}>

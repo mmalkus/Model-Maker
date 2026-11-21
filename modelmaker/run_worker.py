@@ -70,7 +70,10 @@ def frame_bytes(df: Any) -> int:
     """A polars DataFrame's in-memory size: polars' estimated_size() plus
     the 16-byte view per String/Binary value it leaves out (see
     STRING_VIEW_BYTES), nested ones (in List, Array and Struct columns)
-    included. Errs high by up to 12 bytes per short value, never low."""
+    included. Errs high by up to 12 bytes per short value, never low.
+    Checked on polars 1.44 and 2.1; should a later polars count the views
+    itself, this double-counts (still safe) and the `>= 3 *
+    estimated_size()` assertion in tests/test_large_data.py fails first."""
     return df.estimated_size() + STRING_VIEW_BYTES * sum(_view_count(s) for s in df.get_columns())
 
 

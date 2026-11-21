@@ -123,9 +123,11 @@ def test_flags_a_source_over_the_limit(tmp_path, monkeypatch):
     assert out["limit"] == "1 MB" and "MODELMAKER_COLLECT_LIMIT_MB=1" in out["limit_basis"]
     # A streaming run fuses it into the lazy filter: nothing to flag.
     assert preflight.preflight(graph, runner, "run_all_streaming")["blocks"] == []
-    # Run block on the filter runs only the filter.
+    # Run block on the filter runs only the filter, and Run to here never
+    # reads the sources upstream (the filter is left blocked instead).
     assert preflight.preflight(graph, runner, "run_block", "c")["blocks"] == []
-    assert [b["id"] for b in preflight.preflight(graph, runner, "run_to_here", "c")["blocks"]] == ["r"]
+    assert preflight.preflight(graph, runner, "run_to_here", "c")["blocks"] == []
+    assert [b["id"] for b in preflight.preflight(graph, runner, "run_to_here", "r")["blocks"]] == ["r"]
 
 
 def test_streaming_still_flags_a_source_taken_whole(tmp_path, monkeypatch):
@@ -159,7 +161,37 @@ def test_run_all_skips_a_source_already_current(tmp_path, monkeypatch):
     monkeypatch.setenv(run_worker.COLLECT_LIMIT_ENV, "1")
     monkeypatch.setattr(preflight, "estimate_block", lambda b: preflight.SizeEstimate(10**7, 5 * 1024**2, True))
     assert preflight.preflight(graph, runner, "run_all")["blocks"] == []
-    assert len(preflight.preflight(graph, runner, "force_run_all")["blocks"]) == 1
+    # Force run all forces only the blocks after the sources: a current one isn't re-read.
+    assert preflight.preflight(graph, runner, "force_run_all")["blocks"] == []
+
+
+@pytest.mark.parametrize("state", ["unread", "current", "stale"])
+@pytest.mark.parametrize("mode", ["run_all", "force_run_all", "run_all_streaming"])
+def test_scope_is_exactly_the_sources_the_run_reads(tmp_path, monkeypatch, mode, state):
+    graph, runner = _graph(tmp_path, "filter")
+    if state != "unread":
+        assert runner.run_block("r") == "green"
+    if state == "stale":
+        other = tmp_path / "other.parquet"
+        pl.DataFrame({"id": [1], "code": ["01"]}).write_parquet(other)
+        graph.blocks["r"].params["path"] = str(other)
+    expected = preflight._in_scope(graph, runner, mode, None)
+    read: list[str] = []
+    real_run_block, real_group = runner.run_block, runner._run_fused_group
+
+    def run_block(bid, plan=None):
+        if graph.blocks[bid].block_type == "input":
+            read.append(bid)
+        return real_run_block(bid, plan)
+
+    def run_group(group, plan, report):
+        read.extend(b for b in group.members if graph.blocks[b].block_type == "input")
+        return real_group(group, plan, report)
+
+    monkeypatch.setattr(runner, "run_block", run_block)
+    monkeypatch.setattr(runner, "_run_fused_group", run_group)
+    getattr(runner, mode)()
+    assert expected == read, (mode, state)
 
 
 # ---- advice on a block stopped for memory -------------------------------------------
@@ -171,6 +203,11 @@ def test_out_of_memory_errors_are_recognized():
         "RuntimeError: worker process was killed by the system (signal 9) -- likely out of memory: ..."
     )
     assert not preflight.is_out_of_memory_error("ValueError: no column named x")
+    # Any other crash: its message mentions memory for the assistants, but
+    # streaming or sampling wouldn't fix a segfault.
+    assert not preflight.is_out_of_memory_error(
+        "RuntimeError: worker process exited unexpectedly (code -11) -- likely out of memory or a crash. ..."
+    )
     assert not preflight.is_out_of_memory_error(None)
 
 

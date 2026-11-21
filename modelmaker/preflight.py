@@ -73,27 +73,36 @@ def memory_advice(graph: Graph, block_id: str) -> dict[str, Any]:
     }
 
 
+# The start of WorkerProcess.crash_message for a worker killed with SIGKILL.
+KILLED_PHRASE = "killed by the system (signal 9)"
+
+
 def is_out_of_memory_error(error: str | None) -> bool:
-    """The errors the app shows memory advice for: the collect guard's,
-    and a worker the system killed (see WorkerProcess.crash_message)."""
+    """The errors the app shows memory advice for: the collect guard's, and
+    a worker the system killed (see WorkerProcess.crash_message). Not any
+    other crash: its message also says "likely out of memory", for the
+    assistants, but a segfault isn't fixed by streaming or sampling."""
     from .run_worker import TOO_BIG_PHRASE
 
-    return bool(error) and (TOO_BIG_PHRASE in error or "likely out of memory" in error)
+    return bool(error) and (TOO_BIG_PHRASE in error or KILLED_PHRASE in error)
 
 
 def _in_scope(graph: Graph, runner: Any, mode: RunMode, block_id: str | None) -> list[str]:
-    """The input blocks the run will execute: every one for Force run all;
-    the not-yet-current ones (status other than green) for the others,
-    within `block_id`'s ancestry for Run to here."""
+    """The input blocks the run will read, asked of the runner itself so
+    the two can't drift apart: Run all and Force run all read a source that
+    was never read or whose settings changed (Runner.input_needs_read --
+    Force run all forces only the blocks after the sources); a streaming run
+    reads the ones Runner._streaming_to_run picks; Run block reads its block.
+    Run to here never reads the sources upstream (an unread one leaves the
+    block blocked), only the block itself when it is one."""
     inputs = [b for b, blk in graph.blocks.items() if blk.block_type == "input"]
-    if mode == "force_run_all":
-        return inputs
-    if mode == "run_block":
+    if mode in ("run_block", "run_to_here"):
         return [block_id] if block_id in inputs else []
-    if mode == "run_to_here":
-        scope = graph.ancestors([block_id]) if block_id else set()
-        inputs = [b for b in inputs if b in scope]
-    return [b for b in inputs if runner.status(b) != "green"]
+    plan = runner.pin()
+    if mode == "run_all_streaming":
+        to_run = set(runner._streaming_to_run(plan)[0])
+        return [b for b in inputs if b in to_run]
+    return [b for b in inputs if runner.input_needs_read(b, plan)]
 
 
 def preflight(graph: Graph, runner: Any, mode: RunMode, block_id: str | None = None) -> dict[str, Any]:
@@ -234,7 +243,10 @@ def _separator(sep: Any) -> str:
 
 def _text_size(f: str) -> tuple[int, str | None] | None:
     """(bytes of text the file holds, the zip member to sample) -- a zip's
-    from its directory; None for a .gz, whose size can't be told."""
+    from its directory; None for a .gz, whose size can't be told. Only the
+    first member is sampled: a zip whose members differ in layout (an
+    acquisition file beside a performance file) gets a rougher estimate --
+    a hint either way, never a reason a run can't start."""
     import zipfile
 
     low = f.lower()
