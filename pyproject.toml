@@ -24,8 +24,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    # 2.0+: staging zips needs its IO-source plugin, and CI tests only 2.x.
-    "polars>=2.0.0",
+    "polars>=1.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "matplotlib>=3.8.0",
