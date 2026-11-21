@@ -40,7 +40,7 @@ BLOCKS = {
         "capabilities": ["filesystem"],
         "use_instead": "read_dataset",
         "display_name": "Stage CSV as Parquet",
-        "version": 1,
+        "version": 2,
         "block_type": "input",
         "inputs": [],
         "outputs": [{"name": "out", "lazy": True}],
@@ -65,8 +65,13 @@ BLOCKS = {
             },
             {
                 "key": "columns",
-                "label": "Columns to keep (comma-separated; optional, default all -- a slim stage of a wide file)",
+                "label": "Columns to keep (comma-separated; optional, default all -- a slim stage of a wide file; or by position, 1-based: 2:loan_id, 3:period -- unkept fields need no names)",
                 "kind": "text",
+            },
+            {
+                "key": "workers",
+                "label": "Files staged at once (0 = as many as the machine allows, up to 4)",
+                "kind": "number",
             },
             {
                 "key": "compression",
@@ -233,7 +238,7 @@ BLOCKS = {
     },
     "train_test_split": {
         "display_name": "Train/test split",
-        "version": 1,
+        "version": 2,
         "block_type": "standard",
         "tags": ["sampling"],
         "inputs": [{"name": "df"}],
@@ -244,6 +249,11 @@ BLOCKS = {
             {
                 "key": "stratify_col",
                 "label": "Stratify by (optional, e.g. the default flag)",
+                "kind": "column",
+            },
+            {
+                "key": "group_col",
+                "label": "Keep each ID on one side (optional, e.g. loan_id for panel data)",
                 "kind": "column",
             },
         ],
@@ -475,6 +485,7 @@ def stage_csv_parquet(
     compression: str = "zstd",
     parquet_dir: str = "",
     columns: str = "",
+    workers: int = 0,
 ) -> pl.LazyFrame:
     """Converts large delimited text files to Parquet once, then reads the
     Parquet on the `out` port; no inputs. The way to bring a big CSV source
@@ -483,7 +494,14 @@ def stage_csv_parquet(
     file in it, e.g. a set of quarterly zips) or a glob ("data/*.zip");
     each file, and each member of a zip, becomes its own Parquet part.
     `columns` (comma-separated, after `column_names` naming) keeps only
-    those columns -- stage a slim table of a wide file. A zip member or gzipped file is decompressed
+    those columns -- stage a slim table of a wide file. For a file without
+    a header, entries written `position:name` ("2:loan_id, 3:period",
+    1-based) pick fields by position and name them, so no `column_names`
+    has to list every field. (With a header, `columns` are always header
+    names, colons and all.) `workers` is how many files (or zip members)
+    are staged at once: 0 picks as many as the free memory allows at
+    about 2 GB each, up to 4; 1 stages one by one. A zip member or
+    gzipped file is decompressed
     straight from the archive in blocks of about 8 MB, each parsed and
     streamed into the Parquet: nothing is unpacked to disk and neither the
     file nor the archive is ever held in memory whole. `separator`,
@@ -510,6 +528,9 @@ def stage_csv_parquet(
     files = _stage_files(path)
     names = [n.strip() for n in column_names.split(",") if n.strip()] if column_names else None
     keep = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+    positions = None
+    if keep and not has_header and any(_stage_is_position(c) for c in keep):
+        positions, keep = _stage_positional(keep, names)
     options = {
         "separator": separator,
         "has_header": bool(has_header),
@@ -519,6 +540,8 @@ def stage_csv_parquet(
     }
     if keep:
         options["columns"] = keep  # only when set, so stages made before it existed stay current
+    if positions:
+        options["positions"] = positions
     target = parquet_dir or _stage_default_dir(path)
     os.makedirs(target, exist_ok=True)
     manifest_path = os.path.join(target, _STAGE_MANIFEST)
@@ -542,19 +565,58 @@ def stage_csv_parquet(
     # part built infers it.
     schema = pl.read_parquet_schema(os.path.join(target, current[0])) if current else None
     parts: dict[str, dict] = {}
-    for u in units:
-        entry = {k: u[k] for k in ("source", "hash", "size", "mtime_ns") if k in u}
-        if u["part"] in current:
-            parts[u["part"]] = entry
-            continue
-        out = os.path.join(target, u["part"])
-        _stage_build(u["file"], u, out, options, schema)
-        if schema is None:
-            schema = pl.read_parquet_schema(out)
-        parts[u["part"]] = entry
+
+    def _entry(u: dict) -> dict:
+        return {k: u[k] for k in ("source", "hash", "size", "mtime_ns") if k in u}
+
+    def _done(u: dict) -> None:
+        parts[u["part"]] = _entry(u)
         # Saved after every part, so an interrupted run keeps what it did.
         manifest["parts"] = {**{p: e for p, e in old_parts.items() if p in current}, **parts}
         _stage_write_manifest(manifest_path, manifest)
+
+    for u in units:
+        if u["part"] in current:
+            parts[u["part"]] = _entry(u)
+    todo = [u for u in units if u["part"] not in current]
+    if todo and schema is None:
+        # The first part built infers the schema every other part follows.
+        first = todo.pop(0)
+        _stage_build(first["file"], first, os.path.join(target, first["part"]), options, None)
+        schema = pl.read_parquet_schema(os.path.join(target, first["part"]))
+        _done(first)
+    n = _stage_worker_count(workers, len(todo))
+    if n <= 1:
+        for u in todo:
+            _stage_build(u["file"], u, os.path.join(target, u["part"]), options, schema)
+            _done(u)
+    else:
+        # Threads: decompressing, parsing and writing Parquet all run
+        # outside the GIL (zlib, polars), so files stage side by side.
+        from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = {
+                pool.submit(_stage_build, u["file"], u, os.path.join(target, u["part"]), options, schema): u for u in todo
+            }
+            pending = set(futures)
+            while pending:
+                finished, pending = wait(pending, return_when=FIRST_EXCEPTION)
+                error = next((f.exception() for f in finished if f.exception() is not None), None)
+                if error is not None:
+                    # Parts not started are dropped. A build already running
+                    # can't be stopped: wait for it and record it if it
+                    # succeeds, so the next run doesn't rebuild it and the
+                    # manifest lists every part left on disk.
+                    for other in pending:
+                        other.cancel()
+                    finished |= wait(pending)[0]
+                    pending = set()
+                for f in finished:
+                    if not f.cancelled() and f.exception() is None:
+                        _done(futures[f])
+                if error is not None:
+                    raise error
     for stale in previous - set(parts):
         try:
             os.remove(os.path.join(target, stale))
@@ -563,6 +625,54 @@ def stage_csv_parquet(
     manifest["parts"] = parts
     _stage_write_manifest(manifest_path, manifest)
     return pl.scan_parquet([os.path.join(target, u["part"]) for u in units])
+
+
+def _stage_is_position(entry: str) -> bool:
+    """Whether a `columns` entry is written position:name ("2:loan_id")."""
+    pos, sep, _ = entry.partition(":")
+    return bool(sep) and pos.strip().isdigit()
+
+
+def _stage_positional(keep: list[str], names: list[str] | None) -> tuple[list[int], list[str]]:
+    """`columns` given by position ("2:loan_id") for a header-less file:
+    (the 1-based positions picked, the names they get), in file order. The fields are read by position (pl.nth), so the fields not
+    kept need no names -- and polars' own default names, which differ
+    between versions, never matter."""
+    if names:
+        raise ValueError("columns given by position (2:loan_id) name the fields themselves: leave column_names empty")
+    picked: dict[int, str] = {}
+    for entry in keep:
+        pos, sep, name = entry.partition(":")
+        if not sep or not pos.strip().isdigit() or int(pos) < 1 or not name.strip():
+            raise ValueError(f"columns: {entry!r} -- give every column by position as position:name, e.g. 2:loan_id (1-based)")
+        if int(pos) in picked:
+            raise ValueError(f"columns: position {int(pos)} is picked twice")
+        picked[int(pos)] = name.strip()
+    if len(set(picked.values())) != len(picked):
+        raise ValueError("columns: two positions have the same name")
+    order = sorted(picked)
+    return order, [picked[p] for p in order]
+
+
+def _stage_worker_count(asked: int, todo: int) -> int:
+    """How many files stage at once: `asked`, or with 0 as many as the free
+    memory allows (about 2 GB each, leaving room for the rest), at most 4."""
+    import os
+
+    if todo <= 1:
+        return 1
+    if asked and int(asked) > 0:
+        return min(int(asked), todo)
+    n = min(4, todo, max(1, (os.cpu_count() or 2) // 2))
+    try:
+        from modelmaker.run_worker import available_memory_bytes
+
+        free = available_memory_bytes()
+    except ImportError:  # a compiled script run without Model-Maker installed
+        free = None
+    if free is not None:
+        n = min(n, max(1, int(free // (2 * 1024**3))))
+    return n
 
 
 def _stage_files(path: str) -> list[str]:
@@ -690,7 +800,16 @@ def _stage_build(path: str, unit: dict, out: str, options: dict, schema) -> None
             lf = _stage_compressed_frame(path, unit, options, schema)
         else:
             lf = pl.scan_csv(path, **_stage_csv_kwargs(options, schema))
-        if options.get("columns"):
+        if options.get("positions"):
+            # By position; a later part is read as text and cast to the
+            # first part's types (see _stage_csv_kwargs).
+            lf = lf.select(
+                [
+                    pl.nth(p - 1).alias(n) if schema is None else pl.nth(p - 1).cast(schema[n]).alias(n)
+                    for p, n in zip(options["positions"], options["columns"])
+                ]
+            )
+        elif options.get("columns"):
             lf = lf.select(options["columns"])
         lf.sink_parquet(out + ".tmp", compression=options["compression"])
         os.replace(out + ".tmp", out)
@@ -720,7 +839,8 @@ def _stage_csv_kwargs(options: dict, schema) -> dict:
         kwargs["infer_schema_length"] = options["infer_schema_rows"]
     else:
         kwargs["infer_schema_length"] = 0
-        kwargs["schema_overrides"] = dict(schema)
+        if not options.get("positions"):  # by position, _stage_build casts after picking the fields
+            kwargs["schema_overrides"] = dict(schema)
     return kwargs
 
 
@@ -995,7 +1115,11 @@ def join(left: pl.DataFrame, right: pl.DataFrame, on: list[str], how: str = "inn
 
 
 def train_test_split(
-    df: pl.DataFrame, test_size: float = 0.2, seed: int = 0, stratify_col: str | None = None
+    df: pl.DataFrame,
+    test_size: float = 0.2,
+    seed: int = 0,
+    stratify_col: str | None = None,
+    group_col: str | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Randomly splits `df`'s rows into two disjoint dataframes on the
     `train` and `test` ports; both keep every column and role. `test_size`
@@ -1007,7 +1131,18 @@ def train_test_split(
     values separately, so `train` and `test` get the same share of each --
     the usual choice for a low default rate, where a plain random split can
     leave the test sample with a noticeably different event rate. Left
-    unset, it's a simple random split."""
+    unset, it's a simple random split.
+
+    `group_col` (e.g. loan_id) keeps all of an ID's rows on one side: the
+    IDs are split, not the rows, so panel data (one row per loan per
+    snapshot) never has the same loan in train and test. `test_size` is
+    then the fraction of IDs. With `stratify_col` too, each ID is
+    stratified by its highest value of that column (for a 0/1 default
+    flag: whether the loan ever defaulted), or its first for text."""
+    if stratify_col:
+        _check_split_column(df, stratify_col, "stratify_col")
+    if group_col:
+        return _split_by_group(df, test_size, seed, stratify_col, group_col)
     if stratify_col is None:
         shuffled = df.sample(fraction=1.0, shuffle=True, seed=seed)
         n_test = int(len(shuffled) * test_size)
@@ -1021,6 +1156,38 @@ def train_test_split(
         tests.append(shuffled.head(n_test))
         trains.append(shuffled.tail(len(shuffled) - n_test))
     return pl.concat(trains), pl.concat(tests)
+
+
+def _split_by_group(
+    df: pl.DataFrame, test_size: float, seed: int, stratify_col: str | None, group_col: str
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """train_test_split with `group_col`: the IDs are shuffled and split
+    (within each stratum), then every row follows its ID. Rows with a null
+    ID count as one ID. Both sides keep the input's row order."""
+    _check_split_column(df, group_col, "group_col")
+    # Each ID as an integer (null -> 0), so the split needs no null-aware
+    # join -- which older polars versions spell differently.
+    gid = pl.col(group_col).rank("dense").fill_null(0).alias("_gid")
+    work = df.select(gid, *([stratify_col] if stratify_col else []))
+    if stratify_col:
+        dtype = df.schema[stratify_col]
+        by_max = dtype.is_numeric() or dtype == pl.Boolean
+        stratum = (pl.col(stratify_col).max() if by_max else pl.col(stratify_col).first()).alias("_stratum")
+        ids = work.group_by("_gid").agg(stratum)
+    else:
+        ids = work.select(pl.col("_gid").unique()).with_columns(_stratum=pl.lit(0))
+    ids = ids.sort("_gid")  # a stable order for the seed
+    test_ids: list[int] = []
+    for _, part in sorted(ids.group_by("_stratum", maintain_order=True), key=lambda kv: str(kv[0])):
+        shuffled = part.sample(fraction=1.0, shuffle=True, seed=seed)
+        test_ids.extend(shuffled.head(int(len(shuffled) * test_size))["_gid"].to_list())
+    in_test = work["_gid"].is_in(pl.Series(test_ids, dtype=work["_gid"].dtype))
+    return df.filter(~in_test), df.filter(in_test)
+
+
+def _check_split_column(df: pl.DataFrame, col: str, param: str) -> None:
+    if col not in df.columns:
+        raise ValueError(f"{param} {col!r} is not a column of the input")
 
 
 def time_split(
