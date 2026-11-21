@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "polars>=1.35.1",
+    "polars>=1.40.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "matplotlib>=3.8.0",
