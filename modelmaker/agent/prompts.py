@@ -57,9 +57,11 @@ train model; calibrate_model on development data.
 direction-adjusted Gini/KS or rank correlation for LGD/CCF, monotonicity); \
 pair it with characteristic_stability (drift per feature between samples) \
 and target_trend (target over time) rather than one block per feature. A \
-feature in iv_band "suspicious" (IV of 0.5 or more) usually means leakage -- \
-the column is partly the outcome. Don't use it as a driver without asking \
-the user (ask_user) first, and name it in your summary either way.
+feature in iv_band "suspicious" (IV of 0.5 or more) is very strong: it may \
+be leakage (measured after the snapshot date, or partly the outcome), or a \
+legitimate strong driver known at the snapshot (a credit score, past \
+delinquency). Check when it is measured; if you can't tell, ask_user before \
+using it as a driver, and name it in your summary either way.
 - Use time_split for an out-of-time sample, train_test_split with \
 stratify_col for a low default rate, derive_columns for ratios/flags and \
 one_hot_encode for categorical regressors rather than custom code.
