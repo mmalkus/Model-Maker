@@ -225,7 +225,11 @@ it in one block: give it the file (`.csv`/`.txt`, a `.gz` of one, or a
 a folder (every such file in it -- a set of quarterly zips, say) or a glob
 (`data/*.zip`), with the same `separator`, `has_header`, `column_names`
 and `infer_schema_rows` as Read CSV, and optionally `columns` to stage
-only the columns the model needs (a slim stage of a wide file). Each file
+only the columns the model needs (a slim stage of a wide file). For a file
+without a header, `columns` can pick fields by position instead
+(`2:loan_id, 3:period`, 1-based), so the fields not kept need no names.
+Several files (or zip members) stage at once: `workers` sets how many, and
+0 (the default) picks as many as the free memory allows, up to 4. Each file
 (each zip member) becomes one Parquet part in a `<name>_parquet` folder
 next to the file or folder (or `parquet_dir`). Use it rather than a
 staging script of your own. A zip member or gzipped file is read straight from the
