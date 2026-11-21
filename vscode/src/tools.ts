@@ -286,6 +286,9 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
       // A run already going (the canvas's, or an earlier call's that timed
       // out): queue behind it rather than fail with "already in progress".
       await waitIdle(ctx, deadline, token)
+      // Cancelled while queued: nothing of this call's has started, and the
+      // run already going isn't ours to stop.
+      if (token.isCancellationRequested) throw new Error("cancelled -- this run hadn't started; the run already going was left running")
       const before = await graph(ctx)
       const target = i.block ? findBlock(before, i.block).id : null
       if (before.running) return stillRunning(before, target, "another run is still going, so this one hasn't started")
@@ -300,7 +303,15 @@ export function registerTools(context: vscode.ExtensionContext, backends: Backen
           refreshed.push(b.name)
         }
       }
-      await ctx.backend.json(i.streaming ? '/run_all_streaming' : target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
+      try {
+        await ctx.backend.json(i.streaming ? '/run_all_streaming' : target ? `/blocks/${target}/run_to_here` : '/run_all', { method: 'POST' })
+      } catch (e) {
+        // A run started between the idle check and this one (the canvas's).
+        if (/already in progress/i.test(String((e as Error)?.message ?? e))) {
+          throw new Error(`${(e as Error).message}: modelmaker_wait_for_run waits for it and returns its outcome; then run again`)
+        }
+        throw e
+      }
       // The canvas polls while it sees a run: let it see this one.
       setTimeout(() => editor.refresh(ctx.folder), 300)
       for (;;) {

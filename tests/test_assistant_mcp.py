@@ -255,6 +255,7 @@ class _FakeTarget:
         self.busy = busy
         self.posted: list[str] = []
         self.folder = None
+        self.refuse: str | None = None
 
     def get(self, endpoint, /, **params):
         if endpoint == "/assistant/graph":
@@ -268,6 +269,8 @@ class _FakeTarget:
 
     def post(self, path, body=None, timeout=60):
         self.posted.append(path)
+        if self.refuse:
+            raise mm.BackendError(self.refuse)
         return {"started": True}
 
 
@@ -299,3 +302,21 @@ def test_wait_for_run_waits_and_run_queues_behind_a_run(monkeypatch):
     monkeypatch.setattr(mm, "RUN_TIMEOUT_SECONDS", 0)
     queued = call(_FakeResolver(t), "run")
     assert queued["still_running"] and not t.posted and "hasn't started" in queued["note"]
+
+
+def test_run_started_in_between_points_to_wait_for_run_and_bad_seconds_are_refused(monkeypatch):
+    monkeypatch.setattr(mm.time, "sleep", lambda s: None)
+    # Idle when checked, but the canvas starts a run before this one posts.
+    t = _FakeTarget(busy=0)
+    t.refuse = "a run is already in progress"
+    result, is_error = mm.call(_FakeResolver(t), "run", {})
+    assert is_error and "already in progress" in result["error"] and "wait_for_run" in result["error"]
+    # Any other refusal passes through as it is.
+    t.refuse = "no project is open"
+    result, is_error = mm.call(_FakeResolver(t), "run", {})
+    assert is_error and result["error"] == "no project is open"
+
+    for bad in (float("nan"), "soon", float("inf")):
+        result, is_error = mm.call(_FakeResolver(_FakeTarget(busy=0)), "wait_for_run", {"seconds": bad})
+        assert is_error and "seconds must be a number" in result["error"]
+    assert mm.call(_FakeResolver(_FakeTarget(busy=0)), "wait_for_run", {"seconds": "5"})[1] is False

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -749,7 +750,13 @@ def _wait_idle(t: Target, deadline: float) -> dict[str, Any]:
 def wait_for_run(r: Resolver, a: dict[str, Any]) -> Any:
     t = r.target()
     asked = a.get("seconds")
-    seconds = min(max(float(RUN_TIMEOUT_SECONDS if asked is None else asked), 0), WAIT_MAX_SECONDS)
+    try:
+        seconds = float(RUN_TIMEOUT_SECONDS if asked is None else asked)
+    except (TypeError, ValueError):
+        seconds = math.nan
+    if not math.isfinite(seconds):  # NaN would wait with no deadline
+        raise ToolInputError(f"seconds must be a number of seconds, got {asked!r}")
+    seconds = min(max(seconds, 0), WAIT_MAX_SECONDS)
     return _finish(t, _wait_idle(t, time.monotonic() + seconds), None)
 
 
